@@ -41,3 +41,10 @@ docs/superpowers/
 src-server/target/
 jean-core/target/
 jean-core/Cargo.lock
+
+# Dante host deploy artifacts
+bin/
+.dante-build/
+.dante-build-prev/
+.dante-build.lock
+
