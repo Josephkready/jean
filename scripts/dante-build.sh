@@ -17,6 +17,10 @@
 #     against its `.sha256` and extracted; whenever `jean-core/` or `src-server/`
 #     carries fork modifications (or `JEAN_FORCE_CARGO_BUILD=1`), `cargo build --release`
 #     compiles `src-server` from source.
+#
+# Environment overrides:
+#   JEAN_FORCE_CARGO_BUILD=1  force a source build instead of the prebuilt asset (default 0)
+#   JEAN_UPSTREAM_REPO        upstream GitHub repo for prebuilt release assets (default coollabsio/jean)
 
 set -euo pipefail
 
@@ -37,10 +41,55 @@ compute_rust_hash() {
     {
       git rev-parse HEAD:jean-core HEAD:src-server 2>/dev/null || true
       git status --porcelain -- jean-core src-server 2>/dev/null || true
+      git diff HEAD -- jean-core src-server 2>/dev/null || true
+      git ls-files --others --exclude-standard -z -- jean-core src-server 2>/dev/null | xargs -0 -r sha256sum 2>/dev/null || true
     } | sha256sum | awk '{print $1}'
   else
     find jean-core src-server -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
   fi
+}
+
+swap_staged_dist() {
+  mkdir -p "$ROOT/dist" "$BACKUP"
+  if python3 - "$STAGE/dist" "$ROOT/dist" <<'PY' 2>/dev/null; then
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.renameat2.argtypes = [
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_uint,
+]
+libc.renameat2.restype = ctypes.c_int
+AT_FDCWD = -100
+RENAME_EXCHANGE = 2
+rc = libc.renameat2(
+    AT_FDCWD,
+    os.fsencode(sys.argv[1]),
+    AT_FDCWD,
+    os.fsencode(sys.argv[2]),
+    RENAME_EXCHANGE,
+)
+if rc != 0:
+    err = ctypes.get_errno()
+    raise OSError(err, os.strerror(err))
+PY
+    mv "$STAGE/dist" "$BACKUP/dist"
+    rm -rf "$BACKUP"
+    return 0
+  fi
+
+  if [ -d "$ROOT/dist" ]; then
+    mv "$ROOT/dist" "$BACKUP/dist"
+  fi
+  if ! mv "$STAGE/dist" "$ROOT/dist"; then
+    if [ -d "$BACKUP/dist" ]; then
+      mv "$BACKUP/dist" "$ROOT/dist" || true
+    fi
+    die "failed to move staged dist/ into place; rolled back"
+  fi
+  rm -rf "$BACKUP"
 }
 
 rust_matches_upstream_tag() {
@@ -73,12 +122,30 @@ download_prebuilt_server() {
     return 1
   fi
 
-  tar -xzf "${tmp_dir}/${tarball_name}" -C "$tmp_dir"
+  mkdir -p "${tmp_dir}/extracted"
+  if ! tar -xzf "${tmp_dir}/${tarball_name}" -C "${tmp_dir}/extracted"; then
+    log "tar extraction failed for ${tarball_name}"
+    return 1
+  fi
   local extracted
-  extracted="$(find "$tmp_dir" -type f \( -name 'jean-server' -o -name 'jean-server-linux-*' \) | head -n1 || true)"
-  [ -n "$extracted" ] || return 1
+  extracted="$(find "${tmp_dir}/extracted" -type f \( -name 'jean-server' -o -name 'jean-server-linux-*' \) | head -n1 || true)"
+  if [ -z "$extracted" ]; then
+    log "no jean-server binary found in ${tarball_name}"
+    return 1
+  fi
   cp "$extracted" "$out_bin"
   chmod 755 "$out_bin"
+}
+
+verify_server_binary() {
+  local bin_path="$1"
+  [ -x "$bin_path" ] || return 1
+  # jean-server ignores unknown flags like --version and starts the server;
+  # passing `--port invalid` invokes main() -> parse_cli_args() and exits 1
+  # immediately after printing `--port requires a valid port number (1-65535)`.
+  local probe_out
+  probe_out="$("$bin_path" --port invalid 2>&1 || true)"
+  grep -q "requires a valid port number" <<<"$probe_out"
 }
 
 build_server_from_source() {
@@ -141,24 +208,14 @@ main() {
   [ -s "$STAGE/dist/jean-build.json" ] || die "staged frontend build missing jean-build.json"
 
   log "swapping staged dist/ into place"
-  mkdir -p "$BACKUP"
-  if [ -d "$ROOT/dist" ]; then
-    mv "$ROOT/dist" "$BACKUP/dist"
-  fi
-  if ! mv "$STAGE/dist" "$ROOT/dist"; then
-    if [ -d "$BACKUP/dist" ]; then
-      mv "$BACKUP/dist" "$ROOT/dist" || true
-    fi
-    die "failed to move staged dist/ into place; rolled back"
-  fi
-  rm -rf "$BACKUP"
+  swap_staged_dist
 
   mkdir -p "$ROOT/bin"
   local rust_hash cached_hash
   rust_hash="$(compute_rust_hash)"
   cached_hash="$(cat "$ROOT/bin/.rust-hash" 2>/dev/null || true)"
 
-  if [ "${JEAN_FORCE_CARGO_BUILD:-0}" != "1" ] && [ -x "$ROOT/bin/jean-server" ] && [ "$rust_hash" = "$cached_hash" ]; then
+  if [ "${JEAN_FORCE_CARGO_BUILD:-0}" != "1" ] && verify_server_binary "$ROOT/bin/jean-server" && [ "$rust_hash" = "$cached_hash" ]; then
     log "bin/jean-server is up to date (rust hash ${rust_hash:0:12})"
   else
     local staged_bin="$STAGE/jean-server"
@@ -171,7 +228,7 @@ main() {
       build_server_from_source "$staged_bin"
     fi
 
-    "$staged_bin" --version >/dev/null 2>&1 || [ -x "$staged_bin" ] || die "staged jean-server binary is not runnable"
+    verify_server_binary "$staged_bin" || die "staged jean-server binary is not runnable (--port invalid CLI probe failed)"
     mv "$staged_bin" "$ROOT/bin/jean-server"
     printf '%s\n' "$rust_hash" >"$ROOT/bin/.rust-hash"
     log "installed bin/jean-server (rust hash ${rust_hash:0:12})"

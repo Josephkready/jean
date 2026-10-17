@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
@@ -56,6 +64,25 @@ test('compute_rust_hash and rust_matches_upstream_tag detect Rust tree modificat
   assert.notEqual(runHelper('rust_matches_upstream_tag v1.0.12').status, 0)
 })
 
+test('compute_rust_hash changes on every edit to a locally modified Rust file', t => {
+  const dir = createTempRepo()
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+
+  const runHelper = cmd =>
+    spawnSync(
+      'bash',
+      ['-c', `source ./scripts/dante-build.sh && ${cmd}`],
+      { cwd: dir, encoding: 'utf8' }
+    )
+
+  writeFileSync(join(dir, 'jean-core/src/lib.rs'), 'pub fn b() {}\n')
+  const h1 = runHelper('compute_rust_hash').stdout.trim()
+  writeFileSync(join(dir, 'jean-core/src/lib.rs'), 'pub fn c() {}\n')
+  const h2 = runHelper('compute_rust_hash').stdout.trim()
+  assert.match(h2, /^[0-9a-f]{64}$/)
+  assert.notEqual(h1, h2)
+})
+
 test('dante-build refuses to clobber a non-empty .dante-build-prev backup directory', t => {
   const dir = createTempRepo()
   t.after(() => rmSync(dir, { recursive: true, force: true }))
@@ -69,4 +96,28 @@ test('dante-build refuses to clobber a non-empty .dante-build-prev backup direct
   })
   assert.notEqual(res.status, 0)
   assert.match(res.stderr, /a previous run left builds in \.dante-build-prev/)
+})
+
+test('swap_staged_dist atomically exchanges staged dist with live dist and cleans backup', t => {
+  const dir = createTempRepo()
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+
+  mkdirSync(join(dir, '.dante-build/dist'), { recursive: true })
+  writeFileSync(join(dir, '.dante-build/dist/index.html'), 'v1')
+
+  const runSwap = () =>
+    spawnSync('bash', ['-c', 'source ./scripts/dante-build.sh && swap_staged_dist'], {
+      cwd: dir,
+      encoding: 'utf8',
+    })
+
+  assert.equal(runSwap().status, 0)
+  assert.equal(readFileSync(join(dir, 'dist/index.html'), 'utf8'), 'v1')
+  assert.equal(existsSync(join(dir, '.dante-build-prev')), false)
+
+  mkdirSync(join(dir, '.dante-build/dist'), { recursive: true })
+  writeFileSync(join(dir, '.dante-build/dist/index.html'), 'v2')
+  assert.equal(runSwap().status, 0)
+  assert.equal(readFileSync(join(dir, 'dist/index.html'), 'utf8'), 'v2')
+  assert.equal(existsSync(join(dir, '.dante-build-prev')), false)
 })
