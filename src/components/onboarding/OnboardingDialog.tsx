@@ -262,6 +262,7 @@ function OnboardingDialogContent({
   const allLoading = aiLoading || flows.gh.statusLoading || flows.gh.authLoading
   const readyBackends = AI_BACKENDS.filter(b => flows[b].ready)
   const ghReady = flows.gh.ready
+  const glabReady = flows.glab.ready
 
   const goToBackends = useCallback(
     (opts?: { replace?: boolean }) => {
@@ -308,7 +309,8 @@ function OnboardingDialogContent({
       return
     }
 
-    const allReady = ghReady && readyBackends.length > 0
+    // At least one AI backend is enough; GitHub CLI is optional.
+    const allReady = readyBackends.length > 0
     const dismiss = () =>
       useUIStore.setState({
         onboardingOpen: false,
@@ -350,14 +352,14 @@ function OnboardingDialogContent({
   useEffect(() => {
     if (!pendingRemoteCheck || allLoading) return
     setPendingRemoteCheck(false)
-    if (ghReady && readyBackends.length > 0) {
+    if (readyBackends.length > 0) {
       dbg('remote ready → complete')
       setSelectedBackends(readyBackends)
       setStep('complete', { replace: true })
       return
     }
     setNeedsPreselect(true)
-  }, [pendingRemoteCheck, allLoading, ghReady, readyBackends, setStep])
+  }, [pendingRemoteCheck, allLoading, readyBackends, setStep])
 
   // --- Handlers ------------------------------------------------------------
   const handleBackendToggle = useCallback(
@@ -547,8 +549,8 @@ function OnboardingDialogContent({
         return {
           title: 'Setting up',
           description: serverName
-            ? `On ${serverName}. GitHub CLI is required.`
-            : 'GitHub CLI is required.',
+            ? `On ${serverName}. GitHub CLI is optional. GitLab CLI is optional.`
+            : 'GitHub CLI is optional. GitLab CLI is optional.',
         }
       case 'complete':
         return {
@@ -578,13 +580,13 @@ function OnboardingDialogContent({
   const missingPrereqs = prerequisitesMissing(prerequisites)
   const backendsBusy = aiLoading || pendingRemoteCheck
   const canFinish =
-    ghReady &&
-    (selectedBackends.some(b => flows[b].ready) ||
-      (selectedBackends.length === 0 && onboardingManuallyTriggered))
+    selectedBackends.some(b => flows[b].ready) ||
+    (selectedBackends.length === 0 && onboardingManuallyTriggered)
   const canGoBack = historyStack.length > 0 && step !== 'complete'
   const readyClis: CliType[] = [
     ...selectedBackends.filter(b => flows[b].ready),
     ...(ghReady ? (['gh'] as const) : []),
+    ...(glabReady ? (['glab'] as const) : []),
   ]
 
   const renderPrerequisites = () => {
