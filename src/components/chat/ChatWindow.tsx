@@ -37,6 +37,8 @@ import {
   GitMerge,
   Layers,
   Loader2,
+  Plus,
+  Square,
 } from '@/components/icons/reicon'
 import {
   useSession,
@@ -2563,19 +2565,22 @@ const ChatWindowContent = memo(function ChatWindowContent({
     return -1
   }, [messages])
 
+  // Simple agent chat uses a single-line pill composer
+  const pillComposer = Boolean(workingLabel)
   const compactView =
-    (preferences?.compact_chat_view_enabled ?? true) || Boolean(workingLabel)
+    (preferences?.compact_chat_view_enabled ?? true) || pillComposer
   const compactHistoryWindow = useMemo(
     () => getCurrentPromptWindow(messages),
     [messages]
   )
   // Keep history expanded for the whole session, so a new prompt or a finished
-  // run does not collapse it again.
+  // run does not collapse it again. Agent chat always shows the full history.
   const [expandedCompactSessionId, setExpandedCompactSessionId] = useState<
     string | null
   >(null)
   const isCompactHistoryExpanded =
-    !!deferredSessionId && expandedCompactSessionId === deferredSessionId
+    Boolean(workingLabel) ||
+    (!!deferredSessionId && expandedCompactSessionId === deferredSessionId)
   const compactExpandAnchorRef = useRef<PrependScrollAnchor | null>(null)
   const compactMessages = useMemo(
     () =>
@@ -3381,6 +3386,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                           {/* Subagents panel - separate section above the chat input */}
                           {!zenMode &&
                             activeAgents.length > 0 &&
+                            !pillComposer &&
                             (dismissedAgentMessageId === null ||
                               activeAgents.some(
                                 agent => agent.status === 'in_progress'
@@ -3429,6 +3435,8 @@ const ChatWindowContent = memo(function ChatWindowContent({
                             onSubmit={handleSubmit}
                             className={cn(
                               'relative overflow-hidden border-t border-border bg-card transition-[background-color,box-shadow] duration-150 sm:rounded-lg sm:border',
+                              pillComposer &&
+                                'mx-2 mb-2 rounded-[28px] border sm:mx-0 sm:mb-0 sm:rounded-[28px]',
                               activeSessionId &&
                                 currentQueuedMessages.length > 0 &&
                                 'sm:rounded-t-none',
@@ -3510,14 +3518,26 @@ const ChatWindowContent = memo(function ChatWindowContent({
                             <div
                               className={cn(
                                 zenMode && 'flex items-center overflow-hidden',
-                                zenMode && 'max-h-20'
+                                zenMode && 'max-h-20',
+                                pillComposer && 'flex items-end gap-2 p-2'
                               )}
                             >
+                              {pillComposer && (
+                                <button
+                                  type="button"
+                                  onClick={handleToolbarAttach}
+                                  aria-label="Attach files"
+                                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+                                >
+                                  <Plus className="h-5 w-5" />
+                                </button>
+                              )}
                               {/* Textarea section */}
                               <div
                                 className={cn(
                                   'px-4 pt-3 pb-2 md:px-6',
-                                  zenMode && 'min-w-0 flex-1'
+                                  zenMode && 'min-w-0 flex-1',
+                                  pillComposer && 'min-w-0 flex-1 p-0 md:px-1'
                                 )}
                               >
                                 <ChatInput
@@ -3556,11 +3576,34 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                   inputRef={inputRef}
                                   installedBackends={installedBackends}
                                   selectedBackend={selectedBackend}
+                                  pill={pillComposer}
                                 />
                               </div>
 
                               {/* Bottom toolbar */}
-                              {zenMode ? (
+                              {pillComposer ? (
+                                isSending && !hasInputValue ? (
+                                  <button
+                                    type="button"
+                                    onClick={handleCancel}
+                                    aria-label="Stop"
+                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90"
+                                  >
+                                    <Square className="h-4 w-4" />
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="submit"
+                                    disabled={
+                                      !hasInputValue && !hasPendingAttachments
+                                    }
+                                    aria-label={isSending ? 'Queue' : 'Send'}
+                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
+                                  >
+                                    <ArrowUp className="h-5 w-5" />
+                                  </button>
+                                )
+                              ) : zenMode ? (
                                 <div className="shrink-0 pr-3">
                                   <SendCancelButton
                                     isSending={isSending}
@@ -3599,7 +3642,6 @@ const ChatWindowContent = memo(function ChatWindowContent({
                               ) : (
                                 <div className={cn(zenMode && 'shrink-0')}>
                                   <ChatToolbar
-                                    minimal={Boolean(workingLabel)}
                                     isSending={isSending}
                                     hasPendingQuestions={hasPendingQuestions}
                                     hasPendingAttachments={

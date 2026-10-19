@@ -92,6 +92,8 @@ interface ChatInputProps {
   onSteerModifierChange?: (active: boolean) => void
   investigateIssuePrompt?: string | null
   investigatePRPrompt?: string | null
+  /** Single-line pill style for the simple agent chat */
+  pill?: boolean
 }
 
 export const ChatInput = memo(function ChatInput({
@@ -117,6 +119,7 @@ export const ChatInput = memo(function ChatInput({
   onSteerModifierChange,
   investigateIssuePrompt,
   investigatePRPrompt,
+  pill = false,
 }: ChatInputProps) {
   const isMobile = useIsMobile()
   const { data: preferences } = usePreferences()
@@ -1418,13 +1421,15 @@ export const ChatInput = memo(function ChatInput({
         data-chat-input
         spellCheck={preferences?.spellcheck_enabled ?? true}
         placeholder={
-          isSending
-            ? executionMode === 'plan'
-              ? 'Plan: Type to queue next message...'
-              : 'Build: Type to queue next message...'
-            : executionMode === 'plan'
-              ? 'Planning: Plan a task, @ files or # issues...'
-              : 'Build: Ask, @ files or # issues...'
+          pill
+            ? 'Message...'
+            : isSending
+              ? executionMode === 'plan'
+                ? 'Plan: Type to queue next message...'
+                : 'Build: Type to queue next message...'
+              : executionMode === 'plan'
+                ? 'Planning: Plan a task, @ files or # issues...'
+                : 'Build: Ask, @ files or # issues...'
         }
         // PERFORMANCE: Uncontrolled input - no value prop
         // Value is managed via valueRef and direct DOM manipulation
@@ -1439,12 +1444,14 @@ export const ChatInput = memo(function ChatInput({
         disabled={false}
         className={cn(
           'min-h-[40px] w-full resize-none overflow-x-hidden overflow-y-auto border-0 dark:bg-transparent p-0 font-mono text-base placeholder:text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-sm',
-          zenMode ? 'h-12 max-h-12' : 'max-h-[30vh]'
+          zenMode ? 'h-12 max-h-12' : 'max-h-[30vh]',
+          pill &&
+            'min-h-0 py-2 font-sans text-base placeholder:text-base md:text-base'
         )}
         rows={1}
         autoFocus={!isMobile}
       />
-      {showHint && !zenMode && (
+      {showHint && !zenMode && !pill && (
         <span className="absolute top-0 right-0 hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground opacity-40">
           <Kbd>{focusChatShortcut}</Kbd>
           <span>to focus</span>

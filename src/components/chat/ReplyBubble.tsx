@@ -1,9 +1,13 @@
 import type { ReactNode } from 'react'
 
-/** Agent chat reply: the same bubble as a user prompt, aligned left. */
+/** Borderless pill bubble shared by agent chat replies and prompts. */
+export const PILL_BUBBLE_CLASS =
+  'min-w-0 break-words [overflow-wrap:anywhere] rounded-[22px] bg-muted px-4 py-2.5 text-foreground'
+
+/** Agent chat reply: a pill bubble, aligned left. */
 export function ReplyBubble({ children }: { children: ReactNode }) {
   return (
-    <div className="w-fit max-w-full min-w-0 break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground sm:max-w-[85%]">
+    <div className={`w-fit max-w-full sm:max-w-[85%] ${PILL_BUBBLE_CLASS}`}>
       {children}
     </div>
   )

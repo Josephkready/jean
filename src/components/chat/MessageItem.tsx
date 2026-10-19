@@ -1,7 +1,7 @@
 import { memo, useCallback, useMemo } from 'react'
 import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
-import { ReplyBubble } from './ReplyBubble'
+import { PILL_BUBBLE_CLASS, ReplyBubble } from './ReplyBubble'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -171,7 +171,7 @@ interface MessageItemProps {
   durationMs?: number | null
   /** Render the assistant reply in a bubble (agent chat) */
   bubble?: boolean
-  /** Hide backend, model, mode, and effort under the user prompt (agent chat) */
+  /** Agent chat: hide backend, model, mode, and effort under the user prompt and show it as a pill */
   hideSettingsBadges?: boolean
 }
 
@@ -1009,7 +1009,14 @@ export const MessageItem = memo(function MessageItem({
     >
       {message.role === 'user' ? (
         <div className="group flex max-w-[85%] min-w-0 flex-col items-end gap-1 sm:max-w-[70%]">
-          <div className="min-w-0 max-w-full break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground">
+          <div
+            className={cn(
+              'max-w-full',
+              hideSettingsBadges
+                ? PILL_BUBBLE_CLASS
+                : 'min-w-0 break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground'
+            )}
+          >
             {messageBoxContent}
             {!zenMode && !hideSettingsBadges && message.model && (
               <div className="mt-1.5">
