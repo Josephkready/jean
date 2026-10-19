@@ -3764,7 +3764,8 @@ pub async fn send_chat_message(
     };
     let thread_message = message_for_backend.clone();
     let thread_backend = effective_backend.clone();
-    let thread_include_recap = include_recap.unwrap_or(true);
+    // Agent sessions get their own recap format in the agent prompt.
+    let thread_include_recap = include_recap.unwrap_or(true) && agent_system_prompt.is_none();
     let thread_codex_search = codex_search_enabled;
 
     // For OpenCode sessions: create a cancel flag so we can signal the blocking HTTP thread.

@@ -580,6 +580,25 @@ const ChatWindowContent = memo(function ChatWindowContent({
     }
   }, [deferredSessionId, session, isSessionSwitching])
 
+  // After a web reload, sessions outside the bootstrap snapshot (e.g. agent
+  // sessions) are marked sending without a start time, so the timer shows 0s.
+  // Seed it from the persisted run start.
+  useEffect(() => {
+    if (!deferredSessionId || !session || isSessionSwitching) return
+    if (session.last_run_status !== 'running' || !session.last_run_started_at)
+      return
+    const store = useChatStore.getState()
+    if (
+      !store.sendingSessionIds[deferredSessionId] ||
+      store.sendStartedAt[deferredSessionId] != null
+    )
+      return
+    store.addSendingSession(
+      deferredSessionId,
+      session.last_run_started_at * 1000
+    )
+  }, [deferredSessionId, session, isSessionSwitching])
+
   const hasReviewResults = useChatStore(state =>
     deferredSessionId ? !!state.reviewResults[deferredSessionId] : false
   )

@@ -654,15 +654,25 @@ function App() {
       const runningSendingIds: Record<string, boolean> = {}
       const runningSendStartedAt: Record<string, number> = {}
       if (data.runningSessions?.length) {
+        const knownStartedAt = useChatStore.getState().sendStartedAt
         for (const sessionId of data.runningSessions) {
           runningSendingIds[sessionId] = true
-          const startedAt = data.sessionsByWorktree
-            ? Object.values(data.sessionsByWorktree)
-                .flatMap(ws => (ws as WorktreeSessions).sessions)
-                .find(session => session.id === sessionId)?.last_run_started_at
-            : undefined
+          // Sessions outside the bootstrapped worktrees (e.g. agent sessions)
+          // are absent from sessionsByWorktree; fall back to the focused
+          // session payload, then to the start time this client already knew.
+          const startedAt =
+            (data.sessionsByWorktree
+              ? Object.values(data.sessionsByWorktree)
+                  .flatMap(ws => (ws as WorktreeSessions).sessions)
+                  .find(session => session.id === sessionId)
+                  ?.last_run_started_at
+              : undefined) ??
+            (data.activeSessions?.[sessionId] as Session | undefined)
+              ?.last_run_started_at
           if (startedAt) {
             runningSendStartedAt[sessionId] = startedAt * 1000
+          } else if (knownStartedAt[sessionId] != null) {
+            runningSendStartedAt[sessionId] = knownStartedAt[sessionId]
           }
         }
       }

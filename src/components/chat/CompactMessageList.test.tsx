@@ -173,7 +173,7 @@ describe('CompactMessageList', () => {
     )
 
     expect(receiveTime).toHaveClass(
-      '[@media(pointer:fine)]:opacity-0',
+      'opacity-0',
       '[@media(pointer:fine)]:group-hover/message:opacity-100'
     )
     expect(receiveTime.closest('[class~="group/message"]')).not.toBeNull()
@@ -216,7 +216,7 @@ describe('CompactMessageList', () => {
     expect(
       screen.getByText('What is your favorite type of bird?')
     ).toBeVisible()
-    expect(receiveTime).toHaveClass('[@media(pointer:fine)]:opacity-0')
+    expect(receiveTime).toHaveClass('opacity-0')
     expect(receiveTime.closest('[class~="group/message"]')).not.toBeNull()
     expect(screen.getByText('4s').parentElement).toContainElement(receiveTime)
   })

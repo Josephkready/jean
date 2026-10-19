@@ -45,8 +45,7 @@ import { ThinkingBlock } from './ThinkingBlock'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { logger } from '@/lib/logger'
-import { MessageReceiveTime } from './MessageReceiveTime'
-import { formatDuration } from './time-utils'
+import { MessageTiming } from './MessageTiming'
 import {
   parseReviewFindings,
   hasReviewFindings,
@@ -495,8 +494,7 @@ export const MessageItem = memo(function MessageItem({
   const durationBadge =
     message.role === 'assistant' && durationMs != null && durationMs > 0 ? (
       <span className="mt-1 block min-h-4 text-xs leading-4 text-muted-foreground/40 tabular-nums font-mono">
-        <span>{formatDuration(durationMs)}</span>
-        <MessageReceiveTime timestamp={message.timestamp} />
+        <MessageTiming durationMs={durationMs} timestamp={message.timestamp} />
       </span>
     ) : null
 
