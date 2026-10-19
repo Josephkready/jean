@@ -41,6 +41,7 @@ import {
   normalizeQuestionMultipleField,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
+import { ReplyBubble } from './ReplyBubble'
 import { getProviderChangeBeforeMessage } from './message-settings-labels'
 import { ProviderChangeSeparator } from './ProviderChangeSeparator'
 import { EditedFilesDisplay } from './EditedFilesDisplay'
@@ -635,13 +636,15 @@ function CompactQuestionMessage({
       {hideToolActivity
         ? hiddenToolsText && (
             <div className="pb-4">
-              <Markdown
-                streaming={false}
-                messageId={message.id}
-                sessionId={sessionId}
-              >
-                {hiddenToolsText}
-              </Markdown>
+              <ReplyBubble>
+                <Markdown
+                  streaming={false}
+                  messageId={message.id}
+                  sessionId={sessionId}
+                >
+                  {hiddenToolsText}
+                </Markdown>
+              </ReplyBubble>
             </div>
           )
         : hasNonQuestionContent && (
@@ -953,6 +956,7 @@ export const CompactMessageList = memo(
             durationMs: number | null
             hideCancelledIndicator?: boolean
             hideEditedFiles?: boolean
+            bubble?: boolean
           }
         ) => (
           <MessageItem
@@ -994,6 +998,8 @@ export const CompactMessageList = memo(
             hideApproveButtons={hideApproveButtons}
             hideCancelledIndicator={extra.hideCancelledIndicator}
             hideEditedFiles={extra.hideEditedFiles}
+            bubble={extra.bubble}
+            hideSettingsBadges={hideToolActivity}
             durationMs={extra.durationMs}
           />
         ),
@@ -1027,6 +1033,7 @@ export const CompactMessageList = memo(
           isFindingFixed,
           onCopyToInput,
           hideApproveButtons,
+          hideToolActivity,
         ]
       )
 
@@ -1269,6 +1276,7 @@ export const CompactMessageList = memo(
                 >
                   {renderMessageItem(singleMessage, {
                     hasFollowUpMessage,
+                    bubble: hideToolActivity,
                     durationMs: durationFor(
                       singleMessage.globalIndex,
                       singleMessage.message
@@ -1283,13 +1291,15 @@ export const CompactMessageList = memo(
               if (!text) return null
               return (
                 <div key={item.key} className="pb-4">
-                  <Markdown
-                    streaming={false}
-                    messageId={item.key}
-                    sessionId={sessionId}
-                  >
-                    {text}
-                  </Markdown>
+                  <ReplyBubble>
+                    <Markdown
+                      streaming={false}
+                      messageId={item.key}
+                      sessionId={sessionId}
+                    >
+                      {text}
+                    </Markdown>
+                  </ReplyBubble>
                 </div>
               )
             }

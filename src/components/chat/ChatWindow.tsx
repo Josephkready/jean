@@ -269,6 +269,7 @@ import { useInvestigateHandlers } from './hooks/useInvestigateHandlers'
 import { useMcpServerResolution } from './hooks/useMcpServerResolution'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { Markdown } from '@/components/ui/markdown'
+import { ReplyBubble } from './ReplyBubble'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useToolbarHandlers } from './hooks/useToolbarHandlers'
 import { useMessageSending } from './hooks/useMessageSending'
@@ -3053,12 +3054,14 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 {quietStreamingText &&
                                   !currentToolCalls.some(needsUserInput) && (
                                     <div className="pb-2">
-                                      <Markdown
-                                        streaming
-                                        sessionId={activeSessionId}
-                                      >
-                                        {quietStreamingText}
-                                      </Markdown>
+                                      <ReplyBubble>
+                                        <Markdown
+                                          streaming
+                                          sessionId={activeSessionId}
+                                        >
+                                          {quietStreamingText}
+                                        </Markdown>
+                                      </ReplyBubble>
                                     </div>
                                   )}
                                 <StreamingStatusBar
@@ -3586,6 +3589,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                               ) : (
                                 <div className={cn(zenMode && 'shrink-0')}>
                                   <ChatToolbar
+                                    minimal={Boolean(workingLabel)}
                                     isSending={isSending}
                                     hasPendingQuestions={hasPendingQuestions}
                                     hasPendingAttachments={

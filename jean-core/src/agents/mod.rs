@@ -39,7 +39,7 @@ const PROMPT_MEMORY_CHARS: usize = 8000;
 /// which is not sent to agent sessions.
 const AGENT_RECAP_INSTRUCTION: &str = "
 ## Recap
-- When a reply used tools or did more than one step, end it with a `## Recap` section. Skip it for a one-line answer and for replies to updates.
+- When a reply used tools or did more than one step, end it with a short recap. Do not add a `Recap` heading or any other heading; write only the recap text. Skip it for a one-line answer and for replies to updates.
 - Keep the recap brief, but include every important result: what changed, what was found, what failed, what waits for approval, and links to the PRs, issues, or sessions.
 - Put actions and findings in a Markdown table, one row each, for example: | # | Action | Status | Link |. The user can select rows and add notes to them, so keep one item per row and number the rows.
 - Do not add test steps, diffs, or raw tool output.
@@ -463,6 +463,7 @@ mod tests {
         assert!(prompt.contains("chat with the user"));
         assert!(prompt.contains("suggests the most useful next action"));
         assert!(prompt.contains("| # | Action | Status | Link |"));
+        assert!(prompt.contains("Do not add a `Recap` heading"));
         assert!(prompt.contains("## End of your previous chat"));
         assert!(prompt.contains("User: deploy orbit"));
         assert!(prompt.contains("# Jean Agent: Jean"));

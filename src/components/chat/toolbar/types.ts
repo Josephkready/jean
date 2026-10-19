@@ -39,6 +39,8 @@ export interface ViewingContext {
 }
 
 export interface ChatToolbarProps {
+  /** Show only the send button (simple agent chat) */
+  minimal?: boolean
   isSending: boolean
   hasPendingQuestions: boolean
   hasPendingAttachments: boolean
