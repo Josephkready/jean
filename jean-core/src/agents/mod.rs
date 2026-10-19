@@ -325,7 +325,7 @@ fn render_system_prompt(
     }
     match role {
         SessionRole::Chat { carry_over, recap } => {
-            out.push_str("\n## This session: chat with the user\n- The user talks with you here. Background work (schedules, follow-ups of tasks, requests from other agents) runs in separate task sessions. Use `task_list` when the user asks about it.\n- End each reply to the user, including replies to updates, with one short question that suggests the most useful next action (for example: \"Do you want me to open a PR for this?\"). Suggest one to three concrete options when there is more than one good path. Do not ask when the user only said thanks or ended the conversation.\n");
+            out.push_str("\n## This session: chat with the user\n- The user talks with you here. Background work (schedules, follow-ups of tasks, requests from other agents) runs in separate task sessions. Use `task_list` when the user asks about it.\n- The user sees only your text, not your tool calls. Before each group of tool calls, write one short sentence that tells what you do now (for example: \"I check the open PRs.\"). When a step gives a result, write one short line about it.\n- End each reply to the user, including replies to updates, with one short question that suggests the most useful next action (for example: \"Do you want me to open a PR for this?\"). Suggest one to three concrete options when there is more than one good path. Do not ask when the user only said thanks or ended the conversation.\n");
             if *recap {
                 out.push_str(AGENT_RECAP_INSTRUCTION);
             }
@@ -462,6 +462,7 @@ mod tests {
         );
         assert!(prompt.contains("chat with the user"));
         assert!(prompt.contains("suggests the most useful next action"));
+        assert!(prompt.contains("Before each group of tool calls"));
         assert!(prompt.contains("| # | Action | Status | Link |"));
         assert!(prompt.contains("Do not add a `Recap` heading"));
         assert!(prompt.contains("## End of your previous chat"));

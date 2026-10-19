@@ -143,7 +143,11 @@ import {
 import { isFirstWorktreeSession } from './setup-script-visibility'
 import { TodoWidget } from './TodoWidget'
 import { AgentWidget } from './AgentWidget'
-import { assistantTextOnly, normalizeTodosForDisplay } from './tool-call-utils'
+import {
+  assistantTextOnly,
+  normalizeTodosForDisplay,
+  restoreOmittedStreamingPrefix,
+} from './tool-call-utils'
 import { ImagePreview } from './ImagePreview'
 import { TextFilePreview } from './TextFilePreview'
 import { SkillBadge } from './SkillBadge'
@@ -1135,7 +1139,13 @@ const ChatWindowContent = memo(function ChatWindowContent({
   const quietStreamingText = useMemo(
     () =>
       workingLabel
-        ? assistantTextOnly(currentStreamingContentBlocks, streamingContent)
+        ? assistantTextOnly(
+            restoreOmittedStreamingPrefix(
+              streamingContent,
+              currentStreamingContentBlocks
+            ),
+            streamingContent
+          )
         : '',
     [workingLabel, currentStreamingContentBlocks, streamingContent]
   )
