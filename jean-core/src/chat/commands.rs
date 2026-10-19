@@ -2951,6 +2951,9 @@ pub async fn send_chat_message(
         return Err("Session already has an active request".to_string());
     }
 
+    // Drops after the claim below, so agent lists see the run end.
+    let _agents_refresh = crate::agents::RefreshOnDrop::for_worktree(&app, &worktree_id);
+
     // Atomically claim the session's send slot for the duration of this call.
     // Two callers can pass the check above concurrently, but only one can take
     // this claim before either caller registers a process.

@@ -3,6 +3,7 @@ import type { AgentSchedule } from '@/services/agents'
 import {
   cronMinutes,
   emptyScheduleForm,
+  formatDateTimeInZone,
   formatInterval,
   formatScheduleWhen,
   formFromSchedule,
@@ -78,9 +79,15 @@ describe('validateScheduleForm', () => {
         everyUnit: 'minutes',
       })
     ).toMatch(/5 minutes/)
+    expect(validateScheduleForm({ ...cron, kind: 'once', runAt: '' })).toMatch(
+      /date and time/
+    )
     expect(
-      validateScheduleForm({ ...cron, kind: 'once', delayMinutes: '0' })
-    ).toMatch(/Delay/)
+      validateScheduleForm({ ...cron, kind: 'once', runAt: '2026-11-03 9:00' })
+    ).toMatch(/date and time/)
+    expect(
+      validateScheduleForm({ ...cron, kind: 'once', runAt: '2026-11-03T09:00' })
+    ).toBeNull()
     expect(validateScheduleForm({ ...cron, kind: 'event' })).toBeNull()
     expect(validateScheduleForm({ ...cron, name: '  ' })).toMatch(/Name/)
   })
@@ -112,13 +119,62 @@ describe('formatScheduleWhen', () => {
         now
       )
     ).toBe('every 1h, next in 1m')
+    expect(
+      formatScheduleWhen(schedule({ nextRunAt: now / 1000 + 15 * 86_400 }), now)
+    ).toMatch(/^once .*\d.*, in 15d$/)
     expect(formatScheduleWhen(schedule({ paused: true }), now)).toBe(
       'once, paused'
     )
   })
 })
 
+describe('formatDateTimeInZone', () => {
+  const instant = Date.UTC(2026, 10, 3, 8, 30) / 1000
+
+  it('prints wall-clock time in the given zone', () => {
+    expect(formatDateTimeInZone(instant, 'UTC')).toBe('2026-11-03T08:30')
+    expect(formatDateTimeInZone(instant, 'Europe/Budapest')).toBe(
+      '2026-11-03T09:30'
+    )
+    expect(
+      formatDateTimeInZone(
+        Date.UTC(2026, 6, 1, 22, 5) / 1000,
+        'Europe/Budapest'
+      )
+    ).toBe('2026-07-02T00:05')
+  })
+
+  it('defaults a new form to tomorrow 09:00 in its zone', () => {
+    // 23:30 UTC on Nov 3 is already Nov 4 in Budapest.
+    const now = Date.UTC(2026, 10, 3, 23, 30)
+    expect(emptyScheduleForm('UTC', now).runAt).toBe('2026-11-04T09:00')
+    expect(emptyScheduleForm('Europe/Budapest', now).runAt).toBe(
+      '2026-11-05T09:00'
+    )
+  })
+})
+
 describe('schedule input', () => {
+  it('sends a one-shot as wall-clock time plus zone', () => {
+    expect(
+      scheduleInputFromForm({
+        ...emptyScheduleForm('UTC'),
+        name: 'Release',
+        prompt: 'Cut the release',
+        kind: 'once',
+        runAt: '2026-11-03T09:00',
+        timezone: 'Europe/Budapest',
+      })
+    ).toEqual({
+      name: 'Release',
+      prompt: 'Cut the release',
+      kind: 'once',
+      paused: false,
+      runAt: '2026-11-03T09:00',
+      timezone: 'Europe/Budapest',
+    })
+  })
+
   it('keeps the browser timezone in the list and maps a form to command fields', () => {
     expect(timezoneOptions('Europe/Helsinki')[0]).toBe('Europe/Helsinki')
     expect(timezoneOptions('UTC')).toContain('UTC')
@@ -152,12 +208,38 @@ describe('schedule input', () => {
 
 describe('scheduleUpdateFromForm', () => {
   it('omits timing when only the name changes, so the routine keeps its time', () => {
-    const once = schedule({ name: 'Brief', prompt: 'Summarize' })
-    const renamed = { ...formFromSchedule(once), name: 'Morning brief' }
+    const once = schedule({
+      name: 'Brief',
+      prompt: 'Summarize',
+      nextRunAt: Date.UTC(2026, 10, 3, 8, 30) / 1000,
+    })
+    const form = formFromSchedule(once)
+    expect(formatDateTimeInZone(once.nextRunAt, form.timezone)).toBe(form.runAt)
+    const renamed = { ...form, name: 'Morning brief' }
     expect(scheduleUpdateFromForm(renamed, once)).toEqual({
       name: 'Morning brief',
       prompt: 'Summarize',
       paused: false,
+    })
+  })
+
+  it('sends the new run time when a one-shot moved', () => {
+    const once = schedule({ nextRunAt: Date.UTC(2026, 10, 3, 8, 30) / 1000 })
+    const moved = {
+      ...formFromSchedule(once),
+      runAt: '2026-12-01T10:00',
+      timezone: 'UTC',
+    }
+    expect(scheduleUpdateFromForm(moved, once)).toEqual({
+      name: 'Brief',
+      prompt: 'Summarize',
+      paused: false,
+      kind: 'once',
+      everySecs: undefined,
+      runAt: '2026-12-01T10:00',
+      cron: undefined,
+      timezone: 'UTC',
+      event: undefined,
     })
   })
 
@@ -170,7 +252,7 @@ describe('scheduleUpdateFromForm', () => {
       paused: false,
       kind: 'cron',
       everySecs: undefined,
-      delaySecs: undefined,
+      runAt: undefined,
       cron: '0 10 * * 1-5',
       timezone: 'UTC',
       event: undefined,

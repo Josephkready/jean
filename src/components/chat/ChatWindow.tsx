@@ -143,7 +143,7 @@ import {
 import { isFirstWorktreeSession } from './setup-script-visibility'
 import { TodoWidget } from './TodoWidget'
 import { AgentWidget } from './AgentWidget'
-import { normalizeTodosForDisplay } from './tool-call-utils'
+import { assistantTextOnly, normalizeTodosForDisplay } from './tool-call-utils'
 import { ImagePreview } from './ImagePreview'
 import { TextFilePreview } from './TextFilePreview'
 import { SkillBadge } from './SkillBadge'
@@ -268,6 +268,7 @@ import { useChatWindowEvents } from './hooks/useChatWindowEvents'
 import { useInvestigateHandlers } from './hooks/useInvestigateHandlers'
 import { useMcpServerResolution } from './hooks/useMcpServerResolution'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
+import { Markdown } from '@/components/ui/markdown'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useToolbarHandlers } from './hooks/useToolbarHandlers'
 import { useMessageSending } from './hooks/useMessageSending'
@@ -1108,6 +1109,15 @@ const ChatWindowContent = memo(function ChatWindowContent({
     activeSessionId
       ? (state.streamingContentBlocks[activeSessionId] ?? EMPTY_CONTENT_BLOCKS)
       : EMPTY_CONTENT_BLOCKS
+  )
+  // Quiet (agent) chats hide tool activity: show the agent's text while it
+  // works, so the user sees its progress messages
+  const quietStreamingText = useMemo(
+    () =>
+      workingLabel
+        ? assistantTextOnly(currentStreamingContentBlocks, streamingContent)
+        : '',
+    [workingLabel, currentStreamingContentBlocks, streamingContent]
   )
   // Per-session input - check if there's any input for submit button state
   // PERFORMANCE: Track hasValue via callback from ChatInput instead of store subscription
@@ -3021,6 +3031,17 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       onCopySteeredText={handleCopySteeredText}
                                     />
                                   ))}
+                                {quietStreamingText &&
+                                  !currentToolCalls.some(needsUserInput) && (
+                                    <div className="pb-2">
+                                      <Markdown
+                                        streaming
+                                        sessionId={activeSessionId}
+                                      >
+                                        {quietStreamingText}
+                                      </Markdown>
+                                    </div>
+                                  )}
                                 <StreamingStatusBar
                                   workingLabel={workingLabel}
                                   isSending={isSending}

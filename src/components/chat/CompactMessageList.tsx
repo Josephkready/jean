@@ -47,7 +47,11 @@ import { EditedFilesDisplay } from './EditedFilesDisplay'
 import { parseServerResourceKey } from '@/lib/server-resource'
 import { AskUserQuestion } from './AskUserQuestion'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
-import { buildTimeline, coalesceContentBlocks } from './tool-call-utils'
+import {
+  assistantTextOnly,
+  buildTimeline,
+  coalesceContentBlocks,
+} from './tool-call-utils'
 import { MessageReceiveTime } from './MessageReceiveTime'
 import { formatDuration, getAssistantDurationMs } from './time-utils'
 import {
@@ -222,15 +226,16 @@ function splitMessageAtSteeredInputs(
 /** All assistant prose of a compact group, tool calls left out. */
 function collectAssistantText(group: { message: ChatMessage }[]): string {
   return group
-    .flatMap(({ message }) => {
-      if (message.role !== 'assistant') return []
-      const blocks = message.content_blocks ?? []
-      if (blocks.length === 0) return [message.content ?? '']
-      return coalesceContentBlocks(blocks).flatMap(block =>
-        block.type === 'text' ? [block.text] : []
-      )
-    })
-    .map(text => text.trim())
+    .flatMap(({ message }) =>
+      message.role === 'assistant'
+        ? [
+            assistantTextOnly(
+              message.content_blocks ?? [],
+              message.content ?? ''
+            ),
+          ]
+        : []
+    )
     .filter(Boolean)
     .join('\n\n')
 }

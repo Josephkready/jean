@@ -7,8 +7,8 @@ import type {
 import { formatRelative } from './AgentActivity'
 
 export const MIN_INTERVAL_MINUTES = 5
-export const MIN_DELAY_MINUTES = 1
-export const MAX_DELAY_MINUTES = 60 * 24 * 30
+export const MAX_INTERVAL_MINUTES = 60 * 24 * 30
+const RUN_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
 
 export const SCHEDULE_EVENTS: { id: ScheduleEvent; label: string }[] = [
   { id: 'session_finished', label: 'Session finished' },
@@ -44,7 +44,8 @@ export interface ScheduleForm {
   name: string
   prompt: string
   kind: ScheduleKind
-  delayMinutes: string
+  /** `YYYY-MM-DDTHH:MM` wall-clock time in `timezone` (datetime-local value). */
+  runAt: string
   everyAmount: string
   everyUnit: 'minutes' | 'hours' | 'days'
   cron: string
@@ -67,6 +68,40 @@ export function timezoneOptions(local = browserTimeZone()): string[] {
   return [local, ...SCHEDULE_TIMEZONES]
 }
 
+/** A unix-seconds instant as `YYYY-MM-DDTHH:MM` wall-clock time in `timeZone`. */
+export function formatDateTimeInZone(
+  unixSecs: number,
+  timeZone: string
+): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(unixSecs * 1000))
+      .map(part => [part.type, part.value])
+  )
+  // Some engines still print midnight as "24" under h23.
+  const hour = parts.hour === '24' ? '00' : parts.hour
+  return `${parts.year}-${parts.month}-${parts.day}T${hour}:${parts.minute}`
+}
+
+function tomorrowAtNine(timeZone: string, now: number): string {
+  const [year, month, day] = formatDateTimeInZone(now / 1000, timeZone)
+    .slice(0, 10)
+    .split('-')
+    .map(Number)
+  const tomorrow = new Date(
+    Date.UTC(year ?? 1970, (month ?? 1) - 1, (day ?? 1) + 1)
+  )
+  return `${tomorrow.toISOString().slice(0, 10)}T09:00`
+}
+
 /** "every 30m" / "every 2h" / "every 1d" for a repeat interval. */
 export function formatInterval(everySecs: number): string {
   const minutes = Math.round(everySecs / 60)
@@ -75,17 +110,21 @@ export function formatInterval(everySecs: number): string {
   return `every ${minutes}m`
 }
 
-export function emptyScheduleForm(timezone = browserTimeZone()): ScheduleForm {
+export function emptyScheduleForm(
+  timezone = browserTimeZone(),
+  now = Date.now()
+): ScheduleForm {
+  const zone = timezoneOptions(timezone).includes(timezone) ? timezone : 'UTC'
   return {
     scheduleId: null,
     name: '',
     prompt: '',
     kind: 'cron',
-    delayMinutes: '10',
+    runAt: tomorrowAtNine(zone, now),
     everyAmount: '1',
     everyUnit: 'days',
     cron: '0 9 * * 1-5',
-    timezone: timezoneOptions(timezone).includes(timezone) ? timezone : 'UTC',
+    timezone: zone,
     event: 'session_finished',
     paused: false,
   }
@@ -107,6 +146,9 @@ export function formFromSchedule(schedule: AgentSchedule): ScheduleForm {
   form.paused = schedule.paused
   form.cron = schedule.cron ?? form.cron
   form.timezone = schedule.timezone ?? form.timezone
+  if (form.kind === 'once') {
+    form.runAt = formatDateTimeInZone(schedule.nextRunAt, form.timezone)
+  }
   if (
     schedule.event &&
     SCHEDULE_EVENTS.some(event => event.id === schedule.event)
@@ -164,10 +206,12 @@ export function formatScheduleWhen(
       : `next ${formatRelative(schedule.nextRunAt, now)}`
     return `${formatInterval(schedule.everySecs)}, ${next}`
   }
-  const when = schedule.paused
-    ? 'paused'
-    : formatRelative(schedule.nextRunAt, now)
-  return `once, ${when}`
+  if (schedule.paused) return 'once, paused'
+  const at = new Date(schedule.nextRunAt * 1000).toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
+  return `once ${at}, ${formatRelative(schedule.nextRunAt, now)}`
 }
 
 function parsePositive(value: string): number | null {
@@ -258,21 +302,15 @@ export function validateScheduleForm(form: ScheduleForm): string | null {
   if (!form.prompt.trim()) return 'Prompt is required'
   if (form.prompt.trim().length > 8000) return 'Prompt is too long'
   if (form.kind === 'once') {
-    const delay = parsePositive(form.delayMinutes)
-    if (
-      delay === null ||
-      delay < MIN_DELAY_MINUTES ||
-      delay > MAX_DELAY_MINUTES
-    ) {
-      return `Delay must be between ${MIN_DELAY_MINUTES} and ${MAX_DELAY_MINUTES} minutes`
-    }
+    if (!RUN_AT_PATTERN.test(form.runAt)) return 'Choose a date and time'
+    if (!form.timezone.trim()) return 'Timezone is required'
   }
   if (form.kind === 'interval') {
     const every = everySecsFromForm(form)
     if (every === null || every < MIN_INTERVAL_MINUTES * 60) {
       return 'Interval must be at least 5 minutes'
     }
-    if (every > MAX_DELAY_MINUTES * 60) return 'Interval is too long'
+    if (every > MAX_INTERVAL_MINUTES * 60) return 'Interval is too long'
   }
   if (form.kind === 'cron') {
     const cronError = validateCronExpression(form.cron)
@@ -296,10 +334,7 @@ export function scheduleInputFromForm(form: ScheduleForm): ScheduleInput {
     paused: form.paused,
   }
   if (form.kind === 'once') {
-    return {
-      ...base,
-      delaySecs: Number(form.delayMinutes) * 60,
-    }
+    return { ...base, runAt: form.runAt, timezone: form.timezone }
   }
   if (form.kind === 'interval') {
     return { ...base, everySecs: everySecsFromForm(form) }
@@ -322,9 +357,9 @@ export function scheduleUpdateFromForm(
   form: ScheduleForm,
   original: AgentSchedule
 ): Partial<ScheduleInput> {
-  const { kind, everySecs, delaySecs, cron, timezone, event, ...rest } =
+  const { kind, everySecs, runAt, cron, timezone, event, ...rest } =
     scheduleInputFromForm(form)
-  const timing = { kind, everySecs, delaySecs, cron, timezone, event }
+  const timing = { kind, everySecs, runAt, cron, timezone, event }
   const before = scheduleInputFromForm(formFromSchedule(original))
   const unchanged = (Object.keys(timing) as (keyof typeof timing)[]).every(
     key => timing[key] === before[key]

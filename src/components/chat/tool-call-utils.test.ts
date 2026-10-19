@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  assistantTextOnly,
   buildTimeline,
   coalesceContentBlocks,
   findPlanFilePath,
@@ -608,5 +609,27 @@ describe('buildTimeline nested agents', () => {
     if (task?.type !== 'task') throw new Error('expected task item')
     expect(task.subTools.map(t => t.id)).toEqual(['inner'])
     expect(task.nestedSubTools?.inner?.map(t => t.id)).toEqual(['grep'])
+  })
+})
+
+describe('assistantTextOnly', () => {
+  it('joins the text blocks and drops tool and thinking blocks', () => {
+    expect(
+      assistantTextOnly(
+        [
+          { type: 'text', text: 'I fetched 448 issues. ' },
+          { type: 'text', text: 'Now I search PRs.' },
+          { type: 'tool_use', tool_call_id: 't1' },
+          { type: 'thinking', thinking: 'hmm' },
+          { type: 'text', text: '  ' },
+          { type: 'text', text: 'Found 12 stale issues.' },
+        ],
+        'ignored'
+      )
+    ).toBe('I fetched 448 issues. Now I search PRs.\n\nFound 12 stale issues.')
+  })
+
+  it('uses the content when there are no blocks', () => {
+    expect(assistantTextOnly([], '  Working on it\n')).toBe('Working on it')
   })
 })

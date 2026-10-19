@@ -17,6 +17,7 @@ import {
   agentSubtitle,
   findAgent,
   visibleAgentTabs,
+  withRunningAgents,
 } from './agents'
 import { describeApproval, formatRelative } from './AgentActivity'
 import { groupTasks, taskStatusLabel } from './AgentTasks'
@@ -291,6 +292,22 @@ describe('agent rows', () => {
       'Coordinates'
     )
     expect(agentSubtitle(agent({}))).toBe('No activity yet')
+    expect(
+      agentSubtitle(agent({ status: 'working', activity: 'Old reply' }))
+    ).toBe('Working…')
+  })
+
+  it('marks agents whose home chat is running as working', () => {
+    const idle = agent({ id: 'a', homeSessionId: 's1' })
+    const paused = agent({ id: 'b', homeSessionId: 's2', status: 'paused' })
+    const other = agent({ id: 'c', homeSessionId: 's3' })
+    const result = withRunningAgents(
+      [idle, paused, other],
+      new Set(['s1', 's2'])
+    )
+    expect(result?.map(a => a.status)).toEqual(['working', 'paused', 'idle'])
+    const list = [idle]
+    expect(withRunningAgents(list, new Set())).toBe(list)
   })
 
   it('marks unread messages and things that need the user', () => {

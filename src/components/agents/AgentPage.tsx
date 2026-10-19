@@ -145,16 +145,19 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
             <span className="truncate" data-testid="agent-header-name">
               {agent.name}
             </span>
-            <span
-              className={cn(
-                'shrink-0 text-xs font-normal',
-                agent.pendingApprovals > 0 || agent.status === 'waiting'
-                  ? 'text-amber-600 dark:text-amber-400'
-                  : 'text-muted-foreground'
-              )}
-            >
-              {agentStatusLabel(agent)}
-            </span>
+            {/* The chat already shows when the agent is working */}
+            {agent.status !== 'working' && (
+              <span
+                className={cn(
+                  'shrink-0 text-xs font-normal',
+                  agent.pendingApprovals > 0 || agent.status === 'waiting'
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : 'text-muted-foreground'
+                )}
+              >
+                {agentStatusLabel(agent)}
+              </span>
+            )}
           </h1>
           <p className="truncate text-xs text-muted-foreground">
             {agent.serverId !== LOCAL_SERVER_ID && (
@@ -167,19 +170,6 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
               .join(' · ')}
           </p>
         </div>
-        <label
-          className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground select-none hover:text-foreground"
-          title="Show tasks, subagents, activity, memory, settings, and tool activity in chat"
-        >
-          <Checkbox
-            checked={advanced}
-            onCheckedChange={value =>
-              useUIStore.getState().setAgentsAdvanced(value === true)
-            }
-            aria-label="Advanced"
-          />
-          Advanced
-        </label>
         <Button
           variant="outline"
           size="sm"
@@ -207,40 +197,55 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
           </Button>
         )}
       </header>
-      <div
-        className="flex shrink-0 gap-1 overflow-x-auto border-b px-3 py-1.5 [scrollbar-width:none]"
-        role="tablist"
-        aria-label="Agent view"
-      >
-        {tabs.map(({ id, label, badge, muted }) => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={tab === id}
-            className={cn(
-              'flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-              tab === id
-                ? 'bg-muted text-foreground'
-                : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
-            )}
-            onClick={() => setTab(id)}
-          >
-            {label}
-            {badge ? (
-              <span
-                className={cn(
-                  'min-w-4 rounded-full px-1 text-center text-[10px] tabular-nums leading-4',
-                  muted
-                    ? 'bg-muted-foreground/20 text-foreground'
-                    : 'bg-amber-500 text-white'
-                )}
-              >
-                {badge}
-              </span>
-            ) : null}
-          </button>
-        ))}
+      <div className="flex shrink-0 items-center gap-3 border-b px-3 py-1.5">
+        <div
+          className="flex min-w-0 gap-1 overflow-x-auto [scrollbar-width:none]"
+          role="tablist"
+          aria-label="Agent view"
+        >
+          {tabs.map(({ id, label, badge, muted }) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
+              className={cn(
+                'flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                tab === id
+                  ? 'bg-muted text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+              )}
+              onClick={() => setTab(id)}
+            >
+              {label}
+              {badge ? (
+                <span
+                  className={cn(
+                    'min-w-4 rounded-full px-1 text-center text-[10px] tabular-nums leading-4',
+                    muted
+                      ? 'bg-muted-foreground/20 text-foreground'
+                      : 'bg-amber-500 text-white'
+                  )}
+                >
+                  {badge}
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+        <label
+          className="ml-auto flex shrink-0 cursor-pointer items-center gap-2 text-xs text-muted-foreground select-none hover:text-foreground"
+          title="Show tasks, subagents, activity, memory, settings, and tool activity in chat"
+        >
+          <Checkbox
+            checked={advanced}
+            onCheckedChange={value =>
+              useUIStore.getState().setAgentsAdvanced(value === true)
+            }
+            aria-label="Advanced"
+          />
+          Advanced
+        </label>
       </div>
       <div className="relative flex min-h-0 flex-1 flex-col">
         {tab === 'chat' ? (

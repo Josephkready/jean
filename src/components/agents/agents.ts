@@ -1,4 +1,6 @@
+import { useMemo } from 'react'
 import { useAgentsList, type AgentSummary } from '@/services/agents'
+import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { useAgentsEnabledServers } from './agents-feature'
 
@@ -20,6 +22,23 @@ export function findAgent(
   return agents?.find(agent => agent.id === id) ?? agents?.[0]
 }
 
+/** Marks agents whose home chat runs in this client as working. The backend
+ * list does not refresh when a chat starts, so the run would not show. */
+export function withRunningAgents(
+  agents: AgentSummary[] | undefined,
+  runningSessionIds: ReadonlySet<string>
+): AgentSummary[] | undefined {
+  if (!agents || runningSessionIds.size === 0) return agents
+  return agents.map(agent =>
+    agent.status !== 'paused' &&
+    agent.status !== 'working' &&
+    agent.homeSessionId &&
+    runningSessionIds.has(agent.homeSessionId)
+      ? { ...agent, status: 'working' }
+      : agent
+  )
+}
+
 /** The agent selected in the Agents sidebar (from the backend list). */
 export function useSelectedAgent(): {
   agent: AgentSummary | undefined
@@ -28,8 +47,26 @@ export function useSelectedAgent(): {
   error: unknown
 } {
   const enabledServers = useAgentsEnabledServers()
-  const { data: agents, isLoading, error } = useAgentsList(enabledServers)
+  const { data: listed, isLoading, error } = useAgentsList(enabledServers)
   const selectedAgentId = useUIStore(state => state.selectedAgentId)
+  // Home chats running now, as a string so the selector stays stable
+  const runningKey = useChatStore(state =>
+    (listed ?? [])
+      .flatMap(agent =>
+        agent.homeSessionId && state.sendingSessionIds[agent.homeSessionId]
+          ? [agent.homeSessionId]
+          : []
+      )
+      .join('\n')
+  )
+  const agents = useMemo(
+    () =>
+      withRunningAgents(
+        listed,
+        new Set(runningKey ? runningKey.split('\n') : [])
+      ),
+    [listed, runningKey]
+  )
   return {
     agent: findAgent(agents, selectedAgentId),
     agents,
@@ -44,6 +81,7 @@ export function agentSubtitle(agent: AgentSummary): string {
   if (agent.status === 'paused') return 'Stopped'
   if (agent.pendingApprovals > 0) return 'Needs your approval'
   if (agent.status === 'waiting') return 'Waiting for your answer'
+  if (agent.status === 'working') return 'Working…'
   return agent.activity ?? (agent.description || 'No activity yet')
 }
 

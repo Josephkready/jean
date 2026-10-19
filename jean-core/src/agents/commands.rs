@@ -311,7 +311,7 @@ pub struct ScheduleCommandInput {
     #[serde(default)]
     pub every_secs: Option<i64>,
     #[serde(default)]
-    pub delay_secs: Option<i64>,
+    pub run_at: Option<String>,
     #[serde(default)]
     pub cron: Option<String>,
     #[serde(default)]
@@ -336,7 +336,7 @@ pub struct ScheduleCommandPatch {
     #[serde(default)]
     pub every_secs: Option<i64>,
     #[serde(default)]
-    pub delay_secs: Option<i64>,
+    pub run_at: Option<String>,
     #[serde(default)]
     pub cron: Option<String>,
     #[serde(default)]
@@ -348,20 +348,17 @@ pub struct ScheduleCommandPatch {
 fn timing_from_kind(
     kind: &str,
     every_secs: Option<i64>,
-    delay_secs: Option<i64>,
+    run_at: Option<&str>,
     cron: Option<&str>,
     timezone: Option<&str>,
     event: Option<&str>,
     now_unix: i64,
 ) -> Result<db::ScheduleTiming, String> {
-    let max = super::cron::max_interval_secs();
     match kind {
         "once" => {
-            let delay = delay_secs.unwrap_or(60);
-            if !(60..=max).contains(&delay) {
-                return Err(format!("Delay must be between 60 and {max} seconds"));
-            }
-            db::validate_schedule_timing(None, None, None, None, Some(now_unix + delay), now_unix)
+            let run_at = run_at.ok_or_else(|| "Once requires runAt".to_string())?;
+            let run_at = super::cron::accept_run_at(run_at, timezone, now_unix)?;
+            db::validate_schedule_timing(None, None, None, None, Some(run_at), now_unix)
         }
         "interval" => {
             let every = every_secs
@@ -396,7 +393,7 @@ pub fn create_schedule_for_agent(
     let timing = timing_from_kind(
         &input.kind,
         input.every_secs,
-        input.delay_secs,
+        input.run_at.as_deref(),
         input.cron.as_deref(),
         input.timezone.as_deref(),
         input.event.as_deref(),
@@ -426,7 +423,7 @@ pub fn update_schedule_for_agent(
         Some(kind) => Some(timing_from_kind(
             kind,
             patch.every_secs,
-            patch.delay_secs,
+            patch.run_at.as_deref(),
             patch.cron.as_deref(),
             patch.timezone.as_deref(),
             patch.event.as_deref(),
@@ -731,6 +728,35 @@ mod tests {
         }
         let ok = timing_from_kind("interval", Some(600), None, None, None, None, 1_000).unwrap();
         assert_eq!((ok.every_secs, ok.next_run_at), (Some(600), 1_600));
+    }
+
+    #[test]
+    fn once_kind_requires_a_future_run_at() {
+        let now = 1_767_225_600; // 2026-01-01T00:00:00Z
+        let err = timing_from_kind("once", None, None, None, None, None, now).unwrap_err();
+        assert_eq!(err, "Once requires runAt");
+        let ok = timing_from_kind(
+            "once",
+            None,
+            Some("2026-11-03T09:00"),
+            None,
+            Some("Europe/Budapest"),
+            None,
+            now,
+        )
+        .unwrap();
+        assert_eq!((ok.every_secs, ok.next_run_at), (None, 1_793_692_800));
+        assert!(timing_from_kind(
+            "once",
+            None,
+            Some("2025-01-01T00:00"),
+            None,
+            None,
+            None,
+            now
+        )
+        .unwrap_err()
+        .contains("future"));
     }
 
     #[test]

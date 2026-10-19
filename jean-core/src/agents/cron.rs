@@ -73,6 +73,44 @@ pub fn max_interval_secs() -> i64 {
     MAX_INTERVAL_SECS
 }
 
+/// Parse an exact one-shot run time. RFC 3339 with an offset wins; otherwise
+/// a naive `YYYY-MM-DD[T ]HH:MM[:SS]` is read in `timezone` (default UTC).
+pub fn accept_run_at(text: &str, timezone: Option<&str>, now_unix: i64) -> Result<i64, String> {
+    let text = text.trim();
+    let run_at = match DateTime::parse_from_rfc3339(text) {
+        Ok(dt) => dt.timestamp(),
+        Err(_) => {
+            let local = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
+                .iter()
+                .find_map(|format| NaiveDateTime::parse_from_str(text, format).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "Invalid runAt '{text}'. Use YYYY-MM-DDTHH:MM[:SS] (local time in timezone) or RFC 3339 with an offset, such as 2026-11-03T09:00:00+01:00."
+                    )
+                })?;
+            let timezone = timezone
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or("UTC");
+            let tz = parse_timezone(timezone)?;
+            match tz.from_local_datetime(&local) {
+                LocalResult::Single(dt) => dt.timestamp(),
+                LocalResult::Ambiguous(early, _) => early.timestamp(),
+                LocalResult::None => {
+                    return Err(format!(
+                        "runAt {local} does not exist in {} (skipped by a daylight saving change)",
+                        tz.name()
+                    ))
+                }
+            }
+        }
+    };
+    if run_at <= now_unix {
+        return Err("runAt must be in the future".to_string());
+    }
+    Ok(run_at)
+}
+
 fn normalize_expression(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -487,6 +525,68 @@ fn validate_spacing(expr: &CronExpr, tz: Tz) -> Result<(), String> {
 mod tests {
     use super::*;
     use chrono::Weekday;
+
+    #[test]
+    fn run_at_reads_naive_times_in_the_timezone() {
+        let now = at(tz("UTC"), 2026, 1, 1, 0, 0);
+        assert_eq!(
+            accept_run_at("2026-11-03T09:00", None, now),
+            Ok(at(tz("UTC"), 2026, 11, 3, 9, 0))
+        );
+        assert_eq!(
+            accept_run_at("2026-11-03 09:00:30", Some(""), now),
+            Ok(at(tz("UTC"), 2026, 11, 3, 9, 0) + 30)
+        );
+        assert_eq!(
+            accept_run_at("2026-11-03T09:00:00", Some("Europe/Budapest"), now),
+            Ok(at(tz("UTC"), 2026, 11, 3, 8, 0))
+        );
+    }
+
+    #[test]
+    fn run_at_with_offset_ignores_the_timezone() {
+        let now = at(tz("UTC"), 2026, 1, 1, 0, 0);
+        assert_eq!(
+            accept_run_at("2026-11-03T09:00:00+01:00", Some("Asia/Tokyo"), now),
+            Ok(at(tz("UTC"), 2026, 11, 3, 8, 0))
+        );
+        assert_eq!(
+            accept_run_at("2026-11-03T09:00:00Z", None, now),
+            Ok(at(tz("UTC"), 2026, 11, 3, 9, 0))
+        );
+    }
+
+    #[test]
+    fn run_at_rejects_past_garbage_and_dst_gaps() {
+        let now = at(tz("UTC"), 2026, 6, 1, 12, 0);
+        assert_eq!(
+            accept_run_at("2026-06-01T12:00", None, now).unwrap_err(),
+            "runAt must be in the future"
+        );
+        assert!(accept_run_at("2025-01-01T00:00", None, now).is_err());
+        assert!(accept_run_at("next tuesday", None, now)
+            .unwrap_err()
+            .contains("YYYY-MM-DDTHH:MM"));
+        assert!(accept_run_at("2026-11-03T09:00", Some("Mars/Base"), now)
+            .unwrap_err()
+            .contains("Unknown timezone"));
+        // Budapest skips 02:00-03:00 on 2027-03-28.
+        assert!(
+            accept_run_at("2027-03-28T02:30", Some("Europe/Budapest"), now)
+                .unwrap_err()
+                .contains("does not exist")
+        );
+    }
+
+    #[test]
+    fn run_at_ambiguous_fall_back_takes_the_earliest_instant() {
+        let now = at(tz("UTC"), 2026, 6, 1, 12, 0);
+        // Budapest repeats 02:00-03:00 on 2026-10-25; the first pass is UTC+2.
+        assert_eq!(
+            accept_run_at("2026-10-25T02:30", Some("Europe/Budapest"), now),
+            Ok(at(tz("UTC"), 2026, 10, 25, 0, 30))
+        );
+    }
 
     fn tz(name: &str) -> Tz {
         parse_timezone(name).unwrap()

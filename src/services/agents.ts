@@ -171,7 +171,7 @@ export interface ScheduleInput {
   prompt: string
   kind: ScheduleKind
   everySecs?: number | null
-  delaySecs?: number | null
+  runAt?: string | null
   cron?: string | null
   timezone?: string | null
   event?: string | null

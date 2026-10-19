@@ -270,6 +270,21 @@ export function coalesceContentBlocks(blocks: ContentBlock[]): ContentBlock[] {
 }
 
 /**
+ * The assistant's text of one turn without tool activity: its text blocks,
+ * or `content` when it has no blocks. Quiet (agent) chats show only this.
+ */
+export function assistantTextOnly(
+  blocks: ContentBlock[],
+  content: string
+): string {
+  if (blocks.length === 0) return content.trim()
+  return coalesceContentBlocks(blocks)
+    .flatMap(block => (block.type === 'text' ? [block.text.trim()] : []))
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+/**
  * Live tool blocks can start after the accumulated answer text.
  * Put that missing start back on the first text block while the turn streams.
  * The finished message already has the full text.

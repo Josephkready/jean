@@ -114,6 +114,25 @@ pub fn notify_changed(app: &AppHandle) {
     engine::nudge();
 }
 
+/// Tells every client to refresh agent data when dropped, for runs in agent
+/// worktrees. Create it before the run's send claim: it then drops after the
+/// claim, so the refreshed list no longer shows the agent as working.
+pub struct RefreshOnDrop(Option<AppHandle>);
+
+impl RefreshOnDrop {
+    pub fn for_worktree(app: &AppHandle, worktree_id: &str) -> Self {
+        Self(is_agent_worktree_id(worktree_id).then(|| app.clone()))
+    }
+}
+
+impl Drop for RefreshOnDrop {
+    fn drop(&mut self) {
+        if let Some(app) = &self.0 {
+            emit_cache_keys(app, &["agents"]);
+        }
+    }
+}
+
 /// The agent's chat session changed backend or model. Refresh open chats.
 pub fn notify_sessions(app: &AppHandle) {
     emit_cache_keys(app, &["sessions"]);
@@ -272,7 +291,7 @@ fn render_system_prompt(
 - When you give work to a session with `send_chat_message`, pass `executionMode` (`build` or `yolo`) unless the user wants a plan first: new sessions start in plan mode. Jean tracks the session. When that session finishes, fails, or waits for input, you get an automatic update message. Do not poll or wait in a loop: end your turn and continue when the update arrives.
 - Messages that start with \"[Jean agent update]\" come from Jean, not from the user.
 - Delete, permanent delete, push, merge, and pull request creation need the user's approval. The tool then returns `approvalRequired`. Tell the user what you asked for and end your turn. The result arrives as an update.
-- Use `schedule_create` for later checks (`delayMinutes`), repeating intervals (`everyMinutes`, at least 5), cron (`cron` plus `timezone`), or an event (`event`: session_finished, session_failed, worktree_archived, pr_merged, approval_resolved). Use `schedule_update`, `schedule_list`, and `schedule_cancel` to manage them. Each run is a separate background task.
+- Use `schedule_create` for later checks (`delayMinutes`), one run at an exact date-time (`runAt` plus `timezone`), repeating intervals (`everyMinutes`, at least 5), cron (`cron` plus `timezone`), or an event (`event`: session_finished, session_failed, worktree_archived, pr_merged, approval_resolved). Use `schedule_update`, `schedule_list`, and `schedule_cancel` to manage them. Each run is a separate background task.
 - Use `spawn_subagent` to hand one task to a subagent type from `subagent_type_list`. Pass the type name and the task. The result arrives as an update. Use `subagent_type_save` and `subagent_type_delete` to define types. A subagent cannot define types or spawn further subagents.
 - Use `agent_list` to see agents. Use `agent_update` with no `agentId` to change your name, description, instructions, color, backend, model, effort, skills, or paused state. Use `agent_create` to make an agent; it cannot receive more backend, model, effort, thinking, skills, or wake budget than you have. Use `agent_revert` to undo the latest change.
 - Use `notify_user` only for what the user must know: results of goals, questions, failures, needed decisions. Not for routine progress.

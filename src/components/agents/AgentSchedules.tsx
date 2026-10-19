@@ -124,18 +124,38 @@ function ScheduleEditor({
           </NativeSelect>
         </div>
         {form.kind === 'once' && (
-          <div className="space-y-1">
-            <Label htmlFor="schedule-delay">Delay (minutes)</Label>
-            <Input
-              id="schedule-delay"
-              className="w-28"
-              inputMode="numeric"
-              value={form.delayMinutes}
-              onChange={event =>
-                onChange({ ...form, delayMinutes: event.target.value })
-              }
-            />
-          </div>
+          <>
+            <div className="space-y-1">
+              <Label htmlFor="schedule-run-at">Date and time</Label>
+              <Input
+                id="schedule-run-at"
+                type="datetime-local"
+                className="w-52"
+                value={form.runAt}
+                aria-invalid={attempted && Boolean(error)}
+                onChange={event =>
+                  onChange({ ...form, runAt: event.target.value })
+                }
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="schedule-timezone">Timezone</Label>
+              <NativeSelect
+                id="schedule-timezone"
+                value={form.timezone}
+                aria-label="Timezone"
+                onChange={event =>
+                  onChange({ ...form, timezone: event.target.value })
+                }
+              >
+                {zones.map(zone => (
+                  <NativeSelectOption key={zone} value={zone}>
+                    {zone}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </div>
+          </>
         )}
         {form.kind === 'interval' && (
           <>
