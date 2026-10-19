@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Bot, Code, Settings } from '@/components/icons/reicon'
+import { Code, Settings } from '@/components/icons/reicon'
+import { AgentsIcon } from '@/components/icons/AgentsIcon'
 import {
   Tooltip,
   TooltipContent,
@@ -17,9 +18,13 @@ import {
 } from '@/components/agents/agents-feature'
 
 /** Top-level Jean features */
-const SECTIONS: { section: RailSection; label: string; Icon: typeof Code }[] = [
+const SECTIONS: {
+  section: RailSection
+  label: string
+  Icon: React.ComponentType<{ className?: string }>
+}[] = [
   { section: 'workspace', label: 'Workspace', Icon: Code },
-  { section: 'agents', label: 'Agents', Icon: Bot },
+  { section: 'agents', label: 'Agents', Icon: AgentsIcon },
 ]
 
 // Plain icons, no button chrome
