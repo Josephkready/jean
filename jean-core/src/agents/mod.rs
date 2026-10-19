@@ -35,6 +35,17 @@ pub struct AgentsDb(Mutex<Connection>);
 /// then relevance to the current message, then recency — not a fixed count.
 const PROMPT_MEMORY_CHARS: usize = 8000;
 
+/// Recap format for agent chats. Replaces the general `RECAP_INSTRUCTION`,
+/// which is not sent to agent sessions.
+const AGENT_RECAP_INSTRUCTION: &str = "
+## Recap
+- When a reply used tools or did more than one step, end it with a short recap. Do not add a `Recap` heading or any other heading; write only the recap text. Skip it for a one-line answer and for replies to updates.
+- Keep the recap brief, but include every important result: what changed, what was found, what failed, what waits for approval, and links to the PRs, issues, or sessions.
+- Put actions and findings in a Markdown table, one row each, for example: | # | Action | Status | Link |. The user can select rows and add notes to them, so keep one item per row and number the rows.
+- Do not add test steps, diffs, or raw tool output.
+- The last line of the recap is the next-action question.
+";
+
 /// Open `agents.db` and register it as managed state. Call once at startup.
 pub fn init(app: &AppHandle) -> Result<(), String> {
     let dir = app
@@ -149,7 +160,8 @@ fn emit_cache_keys(app: &AppHandle, keys: &[&str]) {
 #[derive(Debug, Clone, PartialEq)]
 enum SessionRole {
     /// Conversation with the user, with the end of the previous chat.
-    Chat { carry_over: Option<String> },
+    /// `recap` follows the user's auto-recap preference.
+    Chat { carry_over: Option<String>, recap: bool },
     /// Background work (schedule, follow-up, agent request).
     Task,
 }
@@ -258,7 +270,10 @@ pub fn system_prompt_for(app: &AppHandle, worktree_id: &str, hint: Option<&str>)
     let role = if is_task {
         SessionRole::Task
     } else {
-        SessionRole::Chat { carry_over }
+        SessionRole::Chat {
+            carry_over,
+            recap: crate::chat::should_add_recap_instruction(app),
+        }
     };
     let mcp = crate::jean_mcp_config::current_mode().server_name();
     Some(render_system_prompt(
@@ -309,8 +324,11 @@ fn render_system_prompt(
         out.push_str("- Updating another agent or deleting an agent returns `approvalRequired`. You cannot delete yourself without that approval.\n");
     }
     match role {
-        SessionRole::Chat { carry_over } => {
-            out.push_str("\n## This session: chat with the user\n- The user talks with you here. Background work (schedules, follow-ups of tasks, requests from other agents) runs in separate task sessions. Use `task_list` when the user asks about it.\n");
+        SessionRole::Chat { carry_over, recap } => {
+            out.push_str("\n## This session: chat with the user\n- The user talks with you here. Background work (schedules, follow-ups of tasks, requests from other agents) runs in separate task sessions. Use `task_list` when the user asks about it.\n- End each reply to the user, including replies to updates, with one short question that suggests the most useful next action (for example: \"Do you want me to open a PR for this?\"). Suggest one to three concrete options when there is more than one good path. Do not ask when the user only said thanks or ended the conversation.\n");
+            if *recap {
+                out.push_str(AGENT_RECAP_INSTRUCTION);
+            }
             if let Some(text) = carry_over.as_deref().filter(|t| !t.trim().is_empty()) {
                 out.push_str("\n## End of your previous chat\nThe previous chat was archived because it was long. Its end:\n");
                 out.push_str(text.trim());
@@ -439,9 +457,13 @@ mod tests {
             "jean",
             &SessionRole::Chat {
                 carry_over: Some("User: deploy orbit".into()),
+                recap: true,
             },
         );
         assert!(prompt.contains("chat with the user"));
+        assert!(prompt.contains("suggests the most useful next action"));
+        assert!(prompt.contains("| # | Action | Status | Link |"));
+        assert!(prompt.contains("Do not add a `Recap` heading"));
         assert!(prompt.contains("## End of your previous chat"));
         assert!(prompt.contains("User: deploy orbit"));
         assert!(prompt.contains("# Jean Agent: Jean"));

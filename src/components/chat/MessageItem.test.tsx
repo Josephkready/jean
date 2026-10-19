@@ -494,11 +494,38 @@ describe('MessageItem', () => {
     )
 
     expect(receiveTime).toHaveClass(
-      '[@media(pointer:fine)]:opacity-0',
+      'opacity-0',
       '[@media(pointer:fine)]:group-hover/message:opacity-100'
     )
     expect(receiveTime.closest('[class~="group/message"]')).not.toBeNull()
     expect(screen.getByText('23s').parentElement).toContainElement(receiveTime)
+  })
+
+  it('toggles the receive time when the duration is tapped', () => {
+    const timestamp = 1_700_000_000
+    render(
+      <MessageItem
+        {...baseProps}
+        durationMs={23_000}
+        message={{
+          ...baseMessage,
+          content: 'Done.',
+          timestamp,
+          tool_calls: [],
+          content_blocks: [{ type: 'text', text: 'Done.' }],
+        }}
+      />
+    )
+    const receiveTime = screen.getByText(
+      (_, element) =>
+        element?.textContent === ` · ${formatLocalTime(timestamp)}`
+    )
+
+    fireEvent.click(screen.getByText('23s'))
+    expect(receiveTime).not.toHaveClass('opacity-0')
+
+    fireEvent.click(screen.getByText('23s'))
+    expect(receiveTime).toHaveClass('opacity-0')
   })
 
   it('omits the receive time when the message has no timestamp', () => {

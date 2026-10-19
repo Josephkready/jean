@@ -41,6 +41,7 @@ import {
   normalizeQuestionMultipleField,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
+import { ReplyBubble } from './ReplyBubble'
 import { getProviderChangeBeforeMessage } from './message-settings-labels'
 import { ProviderChangeSeparator } from './ProviderChangeSeparator'
 import { EditedFilesDisplay } from './EditedFilesDisplay'
@@ -52,8 +53,8 @@ import {
   buildTimeline,
   coalesceContentBlocks,
 } from './tool-call-utils'
-import { MessageReceiveTime } from './MessageReceiveTime'
-import { formatDuration, getAssistantDurationMs } from './time-utils'
+import { MessageTiming } from './MessageTiming'
+import { getAssistantDurationMs } from './time-utils'
 import {
   TOOL_CALL_ROW_CLASS,
   TOOL_CALL_DETAIL_PILL_CLASS,
@@ -524,8 +525,10 @@ const CompactActivityRow = memo(function CompactActivityRow({
         <div className="mt-1 flex min-h-4 items-center gap-2 text-xs leading-4 text-muted-foreground/40">
           {groupTiming != null && (
             <span className="tabular-nums font-mono">
-              <span>{formatDuration(groupTiming.durationMs)}</span>
-              <MessageReceiveTime timestamp={groupTiming.timestamp} />
+              <MessageTiming
+                durationMs={groupTiming.durationMs}
+                timestamp={groupTiming.timestamp}
+              />
             </span>
           )}
           {hasCancelledMessage && (
@@ -633,13 +636,15 @@ function CompactQuestionMessage({
       {hideToolActivity
         ? hiddenToolsText && (
             <div className="pb-4">
-              <Markdown
-                streaming={false}
-                messageId={message.id}
-                sessionId={sessionId}
-              >
-                {hiddenToolsText}
-              </Markdown>
+              <ReplyBubble>
+                <Markdown
+                  streaming={false}
+                  messageId={message.id}
+                  sessionId={sessionId}
+                >
+                  {hiddenToolsText}
+                </Markdown>
+              </ReplyBubble>
             </div>
           )
         : hasNonQuestionContent && (
@@ -687,8 +692,10 @@ function CompactQuestionMessage({
       })}
       {durationMs != null && durationMs > 0 && (
         <span className="mt-1 block min-h-4 text-xs leading-4 text-muted-foreground/40 tabular-nums font-mono">
-          <span>{formatDuration(durationMs)}</span>
-          <MessageReceiveTime timestamp={message.timestamp} />
+          <MessageTiming
+            durationMs={durationMs}
+            timestamp={message.timestamp}
+          />
         </span>
       )}
     </>
@@ -949,6 +956,7 @@ export const CompactMessageList = memo(
             durationMs: number | null
             hideCancelledIndicator?: boolean
             hideEditedFiles?: boolean
+            bubble?: boolean
           }
         ) => (
           <MessageItem
@@ -990,6 +998,8 @@ export const CompactMessageList = memo(
             hideApproveButtons={hideApproveButtons}
             hideCancelledIndicator={extra.hideCancelledIndicator}
             hideEditedFiles={extra.hideEditedFiles}
+            bubble={extra.bubble}
+            hideSettingsBadges={hideToolActivity}
             durationMs={extra.durationMs}
           />
         ),
@@ -1023,6 +1033,7 @@ export const CompactMessageList = memo(
           isFindingFixed,
           onCopyToInput,
           hideApproveButtons,
+          hideToolActivity,
         ]
       )
 
@@ -1265,6 +1276,7 @@ export const CompactMessageList = memo(
                 >
                   {renderMessageItem(singleMessage, {
                     hasFollowUpMessage,
+                    bubble: hideToolActivity,
                     durationMs: durationFor(
                       singleMessage.globalIndex,
                       singleMessage.message
@@ -1279,13 +1291,15 @@ export const CompactMessageList = memo(
               if (!text) return null
               return (
                 <div key={item.key} className="pb-4">
-                  <Markdown
-                    streaming={false}
-                    messageId={item.key}
-                    sessionId={sessionId}
-                  >
-                    {text}
-                  </Markdown>
+                  <ReplyBubble>
+                    <Markdown
+                      streaming={false}
+                      messageId={item.key}
+                      sessionId={sessionId}
+                    >
+                      {text}
+                    </Markdown>
+                  </ReplyBubble>
                 </div>
               )
             }

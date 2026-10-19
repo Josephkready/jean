@@ -157,6 +157,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   onRunCommand,
   onRunPackageScript,
   onToggleFavoritePackageScript,
+  minimal = false,
 }: ChatToolbarProps) {
   const {
     statuses: mcpStatuses,
@@ -174,6 +175,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   const [openReasoningSheetSignal, setOpenReasoningSheetSignal] = useState(0)
   const isMobile = useIsMobile()
   const zenMode = useUIStore(state => state.zenMode)
+  const sendOnly = zenMode || minimal
   const [revertConfirmOpen, setRevertConfirmOpen] = useState(false)
 
   const pickRemoteOrRun = useRemotePicker(activeWorktreePath)
@@ -497,7 +499,7 @@ export const ChatToolbar = memo(function ChatToolbar({
       <div
         className={cn(
           '@container flex px-4 py-2 md:px-6',
-          zenMode ? 'justify-end' : 'justify-start'
+          sendOnly ? 'justify-end' : 'justify-start'
         )}
       >
         <div className="inline-flex max-w-full flex-nowrap items-center overflow-x-auto whitespace-nowrap bg-transparent scrollbar-hide">
@@ -509,7 +511,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               isSending={isSending}
             />
           )}
-          <div className={zenMode ? 'hidden' : 'contents'}>
+          <div className={sendOnly ? 'hidden' : 'contents'}>
             <DockBurgerButton className="flex @xl:hidden" />
 
             {onOpenMagicModal && (

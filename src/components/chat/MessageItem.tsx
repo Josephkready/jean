@@ -1,6 +1,7 @@
 import { memo, useCallback, useMemo } from 'react'
 import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
+import { ReplyBubble } from './ReplyBubble'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -45,8 +46,7 @@ import { ThinkingBlock } from './ThinkingBlock'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { logger } from '@/lib/logger'
-import { MessageReceiveTime } from './MessageReceiveTime'
-import { formatDuration } from './time-utils'
+import { MessageTiming } from './MessageTiming'
 import {
   parseReviewFindings,
   hasReviewFindings,
@@ -169,6 +169,10 @@ interface MessageItemProps {
   hideEditedFiles?: boolean
   /** Duration of this assistant message in ms (computed from user→assistant timestamp delta) */
   durationMs?: number | null
+  /** Render the assistant reply in a bubble (agent chat) */
+  bubble?: boolean
+  /** Hide backend, model, mode, and effort under the user prompt (agent chat) */
+  hideSettingsBadges?: boolean
 }
 
 /**
@@ -211,6 +215,8 @@ export const MessageItem = memo(function MessageItem({
   hideCancelledIndicator,
   hideEditedFiles = false,
   durationMs,
+  bubble = false,
+  hideSettingsBadges = false,
 }: MessageItemProps) {
   const zenMode = useUIStore(state => state.zenMode)
   // Only show Approve button for the last message with ExitPlanMode
@@ -495,8 +501,7 @@ export const MessageItem = memo(function MessageItem({
   const durationBadge =
     message.role === 'assistant' && durationMs != null && durationMs > 0 ? (
       <span className="mt-1 block min-h-4 text-xs leading-4 text-muted-foreground/40 tabular-nums font-mono">
-        <span>{formatDuration(durationMs)}</span>
-        <MessageReceiveTime timestamp={message.timestamp} />
+        <MessageTiming durationMs={durationMs} timestamp={message.timestamp} />
       </span>
     ) : null
 
@@ -1006,7 +1011,7 @@ export const MessageItem = memo(function MessageItem({
         <div className="group flex max-w-[85%] min-w-0 flex-col items-end gap-1 sm:max-w-[70%]">
           <div className="min-w-0 max-w-full break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground">
             {messageBoxContent}
-            {!zenMode && message.model && (
+            {!zenMode && !hideSettingsBadges && message.model && (
               <div className="mt-1.5">
                 <MessageSettingsBadges
                   model={message.model}
@@ -1052,7 +1057,11 @@ export const MessageItem = memo(function MessageItem({
         </div>
       ) : (
         <div className="group/message group relative text-foreground/90 w-full min-w-0 break-words">
-          {messageBoxContent}
+          {bubble ? (
+            <ReplyBubble>{messageBoxContent}</ReplyBubble>
+          ) : (
+            messageBoxContent
+          )}
           {!zenMode && assistantResponse && (
             <div className="mt-1 flex justify-end">
               <Tooltip>

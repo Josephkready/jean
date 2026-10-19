@@ -269,6 +269,7 @@ import { useInvestigateHandlers } from './hooks/useInvestigateHandlers'
 import { useMcpServerResolution } from './hooks/useMcpServerResolution'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { Markdown } from '@/components/ui/markdown'
+import { ReplyBubble } from './ReplyBubble'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useToolbarHandlers } from './hooks/useToolbarHandlers'
 import { useMessageSending } from './hooks/useMessageSending'
@@ -578,6 +579,25 @@ const ChatWindowContent = memo(function ChatWindowContent({
     ) {
       store.completeSession(deferredSessionId)
     }
+  }, [deferredSessionId, session, isSessionSwitching])
+
+  // After a web reload, sessions outside the bootstrap snapshot (e.g. agent
+  // sessions) are marked sending without a start time, so the timer shows 0s.
+  // Seed it from the persisted run start.
+  useEffect(() => {
+    if (!deferredSessionId || !session || isSessionSwitching) return
+    if (session.last_run_status !== 'running' || !session.last_run_started_at)
+      return
+    const store = useChatStore.getState()
+    if (
+      !store.sendingSessionIds[deferredSessionId] ||
+      store.sendStartedAt[deferredSessionId] != null
+    )
+      return
+    store.addSendingSession(
+      deferredSessionId,
+      session.last_run_started_at * 1000
+    )
   }, [deferredSessionId, session, isSessionSwitching])
 
   const hasReviewResults = useChatStore(state =>
@@ -3034,12 +3054,14 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 {quietStreamingText &&
                                   !currentToolCalls.some(needsUserInput) && (
                                     <div className="pb-2">
-                                      <Markdown
-                                        streaming
-                                        sessionId={activeSessionId}
-                                      >
-                                        {quietStreamingText}
-                                      </Markdown>
+                                      <ReplyBubble>
+                                        <Markdown
+                                          streaming
+                                          sessionId={activeSessionId}
+                                        >
+                                          {quietStreamingText}
+                                        </Markdown>
+                                      </ReplyBubble>
                                     </div>
                                   )}
                                 <StreamingStatusBar
@@ -3567,6 +3589,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                               ) : (
                                 <div className={cn(zenMode && 'shrink-0')}>
                                   <ChatToolbar
+                                    minimal={Boolean(workingLabel)}
                                     isSending={isSending}
                                     hasPendingQuestions={hasPendingQuestions}
                                     hasPendingAttachments={
