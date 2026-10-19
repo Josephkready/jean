@@ -220,3 +220,8 @@ export function stripAllMarkers(content: string): string {
     )
   )
 }
+
+/** Automatic update that Jean sends to an agent session (see `compose_update` in jean-core) */
+export function isAgentUpdateMessage(content: string): boolean {
+  return stripAllMarkers(content).startsWith('[Jean agent update]')
+}

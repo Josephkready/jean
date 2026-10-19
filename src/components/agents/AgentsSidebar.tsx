@@ -123,22 +123,17 @@ function AgentRow({
   )
 }
 
-/** Coordinator row, then the user's agents with an add control. */
+/** Coordinator row, then the user's agents. */
 function AgentGroup({
   agents,
   selectedId,
-  serverName,
   onSelect,
-  onAdd,
 }: {
   agents: AgentSummary[]
   selectedId: string | undefined
-  serverName: string
   onSelect: (agentId: string) => void
-  onAdd: () => void
 }) {
   const { coordinators, custom } = splitCoordinators(agents)
-  const addLabel = serverName ? `Add agent on ${serverName}` : 'Add agent'
   return (
     <>
       {coordinators.length > 0 && (
@@ -153,59 +148,24 @@ function AgentGroup({
           ))}
         </ul>
       )}
-      <div className="flex items-center justify-between pb-1 pl-4 pr-2 pt-4">
-        <h4 className="text-xs text-muted-foreground">
-          Your agents
-          {custom.length > 0 && (
+      {custom.length > 0 && (
+        <>
+          <h4 className="pb-1 pl-4 pr-2 pt-4 text-xs text-muted-foreground">
+            Your agents
             <span className="ml-1.5 tabular-nums">{custom.length}</span>
-          )}
-        </h4>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className={cn(ICON_BUTTON, 'size-6')}
-              onClick={onAdd}
-              aria-label={addLabel}
-            >
-              <Plus className="size-3.5" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>{addLabel}</TooltipContent>
-        </Tooltip>
-      </div>
-      <ul className="space-y-0.5 px-2">
-        {custom.map(agent => (
-          <AgentRow
-            key={agent.id}
-            agent={agent}
-            isSelected={agent.id === selectedId}
-            onSelect={onSelect}
-          />
-        ))}
-        <li>
-          <button
-            type="button"
-            className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            onClick={onAdd}
-            data-testid="agents-sidebar-add"
-          >
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-dashed border-border">
-              <Plus className="size-4" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium">
-                New agent
-              </span>
-              {custom.length === 0 && (
-                <span className="block truncate text-xs">
-                  Its own chat, memory, and schedules
-                </span>
-              )}
-            </span>
-          </button>
-        </li>
-      </ul>
+          </h4>
+          <ul className="space-y-0.5 px-2">
+            {custom.map(agent => (
+              <AgentRow
+                key={agent.id}
+                agent={agent}
+                isSelected={agent.id === selectedId}
+                onSelect={onSelect}
+              />
+            ))}
+          </ul>
+        </>
+      )}
     </>
   )
 }
@@ -215,8 +175,6 @@ export function AgentsSidebar() {
   const isMobile = useIsMobile()
   const { agent: selected, agents, error } = useSelectedAgent()
   const [newAgentOpen, setNewAgentOpen] = useState(false)
-  // Server of the group whose add control was used; undefined = filter's
-  const [newAgentServerId, setNewAgentServerId] = useState<string>()
   const serverFilter = useUIStore(state => state.agentsServerFilter)
   const servers = useMemo(() => agentServers(agents ?? []), [agents])
   // Native app with remote servers: filter and group agents by server
@@ -257,11 +215,6 @@ export function AgentsSidebar() {
     [isMobile]
   )
 
-  const openNewAgent = useCallback((serverId?: string) => {
-    setNewAgentServerId(serverId || undefined)
-    setNewAgentOpen(true)
-  }, [])
-
   return (
     <div className="flex h-full">
       {isMobile && (
@@ -285,7 +238,7 @@ export function AgentsSidebar() {
               <button
                 type="button"
                 className={cn(ICON_BUTTON, 'size-7')}
-                onClick={() => openNewAgent()}
+                onClick={() => setNewAgentOpen(true)}
                 aria-label="New agent"
               >
                 <Plus className="size-4" />
@@ -357,9 +310,7 @@ export function AgentsSidebar() {
                 <AgentGroup
                   agents={groupAgents}
                   selectedId={selected?.id}
-                  serverName={groupName}
                   onSelect={handleSelect}
-                  onAdd={() => openNewAgent(groupId)}
                 />
               </section>
             ))}
@@ -370,8 +321,7 @@ export function AgentsSidebar() {
         onOpenChange={setNewAgentOpen}
         onCreated={handleSelect}
         defaultServerId={
-          newAgentServerId ??
-          (serverFilter === ALL_SERVERS ? undefined : serverFilter)
+          serverFilter === ALL_SERVERS ? undefined : serverFilter
         }
       />
     </div>

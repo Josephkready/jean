@@ -81,21 +81,12 @@ describe('AgentsSidebar', () => {
     expect(screen.getByText('Your agents')).toBeInTheDocument()
   })
 
-  it('opens the New agent dialog from the add control under Jean', async () => {
+  it('has one add control, in the header, that opens the dialog', async () => {
     mocks.agents = [agent({})]
     render(<AgentsSidebar />)
-    expect(
-      screen.getByText('Its own chat, memory, and schedules')
-    ).toBeVisible()
-    await userEvent.click(screen.getByTestId('agents-sidebar-add'))
+    expect(screen.queryByText('Your agents')).toBeNull()
+    expect(screen.getAllByRole('button', { name: /agent/i })).toHaveLength(1)
+    await userEvent.click(screen.getByRole('button', { name: 'New agent' }))
     expect(screen.getByRole('dialog')).toHaveTextContent('New agent dialog')
-  })
-
-  it('opens the dialog from the section and header buttons too', async () => {
-    mocks.agents = [agent({}), agent({ id: 'docs', builtin: false })]
-    render(<AgentsSidebar />)
-    await userEvent.click(screen.getByRole('button', { name: 'Add agent' }))
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
-    expect(screen.queryByText('Its own chat, memory, and schedules')).toBeNull()
   })
 })

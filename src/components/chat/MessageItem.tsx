@@ -60,6 +60,7 @@ import {
   extractDirectoryMentionPaths,
   extractSkillPaths,
   stripAllMarkers,
+  isAgentUpdateMessage,
 } from './message-content-utils'
 import {
   getAskUserQuestions,
@@ -1077,6 +1078,8 @@ export const MessageItem = memo(function MessageItem({
 
   // Custom right-click menu replaces the unusable browser default on the thread.
   if (message.role === 'user') {
+    // Jean's automatic agent updates are for the agent only; show its reply.
+    if (isAgentUpdateMessage(message.content)) return null
     return (
       <MessageThreadContextMenu
         messageText={displayContent}

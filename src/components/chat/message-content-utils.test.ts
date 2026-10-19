@@ -5,6 +5,7 @@ import {
   decodePromptAttachmentMetadata,
   encodePromptAttachmentMetadata,
   extractDirectoryMentionPaths,
+  isAgentUpdateMessage,
   parsePlainTextPromptMetadata,
   stripAllMarkers,
 } from './message-content-utils'
@@ -78,5 +79,19 @@ describe('message-content-utils prompt metadata', () => {
     expect(
       decodePromptAttachmentMetadata(encodePromptAttachmentMetadata(metadata))
     ).toEqual(metadata)
+  })
+})
+
+describe('isAgentUpdateMessage', () => {
+  it('detects Jean agent updates, also with skill markers', () => {
+    const update =
+      '[Jean agent update] Automatic message from Jean, not from the user.\n\n### 1. delegation\nDone.'
+    expect(isAgentUpdateMessage(update)).toBe(true)
+    expect(
+      isAgentUpdateMessage(
+        `${update}\n\n[Skill: /s/SKILL.md - Read and use this skill to guide your response]`
+      )
+    ).toBe(true)
+    expect(isAgentUpdateMessage('Please check [Jean agent update]')).toBe(false)
   })
 })

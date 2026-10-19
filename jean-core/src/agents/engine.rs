@@ -846,7 +846,9 @@ pub(crate) fn compose_update(events: &[db::AgentEvent]) -> String {
             event.body.trim()
         ));
     }
-    message.push_str("\nDecide the next step. If nothing is needed, reply briefly.");
+    message.push_str(
+        "\nDecide the next step. Then reply with a short status: one to three sentences, plus links to the PRs, issues, or sessions involved. Do not add headings, tables, diffs, a recap, or test steps.",
+    );
     message
 }
 
