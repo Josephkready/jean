@@ -1411,6 +1411,7 @@ export interface AppPreferences {
   codex_auto_steer_enabled: boolean // Steer prompts into a running Codex turn instead of queueing (default: false)
   opencode_auto_steer_enabled: boolean // Steer prompts into a running OpenCode turn instead of queueing (default: false)
   pi_auto_steer_enabled: boolean // Steer prompts into a running PI turn instead of queueing (default: false)
+  pi_agent_owns_policy: boolean // Let PI own tools, extensions, and system/project instructions
   claude_auto_steer_enabled: boolean // Steer prompts into a running Claude turn via the detached host (Unix only, default: false)
   grok_auto_steer_enabled: boolean // Steer prompts into a running Grok turn instead of queueing (default: false)
   kimi_auto_steer_enabled?: boolean // Reserved for Kimi Code steering support
@@ -2581,6 +2582,7 @@ export const defaultPreferences: AppPreferences = {
   codex_auto_steer_enabled: false, // Default: queue while Codex is running
   opencode_auto_steer_enabled: false, // Default: queue while OpenCode is running
   pi_auto_steer_enabled: false, // Default: queue while PI is running
+  pi_agent_owns_policy: false, // Default: Jean maps execution modes and injects its system prompt
   claude_auto_steer_enabled: false, // Default: queue while Claude is running
   grok_auto_steer_enabled: false, // Default: queue while Grok is running
   kimi_auto_steer_enabled: false,
