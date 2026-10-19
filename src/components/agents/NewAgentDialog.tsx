@@ -97,7 +97,9 @@ export function NewAgentDialog({
       <DialogContent
         // Opened from inside the mobile sidebar sheet (z-80); sit above it
         overlayClassName="z-[90]"
-        className="sm:max-w-lg z-[90] max-h-[85vh] overflow-y-auto"
+        // Flex column: fixed header/footer, only the form scrolls, and long
+        // skill rows truncate instead of widening the dialog past the screen
+        className="z-[90] flex max-h-[calc(100dvh-2rem)] flex-col sm:max-h-[85vh] sm:max-w-lg"
       >
         <DialogHeader>
           <DialogTitle>New agent</DialogTitle>
@@ -105,7 +107,7 @@ export function NewAgentDialog({
             Its own chat, memory, and schedules, with access to your projects.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-4">
+        <div className="-mx-6 flex min-h-0 flex-col gap-4 overflow-y-auto px-6 py-1">
           {servers.length > 1 && (
             <div className="space-y-1.5">
               <Label htmlFor="agent-server">Server</Label>
