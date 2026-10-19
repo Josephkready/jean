@@ -159,6 +159,31 @@ describe('useToolbarDerivedState', () => {
     expect(result.current.selectedModelLabel).toBe('Configured default')
   })
 
+  it('exposes Devin as an installed backend with its configured default', () => {
+    const { result } = renderHook(() =>
+      useToolbarDerivedState({
+        selectedBackend: 'devin',
+        selectedProvider: null,
+        selectedModel: 'devin/default',
+        customCliProfiles: [],
+        installedBackends: ['devin'],
+        devinModelOptions: [
+          { value: 'devin/default', label: 'Configured default' },
+        ],
+      })
+    )
+
+    expect(result.current.backendModelSections).toEqual([
+      {
+        backend: 'devin',
+        label: 'Devin (Beta)',
+        options: [{ value: 'devin/default', label: 'Configured default' }],
+      },
+    ])
+    expect(result.current.selectedModelLabel).toBe('Configured default')
+    expect(result.current.isDevin).toBe(true)
+  })
+
   it('exposes Antigravity as an installed backend with its static model options', () => {
     const { result } = renderHook(() =>
       useToolbarDerivedState({
@@ -173,7 +198,7 @@ describe('useToolbarDerivedState', () => {
     expect(result.current.backendModelSections).toEqual([
       {
         backend: 'antigravity',
-        label: 'Antigravity CLI',
+        label: 'Antigravity CLI (Beta)',
         options: ANTIGRAVITY_MODEL_OPTIONS,
       },
     ])
@@ -192,7 +217,7 @@ describe('useToolbarDerivedState', () => {
 
     expect(result.current.backendModelSections[1]).toEqual({
       backend: 'muse',
-      label: 'Muse',
+      label: 'Muse (Beta)',
       options: [
         { value: 'muse/default', label: 'Default' },
         { value: 'muse/muse-spark-1.2', label: 'Muse Spark 1.2' },
@@ -218,7 +243,7 @@ describe('useToolbarDerivedState', () => {
     )
 
     expect(result.current.backendModelSections).toEqual([
-      { backend: 'muse', label: 'Muse', options: museModelOptions },
+      { backend: 'muse', label: 'Muse (Beta)', options: museModelOptions },
     ])
     expect(result.current.selectedModelLabel).toBe('Muse Spark 2')
   })

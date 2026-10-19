@@ -9,6 +9,7 @@ import {
   COMMANDCODE_MODEL_OPTIONS,
   GROK_MODEL_OPTIONS,
   KIMI_MODEL_OPTIONS,
+  DEVIN_MODEL_OPTIONS,
   ANTIGRAVITY_MODEL_OPTIONS,
   MUSE_MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
@@ -26,6 +27,7 @@ import {
   useModelCatalog,
 } from '@/services/model-catalog'
 import { resolvePiDefaultModel } from '@/lib/session-defaults'
+import { getBackendPlainLabel } from '@/components/ui/backend-label'
 
 interface UseToolbarDerivedStateArgs {
   selectedBackend: CliBackend
@@ -38,6 +40,7 @@ interface UseToolbarDerivedStateArgs {
   grokModelOptions?: { value: string; label: string }[]
   kimiModelOptions?: { value: string; label: string }[]
   museModelOptions?: { value: string; label: string }[]
+  devinModelOptions?: { value: string; label: string }[]
   customCliProfiles: CustomCliProfile[]
   installedBackends?: CliBackend[]
   availableMcpServers?: { name: string; backend?: string; disabled?: boolean }[]
@@ -60,6 +63,7 @@ const DEFAULT_INSTALLED_BACKENDS: CliBackend[] = [
   'commandcode',
   'grok',
   'kimi',
+  'devin',
 ]
 
 function mergeCatalogOptions(
@@ -92,6 +96,7 @@ export function buildBackendModelSections({
   grokModelOptions,
   kimiModelOptions,
   museModelOptions,
+  devinModelOptions,
 }: {
   installedBackends: CliBackend[]
   claudeModelOptions: { value: string; label: string }[]
@@ -103,56 +108,75 @@ export function buildBackendModelSections({
   grokModelOptions?: { value: string; label: string }[]
   kimiModelOptions?: { value: string; label: string }[]
   museModelOptions?: { value: string; label: string }[]
+  devinModelOptions?: { value: string; label: string }[]
 }): BackendModelSection[] {
   const sections: BackendModelSection[] = []
 
   for (const backend of installedBackends) {
     if (backend === 'claude') {
-      sections.push({ backend, label: 'Claude', options: claudeModelOptions })
+      sections.push({
+        backend,
+        label: getBackendPlainLabel(backend),
+        options: claudeModelOptions,
+      })
     } else if (backend === 'codex') {
-      sections.push({ backend, label: 'Codex', options: codexModelOptions })
+      sections.push({
+        backend,
+        label: getBackendPlainLabel(backend),
+        options: codexModelOptions,
+      })
     } else if (backend === 'opencode') {
       sections.push({
         backend,
-        label: 'OpenCode',
+        label: getBackendPlainLabel(backend),
         options: opencodeModelOptions,
       })
     } else if (backend === 'cursor') {
-      sections.push({ backend, label: 'Cursor', options: cursorModelOptions })
+      sections.push({
+        backend,
+        label: getBackendPlainLabel(backend),
+        options: cursorModelOptions,
+      })
     } else if (backend === 'pi') {
       sections.push({
         backend,
-        label: 'PI',
+        label: getBackendPlainLabel(backend),
         options: piModelOptions ?? PI_MODEL_OPTIONS,
       })
     } else if (backend === 'commandcode') {
       sections.push({
         backend,
-        label: 'Command Code',
+        label: getBackendPlainLabel(backend),
         options: commandcodeModelOptions ?? COMMANDCODE_MODEL_OPTIONS,
       })
     } else if (backend === 'grok') {
       sections.push({
         backend,
-        label: 'Grok',
+        label: getBackendPlainLabel(backend),
         options: grokModelOptions ?? GROK_MODEL_OPTIONS,
       })
     } else if (backend === 'kimi') {
       sections.push({
         backend,
-        label: 'Kimi Code',
+        label: getBackendPlainLabel(backend),
         options: kimiModelOptions ?? KIMI_MODEL_OPTIONS,
+      })
+    } else if (backend === 'devin') {
+      sections.push({
+        backend,
+        label: getBackendPlainLabel(backend),
+        options: devinModelOptions ?? DEVIN_MODEL_OPTIONS,
       })
     } else if (backend === 'antigravity') {
       sections.push({
         backend,
-        label: 'Antigravity CLI',
+        label: getBackendPlainLabel(backend),
         options: ANTIGRAVITY_MODEL_OPTIONS,
       })
     } else if (backend === 'muse') {
       sections.push({
         backend,
-        label: 'Muse',
+        label: getBackendPlainLabel(backend),
         options: museModelOptions ?? MUSE_MODEL_OPTIONS,
       })
     }
@@ -173,6 +197,7 @@ export function useToolbarDerivedState({
   grokModelOptions,
   kimiModelOptions,
   museModelOptions,
+  devinModelOptions,
   installedBackends = DEFAULT_INSTALLED_BACKENDS,
   availableMcpServers = EMPTY_MCP_SERVERS,
   enabledMcpServers = EMPTY_ENABLED_MCP_SERVERS,
@@ -185,6 +210,7 @@ export function useToolbarDerivedState({
   const isGrok = selectedBackend === 'grok'
   const isKimi = selectedBackend === 'kimi'
   const isMuse = selectedBackend === 'muse'
+  const isDevin = selectedBackend === 'devin'
 
   const { data: modelCatalog } = useModelCatalog()
 
@@ -272,6 +298,11 @@ export function useToolbarDerivedState({
     kimiModelOptions ?? KIMI_MODEL_OPTIONS
   )
   const resolvedMuseModelOptions = museModelOptions ?? MUSE_MODEL_OPTIONS
+  const resolvedDevinModelOptions = mergeCatalogOptions(
+    modelCatalog,
+    'devin',
+    devinModelOptions ?? DEVIN_MODEL_OPTIONS
+  )
 
   const backendModelSections = useMemo(
     () =>
@@ -286,6 +317,7 @@ export function useToolbarDerivedState({
         grokModelOptions: resolvedGrokModelOptions,
         kimiModelOptions: resolvedKimiModelOptions,
         museModelOptions: resolvedMuseModelOptions,
+        devinModelOptions: resolvedDevinModelOptions,
       }),
     [
       claudeModelOptions,
@@ -296,6 +328,7 @@ export function useToolbarDerivedState({
       resolvedGrokModelOptions,
       resolvedKimiModelOptions,
       resolvedMuseModelOptions,
+      resolvedDevinModelOptions,
       resolvedOpencodeModelOptions,
       resolvedPiModelOptions,
     ]
@@ -310,6 +343,7 @@ export function useToolbarDerivedState({
     if (isGrok) return resolvedGrokModelOptions
     if (isKimi) return resolvedKimiModelOptions
     if (isMuse) return resolvedMuseModelOptions
+    if (isDevin) return resolvedDevinModelOptions
     return claudeModelOptions
   }, [
     claudeModelOptions,
@@ -321,12 +355,14 @@ export function useToolbarDerivedState({
     isGrok,
     isKimi,
     isMuse,
+    isDevin,
     isOpencode,
     resolvedCommandCodeModelOptions,
     resolvedCursorModelOptions,
     resolvedGrokModelOptions,
     resolvedKimiModelOptions,
     resolvedMuseModelOptions,
+    resolvedDevinModelOptions,
     resolvedOpencodeModelOptions,
     resolvedPiModelOptions,
   ])
@@ -379,8 +415,10 @@ export function useToolbarDerivedState({
     piModelOptions: resolvedPiModelOptions,
     grokModelOptions: resolvedGrokModelOptions,
     kimiModelOptions: resolvedKimiModelOptions,
+    devinModelOptions: resolvedDevinModelOptions,
     isGrok,
     isKimi,
+    isDevin,
     selectedModelLabel,
     selectedModelReasoning,
   }

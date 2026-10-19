@@ -120,6 +120,13 @@ import {
   useAvailableKimiModels,
   kimiCliQueryKeys,
 } from '@/services/kimi-cli'
+import {
+  useAvailableDevinModels,
+  useDevinCliAuth,
+  useDevinCliStatus,
+  useDevinPathDetection,
+  devinCliQueryKeys,
+} from '@/services/devin-cli'
 import type { ClaudeAuthStatus } from '@/types/claude-cli'
 import type { GhAuthStatus } from '@/types/gh-cli'
 import type { GlabAuthStatus } from '@/types/glab-cli'
@@ -131,6 +138,7 @@ import type { PiAuthStatus } from '@/types/pi-cli'
 import type { CommandCodeAuthStatus } from '@/types/commandcode-cli'
 import type { GrokAuthStatus } from '@/types/grok-cli'
 import type { KimiAuthStatus } from '@/types/kimi-cli'
+import type { DevinAuthStatus } from '@/types/devin-cli'
 import {
   Select,
   SelectContent,
@@ -184,6 +192,7 @@ import {
   type PiModel,
   type GrokModel,
   type KimiModel,
+  type DevinModel,
   type CliBackend,
   type TerminalApp,
   type EditorApp,
@@ -200,6 +209,7 @@ import {
   COMMANDCODE_MODEL_OPTIONS,
   CURSOR_MODEL_OPTIONS,
   GROK_MODEL_OPTIONS,
+  DEVIN_MODEL_OPTIONS,
   KIMI_MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
   PI_MODEL_OPTIONS,
@@ -284,6 +294,7 @@ type PreferencesPaneScope =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'github'
   | 'coderabbit'
 
@@ -296,6 +307,7 @@ const backendPaneScopes: readonly PreferencesPaneScope[] = [
   'commandcode',
   'grok',
   'kimi',
+  'devin',
 ]
 
 function formatOpenCodeModelLabelForSettings(value: string) {
@@ -384,6 +396,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     | 'commandcode'
     | 'grok'
     | 'kimi'
+    | 'devin'
     | null
   >(null)
   const [isDeletingCli, setIsDeletingCli] = useState(false)
@@ -431,6 +444,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: commandcodePathDetection } = useCommandCodePathDetection()
   const { data: grokPathDetection } = useGrokPathDetection()
   const { data: kimiPathDetection } = useKimiPathDetection()
+  const { data: devinPathDetection } = useDevinPathDetection()
 
   // CLI status hooks
   const { data: cliStatus, isLoading: isCliLoading } = useClaudeCliStatus()
@@ -451,6 +465,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     useCommandCodeCliStatus()
   const { data: grokStatus, isLoading: isGrokLoading } = useGrokCliStatus()
   const { data: kimiStatus, isLoading: isKimiLoading } = useKimiCliStatus()
+  const { data: devinStatus, isLoading: isDevinLoading } = useDevinCliStatus()
   const isGhPathSource = preferences?.gh_cli_source === 'path'
   const { data: ghVersions, isLoading: isGhVersionsLoading } =
     useAvailableGhVersions({ enabled: isGhPathSource && !!ghStatus?.installed })
@@ -548,6 +563,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: kimiAuth, isLoading: isKimiAuthLoading } = useKimiCliAuth({
     enabled: !!kimiStatus?.installed,
   })
+  const { data: devinAuth, isLoading: isDevinAuthLoading } = useDevinCliAuth({
+    enabled: !!devinStatus?.installed,
+  })
   const { data: availableOpencodeModels } = useAvailableOpencodeModels({
     enabled: !!opencodeStatus?.installed,
   })
@@ -566,6 +584,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: availableKimiModels } = useAvailableKimiModels({
     enabled: !!kimiStatus?.installed,
   })
+  const { data: availableDevinModels } = useAvailableDevinModels({
+    enabled: !!devinStatus?.installed,
+  })
 
   // Re-check CLI status when the source preference changes (handles initial load
   // with source already set to "path" and any timing issues with onSuccess invalidation)
@@ -578,6 +599,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     pi: preferences?.pi_cli_source,
     grok: preferences?.grok_cli_source,
     kimi: preferences?.kimi_cli_source,
+    devin: preferences?.devin_cli_source,
     coderabbit: preferences?.coderabbit_cli_source,
     commandcode: preferences?.commandcode_cli_source,
   })
@@ -591,6 +613,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       pi: preferences?.pi_cli_source,
       grok: preferences?.grok_cli_source,
       kimi: preferences?.kimi_cli_source,
+      devin: preferences?.devin_cli_source,
       coderabbit: preferences?.coderabbit_cli_source,
       commandcode: preferences?.commandcode_cli_source,
     }
@@ -615,6 +638,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     if (cur.kimi !== prevSources.current.kimi) {
       queryClient.invalidateQueries({ queryKey: kimiCliQueryKeys.status() })
     }
+    if (cur.devin !== prevSources.current.devin) {
+      queryClient.invalidateQueries({ queryKey: devinCliQueryKeys.status() })
+    }
     if (cur.coderabbit !== prevSources.current.coderabbit) {
       queryClient.invalidateQueries({
         queryKey: coderabbitCliQueryKeys.status(),
@@ -638,6 +664,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     preferences?.pi_cli_source,
     preferences?.grok_cli_source,
     preferences?.kimi_cli_source,
+    preferences?.devin_cli_source,
     preferences?.coderabbit_cli_source,
     preferences?.commandcode_cli_source,
     queryClient,
@@ -667,6 +694,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const [checkingCommandCodeAuth, setCheckingCommandCodeAuth] = useState(false)
   const [checkingGrokAuth, setCheckingGrokAuth] = useState(false)
   const [checkingKimiAuth, setCheckingKimiAuth] = useState(false)
+  const [checkingDevinAuth, setCheckingDevinAuth] = useState(false)
   const [openCodeModelPopoverOpen, setOpenCodeModelPopoverOpen] =
     useState(false)
   const [cursorModelPopoverOpen, setCursorModelPopoverOpen] = useState(false)
@@ -919,6 +947,19 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
+  const handleDevinSourceChange = (value: 'jean' | 'path') => {
+    if (preferences) {
+      patchPreferences.mutate(
+        { devin_cli_source: value },
+        {
+          onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: devinCliQueryKeys.all })
+          },
+        }
+      )
+    }
+  }
+
   const handleConfirmDeleteCli = async () => {
     if (!deleteCliTarget) return
     const target = deleteCliTarget
@@ -942,6 +983,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       },
       grok: { name: 'Grok CLI', cmd: 'uninstall_grok_cli' as const },
       kimi: { name: 'Kimi Code CLI', cmd: 'uninstall_kimi_cli' as const },
+      devin: { name: 'Devin CLI', cmd: 'uninstall_devin_cli' as const },
     }
     const { name, cmd } = labelMap[target]
     setIsDeletingCli(true)
@@ -965,9 +1007,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                       ? 'grok_cli_source'
                       : target === 'kimi'
                         ? 'kimi_cli_source'
-                        : target === 'glab'
-                          ? 'glab_cli_source'
-                          : 'coderabbit_cli_source'
+                        : target === 'devin'
+                          ? 'devin_cli_source'
+                          : target === 'glab'
+                            ? 'glab_cli_source'
+                            : 'coderabbit_cli_source'
       await new Promise<void>((resolve, reject) => {
         patchPreferences.mutate(
           { [sourceKey]: 'path' } as Partial<AppPreferences>,
@@ -994,9 +1038,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                       ? grokCliQueryKeys.all
                       : target === 'kimi'
                         ? kimiCliQueryKeys.all
-                        : target === 'glab'
-                          ? glabCliQueryKeys.all
-                          : coderabbitCliQueryKeys.all
+                        : target === 'devin'
+                          ? devinCliQueryKeys.all
+                          : target === 'glab'
+                            ? glabCliQueryKeys.all
+                            : coderabbitCliQueryKeys.all
       queryClient.invalidateQueries({ queryKey: queryKeys })
       const pathFound =
         target === 'claude'
@@ -1015,9 +1061,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                       ? grokPathDetection?.found
                       : target === 'kimi'
                         ? kimiPathDetection?.found
-                        : target === 'glab'
-                          ? glabPathDetection?.found
-                          : coderabbitPathDetection?.found
+                        : target === 'devin'
+                          ? devinPathDetection?.found
+                          : target === 'glab'
+                            ? glabPathDetection?.found
+                            : coderabbitPathDetection?.found
       if (pathFound) {
         toast.success(`Jean-managed ${name} removed. Using system PATH.`, {
           id: toastId,
@@ -1156,6 +1204,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
+  const handleDevinModelChange = (value: DevinModel) => {
+    if (preferences) {
+      patchPreferences.mutate({ selected_devin_model: value })
+    }
+  }
+
   const selectedOpenCodeModel =
     preferences?.selected_opencode_model ?? 'opencode/gpt-6.1-sol'
   const openCodeModelOptions = (
@@ -1216,6 +1270,20 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const selectedKimiModelLabel =
     kimiModelOptions.find(option => option.value === selectedKimiModel)
       ?.label ?? selectedKimiModel.replace(/^kimi\//, '')
+  const selectedDevinModel =
+    preferences?.selected_devin_model ?? 'devin/default'
+  const devinModelOptions: { value: DevinModel; label: string }[] = [
+    ...(DEVIN_MODEL_OPTIONS as { value: DevinModel; label: string }[]),
+    ...(availableDevinModels ?? [])
+      .filter(model => model.id !== 'default')
+      .map(model => ({
+        value: `devin/${model.id}` as DevinModel,
+        label: model.isDefault ? `${model.label} (default)` : model.label,
+      })),
+  ]
+  const selectedDevinModelLabel =
+    devinModelOptions.find(option => option.value === selectedDevinModel)
+      ?.label ?? selectedDevinModel.replace(/^devin\//, '')
   const buildBackendOptions = backendOptions
   const effectiveBuildBackend = (preferences?.build_backend ??
     effectiveBackend) as CliBackend
@@ -1310,6 +1378,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const kimiAuthMessage = kimiAuth?.timedOut
     ? 'Auth check timed out. Try again or run `kimi login` manually.'
     : kimiAuth?.error
+  const devinAuthMessage = devinAuth?.timedOut
+    ? 'Auth check timed out. Try again or run `devin auth login` manually.'
+    : devinAuth?.error
 
   const handleCodexAutoSteerToggle = (enabled: boolean) => {
     if (preferences) {
@@ -1363,6 +1434,14 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     if (preferences) {
       patchPreferences.mutate({
         kimi_auto_steer_enabled: enabled,
+      })
+    }
+  }
+
+  const handleDevinAutoSteerToggle = (enabled: boolean) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        devin_auto_steer_enabled: enabled,
       })
     }
   }
@@ -1808,6 +1887,38 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
     openCliUpdateModal('kimi')
   }, [openCliUpdateModal, patchPreferences, preferences?.kimi_cli_source])
+
+  const handleDevinLogin = useCallback(async () => {
+    if (!devinStatus?.path) return
+    setCheckingDevinAuth(true)
+    try {
+      await queryClient.invalidateQueries({
+        queryKey: devinCliQueryKeys.auth(),
+      })
+      const result = await queryClient.fetchQuery<DevinAuthStatus>({
+        queryKey: devinCliQueryKeys.auth(),
+      })
+      if (result?.authenticated) {
+        toast.success('Devin CLI is already authenticated')
+        return
+      }
+    } finally {
+      setCheckingDevinAuth(false)
+    }
+    openCliLoginModal('devin', devinStatus.path, ['auth', 'login'])
+  }, [devinStatus?.path, openCliLoginModal, queryClient])
+
+  const handleDevinRelogin = useCallback(() => {
+    if (!devinStatus?.path) return
+    openCliLoginModal('devin', devinStatus.path, ['auth', 'login'])
+  }, [devinStatus?.path, openCliLoginModal])
+
+  const handleDevinInstall = useCallback(() => {
+    if (preferences?.devin_cli_source !== 'jean') {
+      patchPreferences.mutate({ devin_cli_source: 'jean' })
+    }
+    openCliUpdateModal('devin')
+  }, [openCliUpdateModal, patchPreferences, preferences?.devin_cli_source])
 
   const handleCopyPath = useCallback((path: string | null | undefined) => {
     if (!path) return
@@ -3852,6 +3963,167 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         </>
       )}
 
+      {scope === 'devin' && (
+        <>
+          <SettingsSection
+            title="CLI source"
+            anchorId="pref-devin-section-cli"
+            variant="card"
+            actions={
+              devinStatus?.installed ? (
+                checkingDevinAuth || isDevinAuthLoading ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    <Loader2 className="size-3 animate-spin" />
+                    Checking...
+                  </span>
+                ) : devinAuth?.authenticated ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    Logged in
+                    <Button size="sm" onClick={handleDevinRelogin}>
+                      Relogin
+                    </Button>
+                  </span>
+                ) : (
+                  <Button size="sm" onClick={handleDevinLogin}>
+                    Login
+                  </Button>
+                )
+              ) : (
+                <Button size="sm" onClick={handleDevinInstall}>
+                  Install
+                </Button>
+              )
+            }
+          >
+            <div className="space-y-4">
+              <InlineField
+                label={devinStatus?.installed ? 'Version' : 'Status'}
+                description={
+                  devinStatus?.installed
+                    ? 'Enables Devin AI sessions through the Devin CLI ACP server.'
+                    : 'Install the official Devin CLI, then log in with your Devin account.'
+                }
+              >
+                {isDevinLoading ? (
+                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                ) : devinStatus?.installed ? (
+                  <Button
+                    variant="outline"
+                    className="w-full sm:w-40 justify-between"
+                    onClick={handleDevinInstall}
+                  >
+                    {devinStatus.version ?? 'Installed'}
+                  </Button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">
+                      Not found in PATH
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleDevinInstall}
+                    >
+                      Install now
+                    </Button>
+                  </div>
+                )}
+              </InlineField>
+              {devinAuthMessage && (
+                <p className="text-xs text-muted-foreground">
+                  {devinAuthMessage}
+                </p>
+              )}
+              <InlineField
+                label="Source"
+                description={
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={() =>
+                          handleCopyPath(
+                            preferences?.devin_cli_source === 'jean'
+                              ? devinStatus?.path
+                              : devinPathDetection?.path
+                          )
+                        }
+                        className="text-left hover:underline cursor-pointer"
+                      >
+                        {preferences?.devin_cli_source === 'jean'
+                          ? (devinStatus?.path ?? 'Jean-managed path')
+                          : (devinPathDetection?.path ?? 'System PATH')}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Click to copy path</TooltipContent>
+                  </Tooltip>
+                }
+              >
+                <BackendCliSourceSelect
+                  value={preferences?.devin_cli_source ?? 'jean'}
+                  onValueChange={handleDevinSourceChange}
+                  backendName="Devin CLI"
+                  path={devinPathDetection?.path}
+                  pathVersion={devinPathDetection?.version}
+                  pathFound={!!devinPathDetection?.found}
+                  action={
+                    preferences?.devin_cli_source === 'jean' &&
+                    devinStatus?.installed && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setDeleteCliTarget('devin')}
+                      >
+                        Uninstall
+                      </Button>
+                    )
+                  }
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Default model"
+            anchorId="pref-devin-section-settings"
+            variant="card"
+          >
+            <div className="space-y-4">
+              <InlineField
+                label="Model"
+                description="Devin CLI model for AI assistance"
+              >
+                <Select
+                  value={selectedDevinModel}
+                  onValueChange={value =>
+                    handleDevinModelChange(value as DevinModel)
+                  }
+                >
+                  <SelectTrigger className="w-80 max-w-full">
+                    <SelectValue>{selectedDevinModelLabel}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {devinModelOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+              <InlineField
+                label="Steer running turn"
+                description="Reserved for Devin steering support; new prompts currently queue while Devin is working"
+              >
+                <Switch
+                  checked={preferences?.devin_auto_steer_enabled ?? false}
+                  onCheckedChange={handleDevinAutoSteerToggle}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+        </>
+      )}
+
       {isGeneralScope && (
         <SettingsSection
           title="Defaults"
@@ -4137,9 +4409,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? remoteCodexDefaultModelOptions
                           : effectiveBuildBackend === 'commandcode'
                             ? commandCodeModelOptions
-                            : effectiveBuildBackend === 'grok'
-                              ? grokModelOptions
-                              : remoteClaudeModelOptions
+                            : effectiveBuildBackend === 'devin'
+                              ? devinModelOptions
+                              : effectiveBuildBackend === 'grok'
+                                ? grokModelOptions
+                                : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
@@ -4384,9 +4658,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? remoteCodexDefaultModelOptions
                           : effectiveYoloBackend === 'commandcode'
                             ? commandCodeModelOptions
-                            : effectiveYoloBackend === 'grok'
-                              ? grokModelOptions
-                              : remoteClaudeModelOptions
+                            : effectiveYoloBackend === 'devin'
+                              ? devinModelOptions
+                              : effectiveYoloBackend === 'grok'
+                                ? grokModelOptions
+                                : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
@@ -5083,7 +5359,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? 'Grok CLI'
                           : deleteCliTarget === 'kimi'
                             ? 'Kimi Code CLI'
-                            : deleteCliTarget === 'pi'
+                            : deleteCliTarget === 'devin'
+                              ? 'Devin CLI'
+                              : deleteCliTarget === 'pi'
                               ? 'PI CLI'
                               : 'GitHub CLI'}
               ?
@@ -5107,9 +5385,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                                 ? grokPathDetection?.found
                                 : deleteCliTarget === 'kimi'
                                   ? kimiPathDetection?.found
-                                  : deleteCliTarget === 'pi'
-                                    ? piPathDetection?.found
-                                    : false
+                                  : deleteCliTarget === 'devin'
+                                    ? devinPathDetection?.found
+                                    : deleteCliTarget === 'pi'
+                                      ? piPathDetection?.found
+                                      : false
                 return pathFound
                   ? 'The Jean-managed binary will be removed and the source will switch to System PATH. You can reinstall it later from this page.'
                   : 'The Jean-managed binary will be removed. No System PATH version was detected, so this backend will be unavailable until you reinstall it.'

@@ -58,6 +58,7 @@ import { PiIcon } from '@/components/icons/PiIcon'
 import { CommandCodeIcon } from '@/components/icons/CommandCodeIcon'
 import { GrokIcon } from '@/components/icons/GrokIcon'
 import { KimiIcon } from '@/components/icons/KimiIcon'
+import { DevinIcon } from '@/components/icons/DevinIcon'
 import { AntigravityIcon } from '@/components/icons/AntigravityIcon'
 import { MuseIcon } from '@/components/icons/MuseIcon'
 import type { CliBackend, MagicPrompts } from '@/types/preferences'
@@ -70,6 +71,7 @@ import { PiPane } from './panes/PiPane'
 import { CommandCodePane } from './panes/CommandCodePane'
 import { GrokPane } from './panes/GrokPane'
 import { KimiPane } from './panes/KimiPane'
+import { DevinPane } from './panes/DevinPane'
 import { AntigravityPane } from './panes/AntigravityPane'
 import { MusePane } from './panes/MusePane'
 import { GitHubPane } from './panes/GitHubPane'
@@ -189,6 +191,13 @@ const navigationEntries: NavigationEntry[] = [
     name: 'Kimi Code',
     icon: KimiIcon,
     backend: 'kimi',
+  },
+  {
+    type: 'item',
+    id: 'devin',
+    name: 'Devin',
+    icon: DevinIcon,
+    backend: 'devin',
   },
   {
     type: 'item',
@@ -313,6 +322,7 @@ const paneIconMap: Record<PreferencePane, LucideIcon> = {
   commandcode: CommandCodeIcon,
   grok: GrokIcon,
   kimi: KimiIcon,
+  devin: DevinIcon,
   antigravity: AntigravityIcon,
   muse: MuseIcon,
   github: GitBranch,
@@ -328,6 +338,19 @@ const paneIconMap: Record<PreferencePane, LucideIcon> = {
   integrations: Puzzle,
   experimental: FlaskConical,
   'web-access': Globe,
+}
+
+function paneBackend(pane: PreferencePane): CliBackend | undefined {
+  for (const entry of navigationEntries) {
+    if (entry.type === 'item' && entry.id === pane) return entry.backend
+  }
+  return undefined
+}
+
+function PaneTitle({ pane }: { pane: PreferencePane }) {
+  const backend = paneBackend(pane)
+  if (backend) return <BackendLabel backend={backend} />
+  return getPaneTitle(pane)
 }
 
 const getPaneTitle = (pane: PreferencePane): string => {
@@ -354,6 +377,8 @@ const getPaneTitle = (pane: PreferencePane): string => {
       return 'Antigravity CLI'
     case 'muse':
       return 'Muse'
+    case 'devin':
+      return 'Devin'
     case 'github':
       return 'Git Provider'
     case 'coderabbit':
@@ -925,7 +950,11 @@ export function PreferencesDialog() {
                         </SelectLabel>
                         {group.items.map(item => (
                           <SelectItem key={item.id} value={item.id}>
-                            {item.name}
+                            {item.backend ? (
+                              <BackendLabel backend={item.backend} />
+                            ) : (
+                              item.name
+                            )}
                           </SelectItem>
                         ))}
                       </SelectGroup>
@@ -952,7 +981,7 @@ export function PreferencesDialog() {
                     <BreadcrumbSeparator />
                     <BreadcrumbItem>
                       <BreadcrumbPage>
-                        {getPaneTitle(activePane)}
+                        <PaneTitle pane={activePane} />
                       </BreadcrumbPage>
                     </BreadcrumbItem>
                   </BreadcrumbList>
@@ -1030,6 +1059,11 @@ export function PreferencesDialog() {
               {activePane === 'kimi' && (
                 <div id="pref-pane-kimi" className="min-w-0 max-w-full">
                   <KimiPane />
+                </div>
+              )}
+              {activePane === 'devin' && (
+                <div id="pref-pane-devin" className="min-w-0 max-w-full">
+                  <DevinPane />
                 </div>
               )}
               {activePane === 'antigravity' && (

@@ -19,6 +19,7 @@ type CliKey =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'antigravity'
   | 'muse'
   | 'gh'
@@ -41,6 +42,7 @@ const mocks = vi.hoisted(() => {
     'commandcode',
     'grok',
     'kimi',
+    'devin',
     'antigravity',
     'muse',
     'gh',
@@ -195,6 +197,11 @@ vi.mock('@/services/kimi-cli', () => ({
   useKimiCliAuth: () => authResult('kimi'),
   useKimiPathDetection: () => pathResult('kimi'),
 }))
+vi.mock('@/services/devin-cli', () => ({
+  useDevinCliSetup: () => useSetupResult('devin'),
+  useDevinCliAuth: () => authResult('devin'),
+  useDevinPathDetection: () => pathResult('devin'),
+}))
 vi.mock('@/services/antigravity-cli', () => ({
   useAntigravityCliSetup: () => useSetupResult('antigravity'),
   useAntigravityCliAuth: () => authResult('antigravity'),
@@ -231,6 +238,7 @@ vi.mock('@/services/preferences', () => ({
       commandcode_cli_source: 'jean',
       grok_cli_source: 'jean',
       kimi_cli_source: 'jean',
+      devin_cli_source: 'jean',
       antigravity_cli_source: 'jean',
       muse_cli_source: 'jean',
       gh_cli_source: 'jean',
@@ -544,6 +552,31 @@ describe('OnboardingDialog', () => {
 
       await user.click(finish)
       expect(await screen.findByText("You're ready")).toBeInTheDocument()
+    })
+  })
+
+  describe('Devin', () => {
+    it('marks Devin as beta in the picker, setup row, and ready list', async () => {
+      setCli('devin', { installed: true, authenticated: true })
+      const user = userEvent.setup()
+      render(<OnboardingDialog />)
+      await chooseLocal(user)
+
+      const devin = await screen.findByRole('checkbox', { name: /Devin/ })
+      expect(
+        within(devin.closest('label') as HTMLElement).getByText('Beta')
+      ).toHaveClass('bg-warning/10')
+
+      await user.click(screen.getByRole('button', { name: 'Continue' }))
+
+      const row = await screen.findByTestId('setup-row-devin')
+      expect(within(row).getByText('Devin')).toBeInTheDocument()
+      expect(within(row).getByText('Beta')).toHaveClass('bg-warning/10')
+      expect(row).toHaveAttribute('aria-label', 'Devin (Beta)')
+
+      await user.click(screen.getByRole('button', { name: 'Finish' }))
+      expect(await screen.findByText("You're ready")).toBeInTheDocument()
+      expect(screen.getByText('Beta')).toHaveClass('bg-warning/10')
     })
   })
 
