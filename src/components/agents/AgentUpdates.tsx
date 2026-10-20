@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { BellDot } from '@/components/icons/reicon'
 import {
   isAgentUpdateMessage,
+  isChatContinuedMessage,
   splitAgentUpdateTurns,
 } from '@/components/chat/message-content-utils'
 import { formatLocalTime } from '@/components/chat/time-utils'
@@ -35,7 +36,11 @@ export function agentUpdateFeed(
     .reverse()
   let lastPromptAt = 0
   for (const m of messages) {
-    if (m.role === 'user' && !isAgentUpdateMessage(m.content)) {
+    if (
+      m.role === 'user' &&
+      !isAgentUpdateMessage(m.content) &&
+      !isChatContinuedMessage(m.content)
+    ) {
       lastPromptAt = Math.max(lastPromptAt, m.timestamp)
     }
   }

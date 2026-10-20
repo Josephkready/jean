@@ -2,6 +2,7 @@ import { memo, useCallback, useMemo } from 'react'
 import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { PILL_BUBBLE_CLASS, ReplyBubble } from './ReplyBubble'
+import { ChatContinuedNotice } from './ChatContinuedNotice'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -61,6 +62,7 @@ import {
   extractSkillPaths,
   stripAllMarkers,
   isAgentUpdateMessage,
+  isChatContinuedMessage,
 } from './message-content-utils'
 import {
   getAskUserQuestions,
@@ -1101,6 +1103,8 @@ export const MessageItem = memo(function MessageItem({
   if (message.role === 'user') {
     // Jean's automatic agent updates are for the agent only; show its reply.
     if (isAgentUpdateMessage(message.content)) return null
+    if (isChatContinuedMessage(message.content))
+      return <ChatContinuedNotice content={message.content} />
     return (
       <MessageThreadContextMenu
         messageText={displayContent}
