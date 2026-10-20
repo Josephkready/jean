@@ -515,15 +515,20 @@ const CompactActivityRow = memo(function CompactActivityRow({
       </div>
       {(groupTiming != null || hasCancelledMessage) && (
         <div className="mt-1 flex min-h-4 items-center gap-2 text-xs leading-4 text-muted-foreground/40">
-          {groupTiming != null && (
+          {groupTiming != null ? (
             <span className="tabular-nums font-mono">
               <MessageTiming
                 durationMs={groupTiming.durationMs}
                 timestamp={groupTiming.timestamp}
-              />
+              >
+                {hasCancelledMessage && (
+                  <span className="ml-2 font-sans italic text-muted-foreground/50">
+                    (cancelled)
+                  </span>
+                )}
+              </MessageTiming>
             </span>
-          )}
-          {hasCancelledMessage && (
+          ) : (
             <span className="italic text-muted-foreground/50">(cancelled)</span>
           )}
         </div>
