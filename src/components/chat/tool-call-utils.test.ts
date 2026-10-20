@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  assistantTextOnly,
+  assistantTextParts,
   buildTimeline,
   coalesceContentBlocks,
   findPlanFilePath,
@@ -612,10 +612,10 @@ describe('buildTimeline nested agents', () => {
   })
 })
 
-describe('assistantTextOnly', () => {
-  it('joins the text blocks and drops tool and thinking blocks', () => {
+describe('assistantTextParts', () => {
+  it('splits text at tool calls and drops tool and thinking blocks', () => {
     expect(
-      assistantTextOnly(
+      assistantTextParts(
         [
           { type: 'text', text: 'I fetched 448 issues. ' },
           { type: 'text', text: 'Now I search PRs.' },
@@ -626,10 +626,16 @@ describe('assistantTextOnly', () => {
         ],
         'ignored'
       )
-    ).toBe('I fetched 448 issues. Now I search PRs.\n\nFound 12 stale issues.')
+    ).toEqual([
+      'I fetched 448 issues. Now I search PRs.',
+      'Found 12 stale issues.',
+    ])
   })
 
   it('uses the content when there are no blocks', () => {
-    expect(assistantTextOnly([], '  Working on it\n')).toBe('Working on it')
+    expect(assistantTextParts([], '  Working on it\n')).toEqual([
+      'Working on it',
+    ])
+    expect(assistantTextParts([], '  ')).toEqual([])
   })
 })

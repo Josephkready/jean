@@ -146,7 +146,7 @@ import { isFirstWorktreeSession } from './setup-script-visibility'
 import { TodoWidget } from './TodoWidget'
 import { AgentWidget } from './AgentWidget'
 import {
-  assistantTextOnly,
+  assistantTextParts,
   normalizeTodosForDisplay,
   restoreOmittedStreamingPrefix,
 } from './tool-call-utils'
@@ -274,8 +274,7 @@ import { useChatWindowEvents } from './hooks/useChatWindowEvents'
 import { useInvestigateHandlers } from './hooks/useInvestigateHandlers'
 import { useMcpServerResolution } from './hooks/useMcpServerResolution'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
-import { Markdown } from '@/components/ui/markdown'
-import { ReplyBubble } from './ReplyBubble'
+import { ReplyBubbles } from './ReplyBubble'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useToolbarHandlers } from './hooks/useToolbarHandlers'
 import { useMessageSending } from './hooks/useMessageSending'
@@ -294,6 +293,7 @@ import { navigateToForkedSession } from './fork-session-navigation'
 // Using these constants ensures referential equality for empty states
 const EMPTY_TOOL_CALLS: ToolCall[] = []
 const EMPTY_CONTENT_BLOCKS: ContentBlock[] = []
+const EMPTY_TEXT_PARTS: string[] = []
 const EMPTY_PENDING_IMAGES: PendingImage[] = []
 const EMPTY_PENDING_TEXT_FILES: PendingTextFile[] = []
 const EMPTY_PENDING_FILES: PendingFile[] = []
@@ -1137,18 +1137,18 @@ const ChatWindowContent = memo(function ChatWindowContent({
       : EMPTY_CONTENT_BLOCKS
   )
   // Quiet (agent) chats hide tool activity: show the agent's text while it
-  // works, so the user sees its progress messages
-  const quietStreamingText = useMemo(
+  // works, one bubble per part, so the user sees its progress messages
+  const quietStreamingParts = useMemo(
     () =>
       workingLabel
-        ? assistantTextOnly(
+        ? assistantTextParts(
             restoreOmittedStreamingPrefix(
               streamingContent,
               currentStreamingContentBlocks
             ),
             streamingContent
           )
-        : '',
+        : EMPTY_TEXT_PARTS,
     [workingLabel, currentStreamingContentBlocks, streamingContent]
   )
   // Per-session input - check if there's any input for submit button state
@@ -3066,17 +3066,14 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       onCopySteeredText={handleCopySteeredText}
                                     />
                                   ))}
-                                {quietStreamingText &&
+                                {quietStreamingParts.length > 0 &&
                                   !currentToolCalls.some(needsUserInput) && (
                                     <div className="pb-2">
-                                      <ReplyBubble>
-                                        <Markdown
-                                          streaming
-                                          sessionId={activeSessionId}
-                                        >
-                                          {quietStreamingText}
-                                        </Markdown>
-                                      </ReplyBubble>
+                                      <ReplyBubbles
+                                        streaming
+                                        parts={quietStreamingParts}
+                                        sessionId={activeSessionId}
+                                      />
                                     </div>
                                   )}
                                 <StreamingStatusBar

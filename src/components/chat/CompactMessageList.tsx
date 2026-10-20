@@ -41,7 +41,7 @@ import {
   normalizeQuestionMultipleField,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
-import { ReplyBubble } from './ReplyBubble'
+import { ReplyBubbles } from './ReplyBubble'
 import { getProviderChangeBeforeMessage } from './message-settings-labels'
 import { ProviderChangeSeparator } from './ProviderChangeSeparator'
 import { EditedFilesDisplay } from './EditedFilesDisplay'
@@ -49,7 +49,7 @@ import { parseServerResourceKey } from '@/lib/server-resource'
 import { AskUserQuestion } from './AskUserQuestion'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
 import {
-  assistantTextOnly,
+  assistantTextParts,
   buildTimeline,
   coalesceContentBlocks,
 } from './tool-call-utils'
@@ -225,20 +225,12 @@ function splitMessageAtSteeredInputs(
 }
 
 /** All assistant prose of a compact group, tool calls left out. */
-function collectAssistantText(group: { message: ChatMessage }[]): string {
-  return group
-    .flatMap(({ message }) =>
-      message.role === 'assistant'
-        ? [
-            assistantTextOnly(
-              message.content_blocks ?? [],
-              message.content ?? ''
-            ),
-          ]
-        : []
-    )
-    .filter(Boolean)
-    .join('\n\n')
+function collectAssistantText(group: { message: ChatMessage }[]): string[] {
+  return group.flatMap(({ message }) =>
+    message.role === 'assistant'
+      ? assistantTextParts(message.content_blocks ?? [], message.content ?? '')
+      : []
+  )
 }
 
 function isPureTextAssistantMessage(message: ChatMessage): boolean {
@@ -627,24 +619,20 @@ function CompactQuestionMessage({
   )
 
   const hiddenToolsText = useMemo(
-    () => (hideToolActivity ? collectAssistantText(activityGroup) : ''),
+    () => (hideToolActivity ? collectAssistantText(activityGroup) : []),
     [hideToolActivity, activityGroup]
   )
 
   return (
     <>
       {hideToolActivity
-        ? hiddenToolsText && (
+        ? hiddenToolsText.length > 0 && (
             <div className="pb-4">
-              <ReplyBubble>
-                <Markdown
-                  streaming={false}
-                  messageId={message.id}
-                  sessionId={sessionId}
-                >
-                  {hiddenToolsText}
-                </Markdown>
-              </ReplyBubble>
+              <ReplyBubbles
+                parts={hiddenToolsText}
+                messageId={message.id}
+                sessionId={sessionId}
+              />
             </div>
           )
         : hasNonQuestionContent && (
@@ -1287,19 +1275,15 @@ export const CompactMessageList = memo(
             }
 
             if (hideToolActivity) {
-              const text = collectAssistantText(item.messages)
-              if (!text) return null
+              const parts = collectAssistantText(item.messages)
+              if (parts.length === 0) return null
               return (
                 <div key={item.key} className="pb-4">
-                  <ReplyBubble>
-                    <Markdown
-                      streaming={false}
-                      messageId={item.key}
-                      sessionId={sessionId}
-                    >
-                      {text}
-                    </Markdown>
-                  </ReplyBubble>
+                  <ReplyBubbles
+                    parts={parts}
+                    messageId={item.key}
+                    sessionId={sessionId}
+                  />
                 </div>
               )
             }
