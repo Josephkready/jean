@@ -394,7 +394,6 @@ pub struct Agent {
     pub icon: String,
     pub role_prompt: String,
     pub worktree_id: String,
-    pub paused: bool,
     pub max_wakes_per_hour: i64,
     pub builtin: bool,
     /// `claude`, `codex`, `opencode`, `cursor`, `pi`, `commandcode`, `grok`,
@@ -430,7 +429,7 @@ pub struct AgentConnector {
 }
 
 const AGENT_COLUMNS: &str =
-    "id, name, description, icon, role_prompt, worktree_id, paused, max_wakes_per_hour, builtin, backend, model, effort, thinking_level, skills, mcp_servers, jean_tools";
+    "id, name, description, icon, role_prompt, worktree_id, max_wakes_per_hour, builtin, backend, model, effort, thinking_level, skills, mcp_servers, jean_tools";
 
 const AGENT_BACKENDS: &[&str] = &[
     "claude",
@@ -461,7 +460,7 @@ const MAX_AGENT_SKILLS: usize = 32;
 const MAX_AGENT_MODEL_CHARS: usize = 200;
 
 fn agent_from_row(row: &rusqlite::Row) -> rusqlite::Result<Agent> {
-    let skills_json: String = row.get(13)?;
+    let skills_json: String = row.get(12)?;
     Ok(Agent {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -469,16 +468,15 @@ fn agent_from_row(row: &rusqlite::Row) -> rusqlite::Result<Agent> {
         icon: row.get(3)?,
         role_prompt: row.get(4)?,
         worktree_id: row.get(5)?,
-        paused: row.get::<_, i64>(6)? != 0,
-        max_wakes_per_hour: row.get(7)?,
-        builtin: row.get::<_, i64>(8)? != 0,
-        backend: row.get(9)?,
-        model: row.get(10)?,
-        effort: row.get(11)?,
-        thinking_level: row.get(12)?,
+        max_wakes_per_hour: row.get(6)?,
+        builtin: row.get::<_, i64>(7)? != 0,
+        backend: row.get(8)?,
+        model: row.get(9)?,
+        effort: row.get(10)?,
+        thinking_level: row.get(11)?,
         skills: parse_skills(&skills_json),
-        mcp_servers: parse_connectors(row.get(14)?),
-        jean_tools: parse_jean_tools(row.get(15)?),
+        mcp_servers: parse_connectors(row.get(13)?),
+        jean_tools: parse_jean_tools(row.get(14)?),
     })
 }
 
@@ -827,7 +825,6 @@ pub struct AgentPatch {
     pub description: Option<String>,
     pub icon: Option<String>,
     pub role_prompt: Option<String>,
-    pub paused: Option<bool>,
     pub max_wakes_per_hour: Option<i64>,
     /// `None` leaves the field unchanged. `Some(None)` clears it (use defaults).
     /// JSON `null` must become `Some(None)`; a missing key stays `None`.
@@ -886,9 +883,6 @@ pub fn update_agent(conn: &Connection, id: &str, patch: &AgentPatch) -> Result<A
     if let Some(v) = &patch.role_prompt {
         agent.role_prompt = v.trim().to_string();
     }
-    if let Some(v) = patch.paused {
-        agent.paused = v;
-    }
     if let Some(v) = patch.max_wakes_per_hour {
         agent.max_wakes_per_hour = v.clamp(1, 120);
     }
@@ -920,16 +914,15 @@ pub fn update_agent(conn: &Connection, id: &str, patch: &AgentPatch) -> Result<A
         };
     }
     conn.execute(
-        "UPDATE agents SET name=?2, description=?3, icon=?4, role_prompt=?5, paused=?6,
-         max_wakes_per_hour=?7, backend=?8, model=?9, effort=?10, thinking_level=?11,
-         skills=?12, mcp_servers=?13, jean_tools=?14, updated_at=?15 WHERE id=?1",
+        "UPDATE agents SET name=?2, description=?3, icon=?4, role_prompt=?5,
+         max_wakes_per_hour=?6, backend=?7, model=?8, effort=?9, thinking_level=?10,
+         skills=?11, mcp_servers=?12, jean_tools=?13, updated_at=?14 WHERE id=?1",
         params![
             id,
             agent.name,
             agent.description,
             agent.icon,
             agent.role_prompt,
-            agent.paused as i64,
             agent.max_wakes_per_hour,
             agent.backend,
             agent.model,
@@ -972,10 +965,10 @@ pub fn insert_agent_snapshot(conn: &Connection, agent: &Agent) -> Result<Agent, 
     }
     let ts = now();
     conn.execute(
-        "INSERT INTO agents (id, name, description, icon, role_prompt, worktree_id, paused,
+        "INSERT INTO agents (id, name, description, icon, role_prompt, worktree_id,
          max_wakes_per_hour, builtin, backend, model, effort, thinking_level, skills, mcp_servers,
          jean_tools, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
         params![
             agent.id,
             agent.name,
@@ -983,7 +976,6 @@ pub fn insert_agent_snapshot(conn: &Connection, agent: &Agent) -> Result<Agent, 
             agent.icon,
             agent.role_prompt,
             agent.worktree_id,
-            agent.paused as i64,
             agent.max_wakes_per_hour,
             agent.backend,
             agent.model,
@@ -1837,7 +1829,7 @@ pub fn fire_due_schedules(conn: &Connection, at: i64) -> Result<Vec<Schedule>, S
             .prepare(&format!(
                 "SELECT {columns}
                  FROM schedules s JOIN agents a ON a.id = s.agent_id
-                 WHERE s.active=1 AND s.paused=0 AND s.event IS NULL AND s.next_run_at <= ?1 AND a.paused=0"
+                 WHERE s.active=1 AND s.paused=0 AND s.event IS NULL AND s.next_run_at <= ?1"
             ))
             .map_err(err)?;
         let rows = stmt.query_map([at], schedule_from_row).map_err(err)?;
@@ -1906,7 +1898,7 @@ pub fn fire_event_schedules(
             .prepare(&format!(
                 "SELECT {columns}
                  FROM schedules s JOIN agents a ON a.id = s.agent_id
-                 WHERE s.active=1 AND s.paused=0 AND a.paused=0 AND s.event=?1"
+                 WHERE s.active=1 AND s.paused=0 AND s.event=?1"
             ))
             .map_err(err)?;
         let rows = stmt
@@ -4009,7 +4001,7 @@ mod tests {
     }
 
     #[test]
-    fn schedules_fire_once_or_repeat_and_skip_paused_agents() {
+    fn schedules_fire_once_or_repeat() {
         let conn = db();
         let once = create_schedule(&conn, JEAN_AGENT_ID, "once", "check CI", 100, None).unwrap();
         let every =
@@ -4022,16 +4014,6 @@ mod tests {
         assert_eq!(left[0].next_run_at, 750);
         assert_eq!(pending_event_count(&conn, JEAN_AGENT_ID).unwrap(), 2);
         assert!(!cancel_schedule(&conn, JEAN_AGENT_ID, once.id).unwrap());
-        update_agent(
-            &conn,
-            JEAN_AGENT_ID,
-            &AgentPatch {
-                paused: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(fire_due_schedules(&conn, 10_000).unwrap().is_empty());
         assert!(cancel_schedule(&conn, JEAN_AGENT_ID, every.id).unwrap());
         assert_eq!(next_schedule_at(&conn, JEAN_AGENT_ID).unwrap(), None);
     }
@@ -4886,18 +4868,17 @@ mod tests {
         assert_eq!(created.skills[0].path, "/skills/review/SKILL.md");
         assert_eq!(created.skills[1].name, "SKILL");
 
-        let paused = update_agent(
+        let renamed = update_agent(
             &conn,
             &created.id,
             &AgentPatch {
-                paused: Some(true),
+                name: Some("Renamed".to_string()),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert!(paused.paused);
-        assert_eq!(paused.backend.as_deref(), Some("codex"));
-        assert_eq!(paused.skills.len(), 2);
+        assert_eq!(renamed.backend.as_deref(), Some("codex"));
+        assert_eq!(renamed.skills.len(), 2);
 
         let cleared = update_agent(
             &conn,
@@ -5226,28 +5207,6 @@ mod tests {
             .unwrap();
         left.sort();
         assert_eq!(left, ["approval:1", "pr:wt:1", "session:s:done:2"]);
-    }
-
-    #[test]
-    fn paused_agent_skips_event_routines() {
-        let conn = db();
-        let timing =
-            validate_schedule_timing(None, None, None, Some("session_finished"), None, 0).unwrap();
-        insert_schedule(&conn, JEAN_AGENT_ID, "done", "summarize", &timing, false).unwrap();
-        update_agent(
-            &conn,
-            JEAN_AGENT_ID,
-            &AgentPatch {
-                paused: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(
-            fire_event_schedules(&conn, "session_finished", "session:s:done", "finished")
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[test]

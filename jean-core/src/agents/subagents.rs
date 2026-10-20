@@ -57,9 +57,6 @@ pub async fn spawn_subagent(
     let agent = super::with_db(app, |conn| {
         db::get_agent(conn, agent_id)?.ok_or_else(|| format!("Agent not found: {agent_id}"))
     })?;
-    if agent.paused {
-        return Err("This agent is stopped. Resume it before spawning a subagent.".to_string());
-    }
     let kind = super::with_db(app, |conn| {
         db::find_subagent_type(conn, agent_id, type_name)?
             .ok_or_else(|| format!("Unknown subagent type: {type_name}"))
@@ -246,7 +243,6 @@ mod tests {
             icon: "blue".into(),
             role_prompt: "Be thorough".into(),
             worktree_id: "__agent_reviewer__".into(),
-            paused: false,
             max_wakes_per_hour: 12,
             builtin: false,
             backend: Some("claude".into()),

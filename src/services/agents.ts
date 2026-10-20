@@ -13,7 +13,7 @@ import {
   type SessionServerSource,
 } from './multi-server-sessions'
 
-export type AgentStatus = 'idle' | 'working' | 'waiting' | 'paused'
+export type AgentStatus = 'idle' | 'working' | 'waiting'
 
 /** A skill file discovered for one backend and selected for this agent. */
 export interface AgentSkill {
@@ -34,7 +34,6 @@ export interface AgentSummary {
   icon: string
   rolePrompt: string
   worktreeId: string
-  paused: boolean
   maxWakesPerHour: number
   builtin: boolean
   status: AgentStatus
@@ -273,7 +272,6 @@ export interface AgentPatch {
   description?: string
   icon?: string
   rolePrompt?: string
-  paused?: boolean
   maxWakesPerHour?: number
   /** Null clears the field so the agent uses current defaults again. */
   backend?: string | null

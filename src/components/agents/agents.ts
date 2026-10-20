@@ -30,7 +30,6 @@ export function withRunningAgents(
 ): AgentSummary[] | undefined {
   if (!agents || runningSessionIds.size === 0) return agents
   return agents.map(agent =>
-    agent.status !== 'paused' &&
     agent.status !== 'working' &&
     agent.homeSessionId &&
     runningSessionIds.has(agent.homeSessionId)
@@ -78,7 +77,6 @@ export function useSelectedAgent(): {
 /** Second line of an agent row: what needs the user, else the latest
  * activity, else the description. */
 export function agentSubtitle(agent: AgentSummary): string {
-  if (agent.status === 'paused') return 'Stopped'
   if (agent.pendingApprovals > 0) return 'Needs your approval'
   if (agent.status === 'waiting') return 'Waiting for your answer'
   if (agent.status === 'working') return 'Working…'
@@ -87,7 +85,6 @@ export function agentSubtitle(agent: AgentSummary): string {
 
 /** Short status text for an agent row and header. */
 export function agentStatusLabel(agent: AgentSummary): string {
-  if (agent.status === 'paused') return 'Paused'
   if (agent.pendingApprovals > 0)
     return `Needs approval (${agent.pendingApprovals})`
   if (agent.unreadNotifications > 0)

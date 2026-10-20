@@ -273,7 +273,6 @@ pub struct CreateInput {
     pub icon: String,
     pub role_prompt: String,
     pub config: AgentRunConfig,
-    pub paused: bool,
     pub schedules: Vec<InitialSchedule>,
 }
 
@@ -320,16 +319,6 @@ pub fn create_for_actor(
         &input.role_prompt,
         &config,
     )?;
-    if input.paused {
-        agent = db::update_agent(
-            &tx,
-            &agent.id,
-            &AgentPatch {
-                paused: Some(true),
-                ..AgentPatch::default()
-            },
-        )?;
-    }
     if let Some(actor) = actor.filter(|agent| !agent.builtin) {
         // The child keeps the creator's connector and Jean tool limits, so a
         // limited agent cannot create an unlimited one.
@@ -517,13 +506,6 @@ pub fn agent_diff_summary(before: &Agent, after: &Agent) -> Option<String> {
     }
     if before.role_prompt != after.role_prompt {
         parts.push("instructions changed".to_string());
-    }
-    if before.paused != after.paused {
-        parts.push(if after.paused {
-            "paused".to_string()
-        } else {
-            "resumed".to_string()
-        });
     }
     if before.max_wakes_per_hour != after.max_wakes_per_hour {
         parts.push(format!(
@@ -749,7 +731,6 @@ fn patch_from_agent(agent: &Agent) -> AgentPatch {
         description: Some(agent.description.clone()),
         icon: Some(agent.icon.clone()),
         role_prompt: Some(agent.role_prompt.clone()),
-        paused: Some(agent.paused),
         max_wakes_per_hour: Some(agent.max_wakes_per_hour),
         backend: Some(agent.backend.clone()),
         model: Some(agent.model.clone()),
@@ -794,10 +775,9 @@ pub async fn run_tool(
         .map(str::to_string);
     if let Some(agent_id) = agent_id {
         if let Some(agent) = super::with_db(app, |conn| db::get_agent(conn, &agent_id))? {
-            let pausing = args.get("paused").and_then(Value::as_bool) == Some(true);
             let run_config =
                 name == "agent_create" || name == "agent_revert" || tool_changes_run(args);
-            super::commands::settle_agent_update(app, &agent, pausing, run_config).await;
+            super::commands::settle_agent_update(app, &agent, run_config).await;
         }
     }
     Ok(result)
@@ -835,7 +815,6 @@ fn list_tool(app: &AppHandle, actor: &Agent) -> Result<Value, String> {
                 "name": agent.name,
                 "description": agent.description,
                 "icon": agent.icon,
-                "paused": agent.paused,
                 "builtin": agent.builtin,
                 "backend": agent.backend,
                 "model": agent.model,
@@ -882,14 +861,12 @@ async fn create_tool(
         skills: skills_arg(args)?.unwrap_or_default(),
     };
     let schedules = initial_schedules(args)?;
-    let paused = bool_arg(args, "paused")?.unwrap_or(false);
     let input = CreateInput {
         name,
         description,
         icon,
         role_prompt,
         config,
-        paused,
         schedules,
     };
     let agent = super::with_db(app, |conn| {
@@ -1035,9 +1012,6 @@ fn patch_from_args(args: &Value) -> Result<AgentPatch, String> {
         }
         patch.icon = icon.or(color);
     }
-    if let Some(paused) = bool_arg(args, "paused")? {
-        patch.paused = Some(paused);
-    }
     if let Some(value) = clearable_string(args, "backend")? {
         patch.backend = Some(value);
     }
@@ -1061,7 +1035,6 @@ fn patch_is_empty(patch: &AgentPatch) -> bool {
         && patch.description.is_none()
         && patch.icon.is_none()
         && patch.role_prompt.is_none()
-        && patch.paused.is_none()
         && patch.max_wakes_per_hour.is_none()
         && patch.backend.is_none()
         && patch.model.is_none()
@@ -1180,7 +1153,6 @@ mod tests {
             },
             role_prompt: String::new(),
             worktree_id: db::agent_worktree_id(id),
-            paused: false,
             max_wakes_per_hour: 12,
             builtin,
             backend: None,
@@ -1346,7 +1318,6 @@ mod tests {
             icon: "blue".into(),
             role_prompt: String::new(),
             config: AgentRunConfig::default(),
-            paused: false,
             schedules: Vec::new(),
         };
         assert!(create_for_actor(&mut conn, None, None, &input)
@@ -1394,7 +1365,6 @@ mod tests {
                     effort: Some("low".into()),
                     ..AgentRunConfig::default()
                 },
-                paused: false,
                 schedules: Vec::new(),
             },
         )
@@ -1453,7 +1423,6 @@ mod tests {
                     effort: Some("high".into()),
                     ..AgentRunConfig::default()
                 },
-                paused: false,
                 schedules: Vec::new(),
             },
         );
@@ -1472,7 +1441,6 @@ mod tests {
                     skills: vec![skill("/skills/review/SKILL.md")],
                     ..AgentRunConfig::default()
                 },
-                paused: false,
                 schedules: Vec::new(),
             },
         )
@@ -1513,7 +1481,6 @@ mod tests {
                 icon: "blue".into(),
                 role_prompt: String::new(),
                 config: AgentRunConfig::default(),
-                paused: false,
                 schedules: Vec::new(),
             },
         )

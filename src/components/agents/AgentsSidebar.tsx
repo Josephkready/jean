@@ -26,7 +26,6 @@ import { NewAgentDialog } from './NewAgentDialog'
 export function agentRowDot(
   agent: AgentSummary
 ): 'unread' | 'attention' | null {
-  if (agent.status === 'paused') return null
   if (agent.pendingApprovals > 0 || agent.status === 'waiting')
     return 'attention'
   if (agent.unreadNotifications > 0) return 'unread'
@@ -90,10 +89,7 @@ function AgentRow({
         data-testid={`agent-row-${agent.id}`}
       >
         <span className="relative shrink-0">
-          <AgentIcon
-            icon={agent.icon}
-            className={cn('size-9', agent.status === 'paused' && 'opacity-50')}
-          />
+          <AgentIcon icon={agent.icon} className="size-9" />
           {agent.status === 'working' && (
             <span
               className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full bg-green-500 ring-2 ring-sidebar dark:ring-[#0b0b0b]"

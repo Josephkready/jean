@@ -39,7 +39,6 @@ function agent(overrides: Partial<AgentSummary>): AgentSummary {
     icon: 'jean',
     rolePrompt: '',
     worktreeId: '__jean_agent__',
-    paused: false,
     maxWakesPerHour: 12,
     builtin: true,
     status: 'idle',

@@ -603,7 +603,6 @@ mod tests {
             icon: "blue".into(),
             role_prompt: String::new(),
             worktree_id: "__agent_reviewer__".into(),
-            paused: false,
             max_wakes_per_hour: 12,
             builtin: false,
             backend: Some("codex".into()),

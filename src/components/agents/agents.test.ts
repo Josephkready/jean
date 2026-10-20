@@ -36,7 +36,6 @@ function agent(overrides: Partial<AgentSummary>): AgentSummary {
     icon: 'jean',
     rolePrompt: '',
     worktreeId: '__jean_agent__',
-    paused: false,
     maxWakesPerHour: 12,
     builtin: true,
     status: 'idle',
@@ -60,10 +59,7 @@ function agent(overrides: Partial<AgentSummary>): AgentSummary {
 }
 
 describe('agentStatusLabel', () => {
-  it('puts paused and approvals before other states', () => {
-    expect(
-      agentStatusLabel(agent({ status: 'paused', pendingApprovals: 2 }))
-    ).toBe('Paused')
+  it('puts approvals before other states', () => {
     expect(
       agentStatusLabel(agent({ status: 'working', pendingApprovals: 2 }))
     ).toBe('Needs approval (2)')
@@ -279,9 +275,6 @@ describe('enabledAgentServers', () => {
 
 describe('agent rows', () => {
   it('shows what needs the user first, then the latest activity', () => {
-    expect(agentSubtitle(agent({ status: 'paused', activity: 'x' }))).toBe(
-      'Stopped'
-    )
     expect(agentSubtitle(agent({ pendingApprovals: 1 }))).toBe(
       'Needs your approval'
     )
@@ -299,13 +292,9 @@ describe('agent rows', () => {
 
   it('marks agents whose home chat is running as working', () => {
     const idle = agent({ id: 'a', homeSessionId: 's1' })
-    const paused = agent({ id: 'b', homeSessionId: 's2', status: 'paused' })
     const other = agent({ id: 'c', homeSessionId: 's3' })
-    const result = withRunningAgents(
-      [idle, paused, other],
-      new Set(['s1', 's2'])
-    )
-    expect(result?.map(a => a.status)).toEqual(['working', 'paused', 'idle'])
+    const result = withRunningAgents([idle, other], new Set(['s1']))
+    expect(result?.map(a => a.status)).toEqual(['working', 'idle'])
     const list = [idle]
     expect(withRunningAgents(list, new Set())).toBe(list)
   })
@@ -315,9 +304,6 @@ describe('agent rows', () => {
     expect(
       agentRowDot(agent({ unreadNotifications: 2, pendingApprovals: 1 }))
     ).toBe('attention')
-    expect(agentRowDot(agent({ status: 'paused', pendingApprovals: 1 }))).toBe(
-      null
-    )
     expect(agentRowDot(agent({}))).toBe(null)
   })
 })

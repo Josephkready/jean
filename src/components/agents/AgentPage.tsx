@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState, type CSSProperties } from 'react'
 import { toast } from 'sonner'
-import { Play, PauseCircle, Trash2 } from '@/components/icons/reicon'
+import { Trash2 } from '@/components/icons/reicon'
 import {
   AGENT_ICON_COLORS,
   AgentIcon,
@@ -22,7 +22,6 @@ import { cn } from '@/lib/utils'
 import {
   useAgentWorkdir,
   useDeleteAgent,
-  useUpdateAgent,
   type AgentSummary,
 } from '@/services/agents'
 import { useChatStore } from '@/store/chat-store'
@@ -94,21 +93,8 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
       chat.setActiveSession(agent.worktreeId, agent.homeSessionId)
     }
   }, [agent.worktreeId, agent.homeSessionId])
-  const updateAgent = useUpdateAgent()
   const deleteAgent = useDeleteAgent()
   const [confirmDelete, setConfirmDelete] = useState(false)
-
-  const togglePaused = () =>
-    updateAgent.mutate(
-      { agentId: agent.id, patch: { paused: !agent.paused } },
-      {
-        onSuccess: () =>
-          toast.success(
-            agent.paused ? `${agent.name} resumed` : `${agent.name} stopped`
-          ),
-        onError: e => toast.error(`Failed: ${e}`),
-      }
-    )
 
   const handleDelete = () =>
     deleteAgent.mutate(
@@ -174,22 +160,6 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
               .join(' · ')}
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={togglePaused}
-          disabled={updateAgent.isPending}
-          title={
-            agent.paused
-              ? 'Resume: deliver updates and run schedules again'
-              : 'Stop: cancel the running turn and hold updates and schedules'
-          }
-        >
-          {agent.paused ? <Play /> : <PauseCircle />}
-          <span className="hidden sm:inline">
-            {agent.paused ? 'Resume' : 'Stop'}
-          </span>
-        </Button>
         {!agent.builtin && (
           <Button
             variant="ghost"

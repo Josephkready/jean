@@ -967,9 +967,6 @@ async fn deliver(app: &AppHandle, agent_id: &str) -> Result<bool, String> {
     let Some(agent) = super::with_db(app, |conn| db::get_agent(conn, agent_id))? else {
         return Ok(false);
     };
-    if agent.paused {
-        return Ok(false);
-    }
     let events = super::with_db(app, |conn| db::pending_events(conn, &agent.id))?;
     if events.is_empty() {
         return Ok(false);
@@ -1093,12 +1090,10 @@ fn task_title_for(kind: &str) -> &'static str {
 async fn maintenance(app: &AppHandle) -> Result<bool, String> {
     let mut changed = false;
     for agent in super::with_db(app, |conn| db::list_agents(conn))? {
-        if !agent.paused {
-            changed |= rotate_chat_if_long(app, &agent).await.unwrap_or_else(|e| {
-                log::warn!("[Agents] chat rotation of {} failed: {e}", agent.id);
-                false
-            });
-        }
+        changed |= rotate_chat_if_long(app, &agent).await.unwrap_or_else(|e| {
+            log::warn!("[Agents] chat rotation of {} failed: {e}", agent.id);
+            false
+        });
     }
     let archive_before =
         db::now() - env_limit("JEAN_AGENT_TASK_ARCHIVE_SECS", TASK_ARCHIVE_AFTER_SECS);
@@ -1484,7 +1479,6 @@ mod tests {
             icon: "blue".into(),
             role_prompt: String::new(),
             worktree_id: "__agent_reviewer__".into(),
-            paused: false,
             max_wakes_per_hour: 12,
             builtin: false,
             backend: None,

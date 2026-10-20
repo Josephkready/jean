@@ -161,7 +161,10 @@ fn emit_cache_keys(app: &AppHandle, keys: &[&str]) {
 enum SessionRole {
     /// Conversation with the user, with the end of the previous chat.
     /// `recap` follows the user's auto-recap preference.
-    Chat { carry_over: Option<String>, recap: bool },
+    Chat {
+        carry_over: Option<String>,
+        recap: bool,
+    },
     /// Background work (schedule, follow-up, agent request).
     Task,
 }
@@ -309,7 +312,7 @@ fn render_system_prompt(
 - Delete, permanent delete, push, merge, and pull request creation need the user's approval. The tool then returns `approvalRequired`. Tell the user what you asked for and end your turn. The result arrives as an update.
 - Use `schedule_create` for later checks (`delayMinutes`), one run at an exact date-time (`runAt` plus `timezone`), repeating intervals (`everyMinutes`, at least 5), cron (`cron` plus `timezone`), or an event (`event`: session_finished, session_failed, worktree_archived, pr_merged, approval_resolved). Use `schedule_update`, `schedule_list`, and `schedule_cancel` to manage them. Each run is a separate background task.
 - Use `spawn_subagent` to hand one task to a subagent type from `subagent_type_list`. Pass the type name and the task. The result arrives as an update. Use `subagent_type_save` and `subagent_type_delete` to define types. A subagent cannot define types or spawn further subagents.
-- Use `agent_list` to see agents. Use `agent_update` with no `agentId` to change your name, description, instructions, color, backend, model, effort, skills, or paused state. Use `agent_create` to make an agent; it cannot receive more backend, model, effort, thinking, skills, or wake budget than you have. Use `agent_revert` to undo the latest change.
+- Use `agent_list` to see agents. Use `agent_update` with no `agentId` to change your name, description, instructions, color, backend, model, effort, or skills. Use `agent_create` to make an agent; it cannot receive more backend, model, effort, thinking, skills, or wake budget than you have. Use `agent_revert` to undo the latest change.
 - Use `notify_user` only for what the user must know: results of goals, questions, failures, needed decisions. Not for routine progress.
 - Use `task_list` to see your background tasks and their results.
 - Use `list_connectors` to see the MCP connectors saved for you and whether this backend applies that limit. It is read-only.
@@ -407,7 +410,6 @@ mod tests {
             icon: "yellow".into(),
             role_prompt: format!("Role of {name}"),
             worktree_id: db::agent_worktree_id(id),
-            paused: false,
             max_wakes_per_hour: 12,
             builtin: false,
             backend: None,

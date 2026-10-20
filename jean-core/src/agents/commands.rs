@@ -11,7 +11,7 @@ use super::db;
 pub struct AgentSummary {
     #[serde(flatten)]
     pub agent: db::Agent,
-    /// idle | working | waiting (needs the user) | paused
+    /// idle | working | waiting (needs the user)
     pub status: String,
     pub home_session_id: Option<String>,
     pub pending_updates: i64,
@@ -120,9 +120,7 @@ pub async fn list_agents(app: &AppHandle) -> Result<Vec<AgentSummary>, String> {
             .chain(chat_reply)
             .max_by_key(|(at, _)| *at)
             .and_then(|(_, text)| activity_preview(&text));
-        let status = if agent.paused {
-            "paused"
-        } else if busy {
+        let status = if busy {
             "working"
         } else if waiting {
             "waiting"
@@ -199,14 +197,13 @@ pub async fn create_agent(
                 icon: icon.to_string(),
                 role_prompt: role_prompt.to_string(),
                 config,
-                paused: false,
                 schedules: Vec::new(),
             },
         )
     })?;
     // The home chat is created on first list. Stamp it now so the toolbar
     // shows this agent's backend and model before the user sends a message.
-    settle_agent_update(app, &agent, false, true).await;
+    settle_agent_update(app, &agent, true).await;
     super::notify_changed(app);
     Ok(agent)
 }
@@ -216,7 +213,6 @@ pub async fn update_agent(
     agent_id: &str,
     patch: db::AgentPatch,
 ) -> Result<db::Agent, String> {
-    let pausing = patch.paused == Some(true);
     let run_config = patch.changes_run_config();
     let agent = super::with_db(app, |conn| {
         super::self_manage::apply_actor_update(
@@ -227,48 +223,27 @@ pub async fn update_agent(
             &patch,
         )
     })?;
-    settle_agent_update(app, &agent, pausing, run_config).await;
+    settle_agent_update(app, &agent, run_config).await;
     super::notify_changed(app);
     Ok(agent)
 }
 
-/// Stamp an empty home chat, and cancel a running turn when the agent is paused.
+/// Apply a changed run config to the agent's home chat.
 pub(crate) async fn settle_agent_update(
     app: &AppHandle,
     agent: &db::Agent,
-    pausing: bool,
     run_config_changed: bool,
 ) {
-    if run_config_changed {
-        if let Err(e) = super::engine::apply_run_config_to_home(app, agent).await {
-            log::warn!(
-                "[Agents] could not update home session for {}: {e}",
-                agent.id
-            );
-        }
-        super::notify_sessions(app);
+    if !run_config_changed {
+        return;
     }
-    // Stop: cancel the agent's running turn. Its queue and schedules wait.
-    if pausing {
-        let Ok(path) = super::agent_workdir(app, &agent.id) else {
-            return;
-        };
-        if let Ok(sessions) =
-            crate::chat::get_sessions(app.clone(), agent.worktree_id.clone(), path, None, None)
-                .await
-        {
-            for session in sessions.sessions {
-                if crate::chat::registry::is_session_actively_managed(&session.id) {
-                    let _ = crate::chat::cancel_chat_message(
-                        app.clone(),
-                        session.id,
-                        agent.worktree_id.clone(),
-                    )
-                    .await;
-                }
-            }
-        }
+    if let Err(e) = super::engine::apply_run_config_to_home(app, agent).await {
+        log::warn!(
+            "[Agents] could not update home session for {}: {e}",
+            agent.id
+        );
     }
+    super::notify_sessions(app);
 }
 
 pub fn delete_agent(app: &AppHandle, agent_id: &str) -> Result<(), String> {
@@ -287,7 +262,7 @@ pub async fn revert_agent_change(
         super::self_manage::revert_change(conn, super::self_manage::USER_ACTOR, None, change_id)
     })?;
     if let Some(agent) = super::with_db(app, |conn| db::get_agent(conn, &change.target_agent_id))? {
-        settle_agent_update(app, &agent, false, true).await;
+        settle_agent_update(app, &agent, true).await;
     }
     super::notify_changed(app);
     Ok(change)

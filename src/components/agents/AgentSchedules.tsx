@@ -28,7 +28,6 @@ import {
   AgentEmpty,
   AgentList,
   AgentLoading,
-  AgentNotice,
   AgentSection,
   AgentTabBody,
 } from './agent-ui'
@@ -392,11 +391,6 @@ export function AgentSchedules({ agent }: { agent: AgentSummary }) {
         description="Each run starts a background task. Cron uses a 5-field expression in the chosen timezone. Events wake the agent when something happens in Jean."
         actions={form === null ? newButton : null}
       >
-        {agent.paused && (
-          <AgentNotice>
-            The agent is stopped. Routines do not run until you resume it.
-          </AgentNotice>
-        )}
         {form && (
           <ScheduleEditor
             form={form}
