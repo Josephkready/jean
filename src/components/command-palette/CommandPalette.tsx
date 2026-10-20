@@ -54,6 +54,7 @@ interface ProjectCommand {
   avatarFallback: string
   isServer: boolean
   group: string
+  accessedAt: number
   keywords: string[]
   execute: () => void
 }
@@ -93,8 +94,11 @@ export function CommandPalette() {
   const agentServers = useAgentsEnabledServers()
   const { data: agents = [] } = useAgentsList(agentServers)
   const multiServerAgents = new Set(agents.map(a => a.serverId)).size > 1
+  const showAgents = useShowAgents()
+  const selectedAgentId = useUIStore(state => state.selectedAgentId)
+  const agentsLeftAt = useUIStore(state => state.agentsLeftAt)
   // On the Agents page the current project is not on screen, so list it too
-  const hiddenProjectId = useShowAgents() ? null : selectedProjectId
+  const hiddenProjectId = showAgents ? null : selectedProjectId
 
   // Create dynamic project commands (sorted by last-accessed, most recent first)
   // Current project is excluded so the previous project is first (quick CMD+K → Enter switching).
@@ -142,6 +146,7 @@ export function CommandPalette() {
           avatarFallback: project.name[0]?.toUpperCase() ?? '?',
           isServer,
           group: isServer ? 'servers' : 'projects',
+          accessedAt: projectAccessTimestamps[project.id] ?? 0,
           keywords: [
             isServer ? 'server' : 'project',
             'switch',
@@ -194,6 +199,15 @@ export function CommandPalette() {
             )
           : agents
 
+    // The agent was the previous view (left after the last project switch):
+    // list it first so CMD+K → Enter returns to it, like the previous project.
+    const lastAgent = filteredAgents.find(a => a.id === selectedAgentId)
+    const firstProject = filteredProjectCommands.find(cmd => !cmd.isServer)
+    const agentIsPrevious =
+      !showAgents &&
+      !!lastAgent &&
+      agentsLeftAt > (firstProject?.accessedAt ?? 0)
+
     // Group static commands
     const staticGroups = staticCommands.reduce(
       (acc, command) => {
@@ -209,9 +223,22 @@ export function CommandPalette() {
       staticGroups,
       projectCommands: filteredProjectCommands.filter(cmd => !cmd.isServer),
       serverCommands: filteredProjectCommands.filter(cmd => cmd.isServer),
-      agents: filteredAgents,
+      agents:
+        agentIsPrevious && lastAgent
+          ? [lastAgent, ...filteredAgents.filter(a => a !== lastAgent)]
+          : filteredAgents,
+      agentIsPrevious,
     }
-  }, [commandContext, search, projectCommands, agents, agentServers.length])
+  }, [
+    commandContext,
+    search,
+    projectCommands,
+    agents,
+    agentServers.length,
+    showAgents,
+    selectedAgentId,
+    agentsLeftAt,
+  ])
 
   const handleAgentSelect = useCallback(
     (agentId: string) => {
@@ -290,6 +317,29 @@ export function CommandPalette() {
     </CommandItem>
   )
 
+  const agentsGroup = commandGroups.agents.length > 0 && (
+    <CommandGroup heading="Agents">
+      {commandGroups.agents.map(agent => (
+        <CommandItem
+          key={agent.id}
+          value={`agent-${agent.id} ${agent.name} ${agent.serverName}`}
+          onSelect={() => handleAgentSelect(agent.id)}
+          className="items-start"
+        >
+          <span className="flex h-lh shrink-0 items-center leading-snug">
+            <AgentIcon icon={agent.icon} className="size-4" />
+          </span>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate leading-snug">{agent.name}</span>
+            <span className="truncate text-xs leading-snug text-muted-foreground">
+              {agentDescription(agent, multiServerAgents)}
+            </span>
+          </div>
+        </CommandItem>
+      ))}
+    </CommandGroup>
+  )
+
   return (
     <CommandDialog
       open={commandPaletteOpen}
@@ -307,7 +357,8 @@ export function CommandPalette() {
       <CommandList className="max-h-[70dvh] sm:max-h-[300px]">
         <CommandEmpty>No results found.</CommandEmpty>
 
-        {/* Projects and servers stay at the top for quick switching */}
+        {/* Previous place first for quick CMD+K → Enter switching */}
+        {commandGroups.agentIsPrevious && agentsGroup}
         {commandGroups.projectCommands.length > 0 && (
           <CommandGroup heading="Projects">
             {commandGroups.projectCommands.map(renderProjectItem)}
@@ -318,29 +369,7 @@ export function CommandPalette() {
             {commandGroups.serverCommands.map(renderProjectItem)}
           </CommandGroup>
         )}
-
-        {commandGroups.agents.length > 0 && (
-          <CommandGroup heading="Agents">
-            {commandGroups.agents.map(agent => (
-              <CommandItem
-                key={agent.id}
-                value={`agent-${agent.id} ${agent.name} ${agent.serverName}`}
-                onSelect={() => handleAgentSelect(agent.id)}
-                className="items-start"
-              >
-                <span className="flex h-lh shrink-0 items-center leading-snug">
-                  <AgentIcon icon={agent.icon} className="size-4" />
-                </span>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="truncate leading-snug">{agent.name}</span>
-                  <span className="truncate text-xs leading-snug text-muted-foreground">
-                    {agentDescription(agent, multiServerAgents)}
-                  </span>
-                </div>
-              </CommandItem>
-            ))}
-          </CommandGroup>
-        )}
+        {!commandGroups.agentIsPrevious && agentsGroup}
 
         {/* Static command groups */}
         {Object.entries(commandGroups.staticGroups).map(

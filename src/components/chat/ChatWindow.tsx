@@ -3302,7 +3302,14 @@ const ChatWindowContent = memo(function ChatWindowContent({
                           className="pointer-events-auto relative sm:mx-auto sm:mb-3 sm:max-w-3xl xl:max-w-4xl"
                         >
                           {/* Goal, hidden history, pinned tables, and scroll-to-bottom tabs - attached to the top edge of the composer */}
-                          <div className="absolute right-3 bottom-full flex items-end gap-1">
+                          <div
+                            className={cn(
+                              'absolute right-3 bottom-full flex items-end gap-1',
+                              // Pill composer: float the tabs as pills above it
+                              pillComposer &&
+                                'right-5 mb-2 [&_button]:h-7 [&_button]:rounded-full [&_button]:border-b [&_button]:px-3 [&_button]:shadow-sm'
+                            )}
+                          >
                             {!zenMode && (
                               <GoalBadge
                                 sessionId={activeSessionId}

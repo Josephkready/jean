@@ -80,9 +80,10 @@ function AgentRow({
       <button
         type="button"
         aria-current={isSelected ? 'page' : undefined}
-        title={agentStatusLabel(agent)}
+        title={`${agent.name} · ${agentStatusLabel(agent)}`}
+        aria-label={agent.name}
         className={cn(
-          'flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-150',
+          'relative flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 @max-[13rem]/agents:justify-center @max-[13rem]/agents:px-0',
           isSelected ? 'bg-accent text-foreground' : 'hover:bg-accent/50'
         )}
         onClick={() => onSelect(agent.id)}
@@ -97,7 +98,7 @@ function AgentRow({
             />
           )}
         </span>
-        <span className="min-w-0 flex-1">
+        <span className="min-w-0 flex-1 @max-[13rem]/agents:hidden">
           <span className="block truncate text-sm font-medium text-foreground">
             {agent.name}
           </span>
@@ -108,7 +109,7 @@ function AgentRow({
         {dot && (
           <span
             className={cn(
-              'size-2 shrink-0 rounded-full',
+              'size-2 shrink-0 rounded-full @max-[13rem]/agents:absolute @max-[13rem]/agents:top-1.5 @max-[13rem]/agents:right-1.5',
               dot === 'unread' ? 'bg-blue-500' : 'bg-amber-500'
             )}
             aria-label={dot === 'unread' ? 'Unread messages' : 'Needs you'}
@@ -146,7 +147,9 @@ function AgentGroup({
       )}
       {custom.length > 0 && (
         <>
-          <h4 className="pb-1 pl-4 pr-2 pt-4 text-xs text-muted-foreground">
+          {/* Narrow sidebar: a divider replaces the heading */}
+          <div className="mx-3 mt-3 mb-2 hidden border-t border-border @max-[13rem]/agents:block" />
+          <h4 className="pb-1 pl-4 pr-2 pt-4 text-xs text-muted-foreground @max-[13rem]/agents:hidden">
             Your agents
             <span className="ml-1.5 tabular-nums">{custom.length}</span>
           </h4>
@@ -225,10 +228,13 @@ export function AgentsSidebar() {
           </button>
         </SidebarTabRail>
       )}
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* Narrow sidebar (container below 13rem) shows only the agent icons */}
+      <div className="@container/agents flex min-w-0 flex-1 flex-col">
         {/* Same 8px offset and 48px height as the rail buttons, so they line up */}
-        <div className="mt-2 flex h-12 shrink-0 items-center justify-between px-3">
-          <h2 className="text-sm font-medium text-foreground">Agents</h2>
+        <div className="mt-2 flex h-12 shrink-0 items-center justify-between px-3 @max-[13rem]/agents:justify-center">
+          <h2 className="text-sm font-medium text-foreground @max-[13rem]/agents:hidden">
+            Agents
+          </h2>
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -250,13 +256,13 @@ export function AgentsSidebar() {
                 <button
                   type="button"
                   aria-label="Filter agents by server"
-                  className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-xs @max-[13rem]/agents:justify-center text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
                   <Server className="size-3.5" />
-                  <span className="min-w-0 flex-1 truncate text-left">
+                  <span className="min-w-0 flex-1 truncate text-left @max-[13rem]/agents:hidden">
                     {selectedServerLabel}
                   </span>
-                  <ChevronDown className="size-3.5 opacity-50" />
+                  <ChevronDown className="size-3.5 opacity-50 @max-[13rem]/agents:hidden" />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
@@ -299,7 +305,7 @@ export function AgentsSidebar() {
             groups.map(([groupId, groupName, groupAgents]) => (
               <section key={groupId || 'agents'}>
                 {groupName && (
-                  <h3 className="px-4 pb-1.5 pt-3 text-xs font-medium text-muted-foreground">
+                  <h3 className="truncate px-4 pb-1.5 pt-3 text-xs font-medium text-muted-foreground @max-[13rem]/agents:hidden">
                     {groupName}
                   </h3>
                 )}

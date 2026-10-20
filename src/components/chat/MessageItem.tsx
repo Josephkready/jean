@@ -509,7 +509,7 @@ export const MessageItem = memo(function MessageItem({
     <>
       {/* Show attached images for user messages */}
       {imagePaths.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {imagePaths.map((path, idx) => (
             <ImageLightbox
               key={`${message.id}-img-${idx}`}
@@ -526,7 +526,7 @@ export const MessageItem = memo(function MessageItem({
 
       {/* Show attached text files for user messages */}
       {textFilePaths.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {textFilePaths.map((path, idx) => (
             <TextFileLightbox
               key={`${message.id}-txt-${idx}`}
@@ -541,7 +541,7 @@ export const MessageItem = memo(function MessageItem({
 
       {/* Show attached file and directory mentions (@ mentions) for user messages */}
       {(fileMentionPaths.length > 0 || directoryMentionPaths.length > 0) && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {directoryMentionPaths.map((path, idx) => (
             <FileMentionBadge
               key={`${message.id}-dir-${idx}`}
@@ -565,7 +565,7 @@ export const MessageItem = memo(function MessageItem({
 
       {/* Show attached skills (/ mentions) for user messages */}
       {skillPaths.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {skillPaths.map((path, idx) => {
             // Extract skill name from path (e.g., /Users/.../skills/react/SKILL.md -> react)
             const parts = normalizePath(path).split('/')
@@ -1015,7 +1015,9 @@ export const MessageItem = memo(function MessageItem({
               hideSettingsBadges
                 ? cn(
                     PILL_BUBBLE_CLASS,
-                    'bg-[color-mix(in_oklab,var(--agent-accent,var(--muted))_22%,var(--background))]'
+                    '[--bubble-bg:color-mix(in_oklab,var(--agent-accent,var(--muted))_22%,var(--background))] bg-(--bubble-bg)',
+                    // Attachments: the bubble color, a bit darker
+                    '[&_[data-attachments]>*]:border-transparent [&_[data-attachments]>*]:bg-[color-mix(in_oklab,var(--bubble-bg)_80%,black)]'
                   )
                 : 'min-w-0 break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground'
             )}

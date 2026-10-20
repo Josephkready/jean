@@ -203,6 +203,13 @@ export function useScrollManagement({
     [activeSessionId, contentReady]
   )
 
+  // Derive the floating Bottom action from the real viewport edge.
+  const syncIsAtBottom = useCallback((viewport: HTMLDivElement) => {
+    const atBottom = isViewportAtBottom(viewport)
+    isAtBottomRef.current = atBottom
+    setIsAtBottom(prev => (prev === atBottom ? prev : atBottom))
+  }, [])
+
   const stopFollowingTail = useCallback(() => {
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current)
@@ -210,12 +217,19 @@ export function useScrollManagement({
     }
     isAutoScrollingRef.current = false
     isFollowingTailRef.current = false
-    isAtBottomRef.current = false
-    setIsAtBottom(false)
     userScrollUpUntilRef.current = Date.now() + 1000
     const viewport = scrollViewportRef.current
+    // Do not assume the viewport moved: an upward wheel can be swallowed
+    // (overscroll, nested scroller) and fire no scroll event to correct a
+    // forced "away" state. handleScroll updates this once it really moves.
+    if (viewport) {
+      syncIsAtBottom(viewport)
+    } else {
+      isAtBottomRef.current = false
+      setIsAtBottom(false)
+    }
     rememberScroll(viewport?.scrollTop ?? lastKnownScrollRef.current.scrollTop, false)
-  }, [rememberScroll])
+  }, [rememberScroll, syncIsAtBottom])
 
   // Cleanup scroll timeout on unmount
   useEffect(() => {
@@ -524,12 +538,25 @@ export function useScrollManagement({
       return
     }
 
-    // Content can grow or the window can become shorter without a scroll
-    // event. Keep the floating Bottom action in sync with the real viewport
-    // edge so it remains available on short desktop windows.
-    const atBottom = isViewportAtBottom(viewport)
-    isAtBottomRef.current = atBottom
-    setIsAtBottom(prev => (prev === atBottom ? prev : atBottom))
+    // A smooth scroll is in flight; its scrollend handler syncs the state.
+    if (isAutoScrollingRef.current) return
+
+    // Content can grow (late markdown/image reflow, taller composer padding)
+    // without a scroll event. Keep a tail-following chat pinned instead of
+    // leaving it a few pixels above the edge. While sending, the streaming
+    // observer owns scrolling (desktop plan pinning).
+    if (
+      !isSending &&
+      isFollowingTailRef.current &&
+      Date.now() >= userScrollUpUntilRef.current &&
+      !isViewportAtBottom(viewport)
+    ) {
+      scrollToTail(viewport)
+    }
+
+    // Keep the floating Bottom action in sync with the real viewport edge so
+    // it remains available on short desktop windows.
+    syncIsAtBottom(viewport)
   })
 
   useEffect(() => {
@@ -649,6 +676,7 @@ export function useScrollManagement({
             ) {
               scrollToTail(viewport)
             }
+            syncIsAtBottom(viewport)
           }
           viewport.addEventListener('scrollend', onEnd, { once: true })
           scrollTimeoutRef.current = setTimeout(onEnd, 400)
@@ -683,7 +711,7 @@ export function useScrollManagement({
       }
     }
     wasSendingRef.current = !!isSending
-  }, [isSending])
+  }, [isSending, syncIsAtBottom])
 
   // Persist the previous session and prepare restore when the displayed session
   // changes (covers both tab switches and worktree switches).
@@ -870,6 +898,9 @@ export function useScrollManagement({
         if (scrollHeight - scrollTop - clientHeight > 2) {
           scrollToTail(viewport)
         }
+        // handleScroll was blocked during the animation; resizes in that
+        // window may have marked the chat as away from bottom.
+        syncIsAtBottom(viewport)
         rememberScroll(viewport.scrollTop, true)
       }
 
@@ -885,7 +916,7 @@ export function useScrollManagement({
       // Fallback timeout in case scrollend doesn't fire
       scrollTimeoutRef.current = setTimeout(onScrollEnd, 400)
     },
-    [rememberScroll]
+    [rememberScroll, syncIsAtBottom]
   )
 
   // Mark scroll state as "at bottom" without performing any physical scroll.

@@ -131,6 +131,8 @@ interface UIState {
   railSection: RailSection
   /** Agent open on the Agents page */
   selectedAgentId: string
+  /** When the user last left the Agents page (ms, 0 = never this session) */
+  agentsLeftAt: number
   /** Agents sidebar server filter: 'all' or a server ID */
   agentsServerFilter: string
   /** Agent pages show every tab and tool activity (off: Chat and Schedules) */
@@ -428,6 +430,7 @@ export const useUIStore = create<UIState>()(
       leftSidebarVisible: false,
       railSection: 'workspace',
       selectedAgentId: 'jean',
+      agentsLeftAt: 0,
       agentsServerFilter: 'all',
       agentsAdvanced: false,
       leftSidebarSize: 250, // Default width in pixels
@@ -558,7 +561,14 @@ export const useUIStore = create<UIState>()(
       setRailSection: section =>
         set(
           state =>
-            state.railSection === section ? state : { railSection: section },
+            state.railSection === section
+              ? state
+              : {
+                  railSection: section,
+                  ...(state.railSection === 'agents' && {
+                    agentsLeftAt: Date.now(),
+                  }),
+                },
           undefined,
           'setRailSection'
         ),

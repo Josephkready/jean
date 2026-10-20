@@ -42,6 +42,8 @@ const {
   setSelectedAgentId: vi.fn(),
   agentState: {
     pageOpen: false,
+    selectedAgentId: 'jean',
+    leftAt: 0,
     servers: [] as string[],
     agents: [] as {
       id: string
@@ -71,10 +73,15 @@ const remoteConnections = [
 
 vi.mock('@/store/ui-store', () => ({
   useUIStore: Object.assign(
-    () => ({
-      commandPaletteOpen: true,
-      setCommandPaletteOpen,
-    }),
+    (selector?: (state: Record<string, unknown>) => unknown) => {
+      const state = {
+        commandPaletteOpen: true,
+        setCommandPaletteOpen,
+        selectedAgentId: agentState.selectedAgentId,
+        agentsLeftAt: agentState.leftAt,
+      }
+      return selector ? selector(state) : state
+    },
     { getState: () => ({ setRailSection, setSelectedAgentId }) }
   ),
 }))
@@ -332,6 +339,10 @@ describe('CommandPalette agents', () => {
     isNativeApp.mockReturnValue(true)
     getActiveConnectionId.mockReturnValue('local')
     projectStoreState.selectedProjectId = null
+    projectStoreState.projectAccessTimestamps = {}
+    agentState.pageOpen = false
+    agentState.selectedAgentId = 'jean'
+    agentState.leftAt = 0
     agentState.servers = ['local']
     agentState.agents = [
       {
@@ -364,6 +375,28 @@ describe('CommandPalette agents', () => {
 
     expect(setRailSection).toHaveBeenCalledWith('agents')
     expect(setSelectedAgentId).toHaveBeenCalledWith('remote-2:reviewer')
+  })
+
+  it('lists the previous agent first after switching to a project', () => {
+    agentState.selectedAgentId = 'remote-2:reviewer'
+    agentState.leftAt = 200
+    projectStoreState.projectAccessTimestamps = { 'project-2': 100 }
+
+    render(<CommandPalette />)
+
+    const first = document.querySelector('[cmdk-item]')
+    expect(first).toHaveTextContent('Reviewer')
+  })
+
+  it('keeps projects first when a project was opened after the agent', () => {
+    agentState.selectedAgentId = 'remote-2:reviewer'
+    agentState.leftAt = 100
+    projectStoreState.projectAccessTimestamps = { 'project-2': 200 }
+
+    render(<CommandPalette />)
+
+    const first = document.querySelector('[cmdk-item]')
+    expect(first?.closest('[cmdk-group]')).toHaveTextContent(/^Projects/)
   })
 
   it('hides agents when the feature is off', () => {
