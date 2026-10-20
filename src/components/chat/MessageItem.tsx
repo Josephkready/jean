@@ -1013,7 +1013,10 @@ export const MessageItem = memo(function MessageItem({
             className={cn(
               'max-w-full',
               hideSettingsBadges
-                ? PILL_BUBBLE_CLASS
+                ? cn(
+                    PILL_BUBBLE_CLASS,
+                    'bg-[color-mix(in_oklab,var(--agent-accent,var(--muted))_22%,var(--background))]'
+                  )
                 : 'min-w-0 break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground'
             )}
           >

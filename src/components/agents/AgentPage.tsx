@@ -1,7 +1,11 @@
-import { Suspense, lazy, useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useState, type CSSProperties } from 'react'
 import { toast } from 'sonner'
 import { Play, PauseCircle, Trash2 } from '@/components/icons/reicon'
-import { AgentIcon } from '@/components/icons/JeanAgentIcon'
+import {
+  AGENT_ICON_COLORS,
+  AgentIcon,
+  type AgentIconKey,
+} from '@/components/icons/JeanAgentIcon'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -247,7 +251,16 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
           Advanced
         </label>
       </div>
-      <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        className="relative flex min-h-0 flex-1 flex-col"
+        style={
+          {
+            // Tints the user's prompt bubbles in this agent's color
+            '--agent-accent': (AGENT_ICON_COLORS[agent.icon as AgentIconKey] ??
+              AGENT_ICON_COLORS.yellow)[0],
+          } as CSSProperties
+        }
+      >
         {tab === 'chat' ? (
           <>
             {agent.pendingApprovals > 0 && (

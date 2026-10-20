@@ -4,7 +4,7 @@ type AgentsIconProps = SVGProps<SVGSVGElement> & {
   size?: string | number
 }
 
-/** Line-art agent face (antenna, eyes, smile), matching the pixel-art AgentIcon mascot. */
+/** Line-art agent: a speech bubble with eyes and a spark. */
 export const AgentsIcon = forwardRef<SVGSVGElement, AgentsIconProps>(
   ({ size = 24, ...props }, ref) => (
     <svg
@@ -21,17 +21,12 @@ export const AgentsIcon = forwardRef<SVGSVGElement, AgentsIconProps>(
       aria-hidden="true"
       {...props}
     >
-      {/* Antenna */}
-      <circle cx="12" cy="2.75" r="1.25" />
-      <path d="M12 4v2.5" />
-      {/* Head */}
-      <rect x="3.75" y="6.5" width="16.5" height="13.5" rx="4.5" />
-      {/* Ears */}
-      <path d="M1.75 11.5v3M22.25 11.5v3" />
+      {/* Speech-bubble body with a tail */}
+      <path d="M11 4.5H8.5a5 5 0 0 0-5 5v4a5 5 0 0 0 5 5h.5v3l4-3h2.5a5 5 0 0 0 5-5v-1" />
       {/* Eyes */}
-      <path d="M9 11.25v1.5M15 11.25v1.5" strokeWidth="2.25" />
-      {/* Smile */}
-      <path d="M9.25 15.75c1.5 1.25 4 1.25 5.5 0" />
+      <path d="M9.5 10.75v1.5M14.5 10.75v1.5" strokeWidth="2.25" />
+      {/* Spark: the agent is alive and working */}
+      <path d="M19 1.75c.3 1.85 1.15 2.7 3 3-1.85.3-2.7 1.15-3 3-.3-1.85-1.15-2.7-3-3 1.85-.3 2.7-1.15 3-3Z" />
     </svg>
   )
 )

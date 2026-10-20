@@ -3436,7 +3436,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                             className={cn(
                               'relative overflow-hidden border-t border-border bg-card transition-[background-color,box-shadow] duration-150 sm:rounded-lg sm:border',
                               pillComposer &&
-                                'mx-2 mb-2 rounded-[28px] border sm:mx-0 sm:mb-0 sm:rounded-[28px]',
+                                'mx-2 mb-4 rounded-[28px] border sm:mx-0 sm:mb-3 sm:rounded-[28px]',
                               activeSessionId &&
                                 currentQueuedMessages.length > 0 &&
                                 'sm:rounded-t-none',
