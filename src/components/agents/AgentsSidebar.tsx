@@ -80,7 +80,7 @@ function AgentRow({
       <button
         type="button"
         aria-current={isSelected ? 'page' : undefined}
-        title={`${agent.name} · ${agentStatusLabel(agent)}`}
+        title={[agent.name, agentStatusLabel(agent)].filter(Boolean).join(' · ')}
         aria-label={agent.name}
         className={cn(
           'relative flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 @max-[13rem]/agents:justify-center @max-[13rem]/agents:px-0',

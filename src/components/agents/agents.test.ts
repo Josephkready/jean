@@ -85,7 +85,7 @@ describe('agentStatusLabel', () => {
     expect(agentStatusLabel(agent({ activeDelegations: 3 }))).toBe(
       'Following 3 sessions'
     )
-    expect(agentStatusLabel(agent({}))).toBe('Idle')
+    expect(agentStatusLabel(agent({}))).toBeNull()
   })
 })
 

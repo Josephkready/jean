@@ -79,7 +79,8 @@ export function AgentUpdatesButton({
     }
   }, [open, newest, agent.id])
 
-  if (updates.length === 0) return null
+  // Shown only when there is something new (kept while the panel is open)
+  if (unread === 0 && !open) return null
 
   return (
     <>

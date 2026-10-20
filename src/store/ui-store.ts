@@ -140,6 +140,8 @@ interface UIState {
   /** Per agent: timestamp (unix s) of the newest update reply the user saw */
   agentUpdatesSeenAt: Record<string, number>
   leftSidebarSize: number // Width in pixels, persisted across sessions
+  /** Agents sidebar width in pixels; can shrink to an icon column */
+  agentsSidebarSize: number
   /** File browser (worktree explorer) visibility */
   fileBrowserVisible: boolean
   /** File browser width in pixels, persisted across sessions */
@@ -264,6 +266,7 @@ interface UIState {
   setAgentsAdvanced: (advanced: boolean) => void
   markAgentUpdatesSeen: (agentId: string, timestamp: number) => void
   setLeftSidebarSize: (size: number) => void
+  setAgentsSidebarSize: (size: number) => void
   leftSidebarSwipe: {
     isDragging: boolean
     dragOffset: number
@@ -438,6 +441,7 @@ export const useUIStore = create<UIState>()(
       agentsAdvanced: false,
       agentUpdatesSeenAt: {},
       leftSidebarSize: 250, // Default width in pixels
+      agentsSidebarSize: 250,
       leftSidebarSwipe: {
         isDragging: false,
         dragOffset: 0,
@@ -635,6 +639,16 @@ export const useUIStore = create<UIState>()(
             state.leftSidebarSize === size ? state : { leftSidebarSize: size },
           undefined,
           'setLeftSidebarSize'
+        ),
+
+      setAgentsSidebarSize: size =>
+        set(
+          state =>
+            state.agentsSidebarSize === size
+              ? state
+              : { agentsSidebarSize: size },
+          undefined,
+          'setAgentsSidebarSize'
         ),
 
       setLeftSidebarSwipe: swipe =>

@@ -132,6 +132,7 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
     agent.unreadNotifications > 0 ||
     agent.pendingApprovals > 0 ||
     agent.status === 'waiting'
+  const statusLabel = agentStatusLabel(agent)
 
   return (
     <div
@@ -163,17 +164,19 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
             <span className="truncate" data-testid="agent-header-name">
               {agent.name}
             </span>
-            <span
-              className={cn(
-                'shrink-0 whitespace-nowrap text-xs font-normal',
-                needsUser
-                  ? 'text-amber-600 dark:text-amber-400'
-                  : 'text-muted-foreground'
-              )}
-              data-testid="agent-header-status"
-            >
-              {agentStatusLabel(agent)}
-            </span>
+            {statusLabel && (
+              <span
+                className={cn(
+                  'shrink-0 whitespace-nowrap text-xs font-normal',
+                  needsUser
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : 'text-muted-foreground'
+                )}
+                data-testid="agent-header-status"
+              >
+                {statusLabel}
+              </span>
+            )}
           </button>
           <div className="pointer-events-auto flex items-center rounded-full border bg-background/80 shadow-sm backdrop-blur empty:hidden">
             <AgentUpdatesButton agent={agent} workdir={workdir} />
