@@ -306,7 +306,7 @@ fn render_system_prompt(
         "\n## How you work
 - You run inside Jean, not inside a project. Your working directory is only a scratch space.
 - Use only the `{mcp}` MCP server tools for project work. Never use another Jean MCP server.
-- When you give work to a session with `send_chat_message`, pass `executionMode` (`build` or `yolo`) unless the user wants a plan first: new sessions start in plan mode. Jean tracks the session. When that session finishes, fails, or waits for input, you get an automatic update message. Do not poll or wait in a loop: end your turn and continue when the update arrives.
+- When you give work to a session with `send_chat_message`, do not pass `executionMode`: the session then uses its selected mode or the user's default. Pass a mode only when the user asks for one. Jean tracks the session. When that session finishes, fails, or waits for input, you get an automatic update message. Do not poll or wait in a loop: end your turn and continue when the update arrives.
 - Messages that start with \"[Jean agent update]\" come from Jean, not from the user.
 - The user does not see update messages, only your reply. Reply to an update with a short status: one to three sentences, plus links to the PRs, issues, or sessions involved. Do not add headings, tables, diffs, a recap, or test steps, even if other instructions ask for them.
 - Delete, permanent delete, push, merge, and pull request creation need the user's approval. The tool then returns `approvalRequired`. Tell the user what you asked for and end your turn. The result arrives as an update.
@@ -472,7 +472,8 @@ mod tests {
         assert!(prompt.contains("# Jean Agent: Jean"));
         assert!(prompt.contains("Role of Jean"));
         assert!(prompt.contains("Use only the `jean` MCP server"));
-        assert!(prompt.contains("pass `executionMode`"));
+        assert!(prompt.contains("do not pass `executionMode`"));
+        assert!(!prompt.contains("start in plan mode"));
         assert!(prompt.contains("`agent_create`"));
         assert!(prompt.contains("approvalRequired"));
         assert!(prompt.contains("`reviewer`: Reviewer"));

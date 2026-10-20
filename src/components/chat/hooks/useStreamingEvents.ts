@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import type { QueryClient } from '@tanstack/react-query'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
-import { chatQueryKeys } from '@/services/chat'
+import { chatQueryKeys, hasLocalSendInFlight } from '@/services/chat'
 import { isTauri, saveWorktreePr, projectsQueryKeys } from '@/services/projects'
 import type { Project, Worktree } from '@/types/projects'
 import { preferencesQueryKeys } from '@/services/preferences'
@@ -1221,14 +1221,20 @@ export default function useStreamingEvents({
       const sessionBackend = queryClient.getQueryData<Session>(
         chatQueryKeys.session(sessionId)
       )?.backend
+      // Without a local send, nothing replaces the optimistic message with
+      // the persisted one, and live blocks can miss text parts (reconnects,
+      // agent wakes). Load the persisted message instead.
       const needsBackendHydration = shouldHydrateCompletedSessionFromBackend(
         content ?? '',
         contentBlocks ?? [],
         toolCalls ?? [],
-        { backend: sessionBackend }
+        {
+          backend: sessionBackend,
+          force: !hasLocalSendInFlight(queryClient, sessionId),
+        }
       )
 
-      if (needsBackendHydration) {
+      if (needsBackendHydration && !hasMeaningfulPayload) {
         console.warn(
           `[chat:done] No streaming content for session=${sessionId}. ` +
             `Skipping empty optimistic assistant; hydrating from backend.`

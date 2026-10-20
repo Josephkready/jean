@@ -100,8 +100,8 @@ export function agentStatusLabel(agent: AgentSummary): string {
   return 'Idle'
 }
 
+/** Sections of the agent side panel (the chat is always shown). */
 export type AgentTab =
-  | 'chat'
   | 'inbox'
   | 'tasks'
   | 'subagents'
@@ -111,7 +111,6 @@ export type AgentTab =
   | 'settings'
 
 const ALL_AGENT_TABS: AgentTab[] = [
-  'chat',
   'inbox',
   'tasks',
   'subagents',
@@ -122,7 +121,7 @@ const ALL_AGENT_TABS: AgentTab[] = [
 ]
 
 /**
- * Tabs of an agent page. Without Advanced: Chat and Schedules, plus Inbox
+ * Sections of the agent side panel. Without Advanced: Schedules, plus Inbox
  * while it has unread messages or is open (reading them must not hide it).
  */
 export function visibleAgentTabs(
@@ -133,7 +132,6 @@ export function visibleAgentTabs(
   if (advanced) return ALL_AGENT_TABS
   return ALL_AGENT_TABS.filter(
     tab =>
-      tab === 'chat' ||
       tab === 'schedules' ||
       (tab === 'inbox' &&
         (agent.unreadNotifications > 0 || current === 'inbox'))

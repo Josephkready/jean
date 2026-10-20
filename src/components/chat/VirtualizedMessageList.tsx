@@ -1,4 +1,3 @@
-import { isAgentUpdateMessage } from './message-content-utils'
 import {
   useRef,
   useEffect,
@@ -464,11 +463,7 @@ export const VirtualizedMessageList = memo(
                   else messageRefs.current.delete(globalIndex)
                 }}
                 className={
-                  (globalIndex === messages.length - 1 && isSending) ||
-                  (message.role === 'user' &&
-                    isAgentUpdateMessage(message.content))
-                    ? ''
-                    : 'pb-4'
+                  globalIndex === messages.length - 1 && isSending ? '' : 'pb-4'
                 }
               >
                 {providerChange && (

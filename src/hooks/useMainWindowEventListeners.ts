@@ -628,6 +628,15 @@ function executeKeybindingAction(
       setFileBrowserVisible(!fileBrowserVisible)
       break
     }
+    case 'show_workspace':
+    case 'show_agents': {
+      logger.debug(`Keybinding: ${action}`)
+      // Disabled Agents falls back to Workspace in the rail
+      const ui = useUIStore.getState()
+      ui.setRailSection(action === 'show_agents' ? 'agents' : 'workspace')
+      ui.setLeftSidebarVisible(true)
+      break
+    }
     case 'toggle_zen_mode': {
       logger.debug('Keybinding: toggle_zen_mode')
       useUIStore.getState().toggleZenMode()

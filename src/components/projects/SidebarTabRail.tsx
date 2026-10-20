@@ -12,6 +12,12 @@ import { FALLBACK_APP_VERSION } from '@/lib/app-version'
 import { openExternal } from '@/lib/platform'
 import { useUIStore, type RailSection } from '@/store/ui-store'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { usePreferences } from '@/services/preferences'
+import {
+  DEFAULT_KEYBINDINGS,
+  formatShortcutDisplay,
+  type KeybindingAction,
+} from '@/types/keybindings'
 import {
   useAgentsEnabled,
   useShowAgents,
@@ -22,9 +28,20 @@ const SECTIONS: {
   section: RailSection
   label: string
   Icon: React.ComponentType<{ className?: string }>
+  action: KeybindingAction
 }[] = [
-  { section: 'workspace', label: 'Workspace', Icon: Code },
-  { section: 'agents', label: 'Agents', Icon: AgentsIcon },
+  {
+    section: 'workspace',
+    label: 'Workspace',
+    Icon: Code,
+    action: 'show_workspace',
+  },
+  {
+    section: 'agents',
+    label: 'Agents',
+    Icon: AgentsIcon,
+    action: 'show_agents',
+  },
 ]
 
 // Plain icons, no button chrome
@@ -41,6 +58,10 @@ interface SidebarTabRailProps {
   children?: React.ReactNode
 }
 
+function RailKbd({ children }: { children: React.ReactNode }) {
+  return <kbd className="ml-1.5 text-[0.625rem] opacity-60">{children}</kbd>
+}
+
 /** Vertical 72px icon rail: feature sections, Settings and app version at the bottom. */
 export function SidebarTabRail({
   togglesSidebar = false,
@@ -54,6 +75,11 @@ export function SidebarTabRail({
     ? SECTIONS
     : SECTIONS.filter(({ section }) => section !== 'agents')
   const isMobile = useIsMobile()
+  const { data: preferences } = usePreferences()
+  const shortcutFor = (action: KeybindingAction) =>
+    formatShortcutDisplay(
+      preferences?.keybindings?.[action] ?? DEFAULT_KEYBINDINGS[action]
+    )
   const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION)
 
   useEffect(() => {
@@ -105,7 +131,8 @@ export function SidebarTabRail({
         aria-label="Jean features"
         aria-orientation="vertical"
       >
-        {sections.map(({ section, label, Icon }) => {
+        {sections.map(({ section, label, Icon, action }) => {
+          const shortcut = shortcutFor(action)
           // Active = open section, even when the Workspace list is collapsed
           const selected = railSection === section
           return (
@@ -125,7 +152,10 @@ export function SidebarTabRail({
                   <Icon className="size-6" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="right">{label}</TooltipContent>
+              <TooltipContent side="right">
+                {label}
+                {shortcut && <RailKbd>{shortcut}</RailKbd>}
+              </TooltipContent>
             </Tooltip>
           )
         })}
@@ -142,7 +172,10 @@ export function SidebarTabRail({
             <Settings className="size-6" />
           </button>
         </TooltipTrigger>
-        <TooltipContent side="right">Settings</TooltipContent>
+        <TooltipContent side="right">
+          Settings
+          <RailKbd>{shortcutFor('open_preferences')}</RailKbd>
+        </TooltipContent>
       </Tooltip>
       <button
         type="button"

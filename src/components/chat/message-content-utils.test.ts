@@ -6,7 +6,9 @@ import {
   encodePromptAttachmentMetadata,
   extractDirectoryMentionPaths,
   isAgentUpdateMessage,
+  isAgentUpdateTurn,
   parsePlainTextPromptMetadata,
+  splitAgentUpdateTurns,
   stripAllMarkers,
 } from './message-content-utils'
 
@@ -93,5 +95,43 @@ describe('isAgentUpdateMessage', () => {
       )
     ).toBe(true)
     expect(isAgentUpdateMessage('Please check [Jean agent update]')).toBe(false)
+  })
+})
+
+describe('splitAgentUpdateTurns', () => {
+  const update = '[Jean agent update] Automatic message from Jean.'
+  const msgs = [
+    { role: 'user', content: 'Fix 10 issues' },
+    { role: 'assistant', content: 'Started 10 sessions.' },
+    { role: 'user', content: update },
+    { role: 'assistant', content: '#1 is done.' },
+    { role: 'assistant', content: 'Nine still run.' },
+    { role: 'user', content: 'Status?' },
+    { role: 'assistant', content: 'Nine still run.' },
+  ]
+
+  it('moves update turns out of the chat', () => {
+    const { chat, updates } = splitAgentUpdateTurns(msgs)
+    expect(chat.map(m => m.content)).toEqual([
+      'Fix 10 issues',
+      'Started 10 sessions.',
+      'Status?',
+      'Nine still run.',
+    ])
+    expect(updates.map(m => m.content)).toEqual([
+      '#1 is done.',
+      'Nine still run.',
+    ])
+  })
+
+  it('returns the same array without updates', () => {
+    const plain = msgs.slice(0, 2)
+    expect(splitAgentUpdateTurns(plain).chat).toBe(plain)
+  })
+
+  it('detects an update turn by the newest user message', () => {
+    expect(isAgentUpdateTurn(msgs.slice(0, 4))).toBe(true)
+    expect(isAgentUpdateTurn(msgs)).toBe(false)
+    expect(isAgentUpdateTurn([])).toBe(false)
   })
 })

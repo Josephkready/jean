@@ -137,6 +137,8 @@ interface UIState {
   agentsServerFilter: string
   /** Agent pages show every tab and tool activity (off: Chat and Schedules) */
   agentsAdvanced: boolean
+  /** Per agent: timestamp (unix s) of the newest update reply the user saw */
+  agentUpdatesSeenAt: Record<string, number>
   leftSidebarSize: number // Width in pixels, persisted across sessions
   /** File browser (worktree explorer) visibility */
   fileBrowserVisible: boolean
@@ -260,6 +262,7 @@ interface UIState {
   setSelectedAgentId: (agentId: string) => void
   setAgentsServerFilter: (serverId: string) => void
   setAgentsAdvanced: (advanced: boolean) => void
+  markAgentUpdatesSeen: (agentId: string, timestamp: number) => void
   setLeftSidebarSize: (size: number) => void
   leftSidebarSwipe: {
     isDragging: boolean
@@ -433,6 +436,7 @@ export const useUIStore = create<UIState>()(
       agentsLeftAt: 0,
       agentsServerFilter: 'all',
       agentsAdvanced: false,
+      agentUpdatesSeenAt: {},
       leftSidebarSize: 250, // Default width in pixels
       leftSidebarSwipe: {
         isDragging: false,
@@ -591,6 +595,21 @@ export const useUIStore = create<UIState>()(
               : { agentsAdvanced: advanced },
           undefined,
           'setAgentsAdvanced'
+        ),
+
+      markAgentUpdatesSeen: (agentId, timestamp) =>
+        set(
+          state =>
+            (state.agentUpdatesSeenAt[agentId] ?? 0) >= timestamp
+              ? state
+              : {
+                  agentUpdatesSeenAt: {
+                    ...state.agentUpdatesSeenAt,
+                    [agentId]: timestamp,
+                  },
+                },
+          undefined,
+          'markAgentUpdatesSeen'
         ),
 
       setAgentsServerFilter: serverId =>

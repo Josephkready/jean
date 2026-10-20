@@ -198,6 +198,8 @@ import { RecentContexts } from './RecentContexts'
 import {
   buildPromptAttachmentMetadata,
   encodePromptAttachmentMetadata,
+  isAgentUpdateTurn,
+  splitAgentUpdateTurns,
   stripAllMarkers,
 } from './message-content-utils'
 import { useUIStore } from '@/store/ui-store'
@@ -2542,13 +2544,18 @@ const ChatWindowContent = memo(function ChatWindowContent({
       streamingToolCalls: currentToolCalls,
     }
   )
+  // Agent replies to automatic updates show in the agent's Updates panel
   const messages = useMemo(
     () =>
-      hideTrailingInFlightMessage
-        ? rawSessionMessages.slice(0, -1)
-        : rawSessionMessages,
+      splitAgentUpdateTurns(
+        hideTrailingInFlightMessage
+          ? rawSessionMessages.slice(0, -1)
+          : rawSessionMessages
+      ).chat,
     [rawSessionMessages, hideTrailingInFlightMessage]
   )
+  const isUpdateTurnStreaming =
+    isSending && isAgentUpdateTurn(rawSessionMessages)
 
   // Pre-calculate last plan message index for approve button logic
   const lastPlanMessageIndex = useMemo(() => {
@@ -2780,7 +2787,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                         viewportClassName="will-change-scroll"
                         onScroll={handleScroll}
                       >
-                        <div className="mx-auto max-w-7xl px-4 pt-4 pb-[calc(var(--chat-composer-height,0px)+1.5rem)] md:px-6 min-w-0 w-full">
+                        <div className="mx-auto max-w-7xl px-4 pt-[calc(var(--chat-top-inset,0px)+1rem)] pb-[calc(var(--chat-composer-height,0px)+1.5rem)] md:px-6 min-w-0 w-full">
                           <div
                             className="select-text space-y-4 font-mono text-sm min-w-0 break-words overflow-x-hidden"
                             // Suppress browser default menu on empty thread chrome
@@ -3021,7 +3028,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 {(currentStreamingContentBlocks.length > 0 ||
                                   currentToolCalls.length > 0 ||
                                   streamingContent.trim().length > 0) &&
-                                  (!workingLabel ||
+                                  ((!workingLabel && !isUpdateTurnStreaming) ||
                                     currentToolCalls.some(needsUserInput)) &&
                                   (compactView ? (
                                     <CompactStreamingTicker
@@ -3067,6 +3074,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                     />
                                   ))}
                                 {quietStreamingParts.length > 0 &&
+                                  !isUpdateTurnStreaming &&
                                   !currentToolCalls.some(needsUserInput) && (
                                     <div className="pb-2">
                                       <ReplyBubbles

@@ -290,6 +290,28 @@ export async function reconnectNativeCliSession(
 }
 
 // Query keys for chat
+export const SEND_MESSAGE_MUTATION_KEY = ['chat', 'send-message'] as const
+
+/**
+ * True while this client's useSendMessage call for the session is in flight.
+ * Its onSuccess then replaces the chat:done message with the backend one.
+ * Turns started elsewhere (agent wakes, MCP, schedules, other clients) have
+ * no such call.
+ */
+export function hasLocalSendInFlight(
+  queryClient: QueryClient,
+  sessionId: string
+): boolean {
+  return (
+    queryClient.isMutating({
+      mutationKey: SEND_MESSAGE_MUTATION_KEY,
+      predicate: mutation =>
+        (mutation.state.variables as { sessionId?: string } | undefined)
+          ?.sessionId === sessionId,
+    }) > 0
+  )
+}
+
 export const chatQueryKeys = {
   all: ['chat'] as const,
   // Legacy: worktree-based history
@@ -1879,6 +1901,7 @@ export function useSendMessage() {
   const queryClient = useQueryClient()
 
   return useMutation({
+    mutationKey: SEND_MESSAGE_MUTATION_KEY,
     // Disable automatic retries - user can manually retry if needed
     // This prevents re-sending after cancellation
     retry: false,

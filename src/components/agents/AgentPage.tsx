@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState, type CSSProperties } from 'react'
 import { toast } from 'sonner'
-import { Trash2 } from '@/components/icons/reicon'
+import { Trash2, X } from '@/components/icons/reicon'
 import {
   AGENT_ICON_COLORS,
   AgentIcon,
@@ -40,6 +40,7 @@ import { AgentSchedules } from './AgentSchedules'
 import { AgentInbox } from './AgentInbox'
 import { AgentSettings } from './AgentSettings'
 import { AgentSubagentTypes } from './AgentSubagentTypes'
+import { AgentUpdatesButton } from './AgentUpdates'
 import { agentRunSummary } from './agent-config'
 
 const ChatWindow = lazy(() =>
@@ -60,7 +61,7 @@ function unavailableMessage(error: unknown): string {
     : `Agents are unavailable: ${String(error)}`
 }
 
-/** Agents page: header, tabs and content of the selected agent. */
+/** Agents page: the selected agent's chat, with its details in a side panel. */
 export function AgentPage() {
   const { agent, isLoading, error } = useSelectedAgent()
   if (error) {
@@ -78,14 +79,17 @@ export function AgentPage() {
 }
 
 function AgentPageContent({ agent }: { agent: AgentSummary }) {
-  const [selectedTab, setTab] = useState<AgentTab>('chat')
+  const [panelOpen, setPanelOpen] = useState(false)
+  const [selectedTab, setTab] = useState<AgentTab>(() =>
+    agent.unreadNotifications > 0 ? 'inbox' : 'schedules'
+  )
   const advanced = useUIStore(state => state.agentsAdvanced)
   const shownTabs = visibleAgentTabs(advanced, agent, selectedTab)
-  // Turning Advanced off while on an advanced-only tab returns to Chat
-  const tab = shownTabs.includes(selectedTab) ? selectedTab : 'chat'
+  // Turning Advanced off while on an advanced-only section returns to Schedules
+  const tab = shownTabs.includes(selectedTab) ? selectedTab : 'schedules'
   const { data: workdir, error } = useAgentWorkdir(agent.id)
-  // The chat tab always shows the agent's current chat (a long chat
-  // continues in a new one).
+  // The chat always shows the agent's current chat (a long chat continues
+  // in a new one).
   useEffect(() => {
     if (!agent.homeSessionId) return
     const chat = useChatStore.getState()
@@ -115,7 +119,6 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
     /** Amber = needs the user; muted = information only */
     muted?: boolean
   }[] = [
-    { id: 'chat', label: 'Chat' },
     { id: 'inbox', label: 'Inbox', badge: agent.unreadNotifications },
     { id: 'tasks', label: 'Tasks', badge: agent.runningTasks, muted: true },
     { id: 'subagents', label: 'Subagents' },
@@ -125,155 +128,195 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
     { id: 'settings', label: 'Settings' },
   ]
   const tabs = allTabs.filter(item => shownTabs.includes(item.id))
+  const needsUser =
+    agent.unreadNotifications > 0 ||
+    agent.pendingApprovals > 0 ||
+    agent.status === 'waiting'
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col font-sans">
-      <header className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
-        <AgentIcon icon={agent.icon} className="size-9 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <h1 className="flex items-baseline gap-2 text-base font-semibold leading-tight text-foreground">
+    <div
+      className="relative flex h-full min-h-0 w-full font-sans"
+      style={
+        {
+          // Tints the user's prompt bubbles in this agent's color
+          '--agent-accent': (AGENT_ICON_COLORS[agent.icon as AgentIconKey] ??
+            AGENT_ICON_COLORS.yellow)[0],
+          // Keeps the first message clear of the floating name pill (pending
+          // approvals already push the chat down)
+          '--chat-top-inset': agent.pendingApprovals > 0 ? '0px' : '2.5rem',
+        } as CSSProperties
+      }
+    >
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center gap-2 px-3">
+          <button
+            type="button"
+            className={cn(
+              'pointer-events-auto flex h-9 max-w-full min-w-0 items-center gap-2 rounded-full border bg-background/80 pl-1.5 pr-3.5 text-sm font-medium text-foreground shadow-sm backdrop-blur transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+              panelOpen && 'bg-muted'
+            )}
+            onClick={() => setPanelOpen(open => !open)}
+            aria-expanded={panelOpen}
+            aria-label={`${agent.name} details`}
+          >
+            <AgentIcon icon={agent.icon} className="size-6 shrink-0" />
             <span className="truncate" data-testid="agent-header-name">
               {agent.name}
             </span>
-            {/* The chat already shows when the agent is working */}
-            {agent.status !== 'working' && (
+            {needsUser && (
               <span
-                className={cn(
-                  'shrink-0 text-xs font-normal',
-                  agent.pendingApprovals > 0 || agent.status === 'waiting'
-                    ? 'text-amber-600 dark:text-amber-400'
-                    : 'text-muted-foreground'
-                )}
-              >
-                {agentStatusLabel(agent)}
-              </span>
+                className="size-2 shrink-0 rounded-full bg-amber-500"
+                aria-hidden
+              />
             )}
-          </h1>
-          <p className="truncate text-xs text-muted-foreground">
-            {agent.serverId !== LOCAL_SERVER_ID && (
-              <span className="mr-1.5 rounded bg-muted px-1.5 py-0.5">
-                on {agent.serverName}
-              </span>
-            )}
-            {[agent.description, agentRunSummary(agent)]
-              .filter(Boolean)
-              .join(' · ')}
-          </p>
+          </button>
+          <div className="pointer-events-auto flex items-center rounded-full border bg-background/80 shadow-sm backdrop-blur empty:hidden">
+            <AgentUpdatesButton agent={agent} workdir={workdir} />
+          </div>
         </div>
-        {!agent.builtin && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => setConfirmDelete(true)}
-            aria-label="Delete agent"
+        {agent.pendingApprovals > 0 && (
+          <div className="pt-12">
+            <PendingApprovals agentId={agent.id} />
+          </div>
+        )}
+        {error ? (
+          <div
+            className="flex flex-1 items-center justify-center px-6 text-center text-sm text-destructive"
+            role="alert"
           >
-            <Trash2 />
-          </Button>
-        )}
-      </header>
-      <div className="flex shrink-0 items-center gap-3 border-b px-3 py-1.5">
-        <div
-          className="flex min-w-0 gap-1 overflow-x-auto [scrollbar-width:none]"
-          role="tablist"
-          aria-label="Agent view"
-        >
-          {tabs.map(({ id, label, badge, muted }) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={tab === id}
-              className={cn(
-                'flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-                tab === id
-                  ? 'bg-muted text-foreground'
-                  : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
-              )}
-              onClick={() => setTab(id)}
-            >
-              {label}
-              {badge ? (
-                <span
-                  className={cn(
-                    'min-w-4 rounded-full px-1 text-center text-[10px] tabular-nums leading-4',
-                    muted
-                      ? 'bg-muted-foreground/20 text-foreground'
-                      : 'bg-amber-500 text-white'
-                  )}
-                >
-                  {badge}
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </div>
-        <label
-          className="ml-auto flex shrink-0 cursor-pointer items-center gap-2 text-xs text-muted-foreground select-none hover:text-foreground"
-          title="Show tasks, subagents, activity, memory, settings, and tool activity in chat"
-        >
-          <Checkbox
-            checked={advanced}
-            onCheckedChange={value =>
-              useUIStore.getState().setAgentsAdvanced(value === true)
-            }
-            aria-label="Advanced"
-          />
-          Advanced
-        </label>
-      </div>
-      <div
-        className="relative flex min-h-0 flex-1 flex-col"
-        style={
-          {
-            // Tints the user's prompt bubbles in this agent's color
-            '--agent-accent': (AGENT_ICON_COLORS[agent.icon as AgentIconKey] ??
-              AGENT_ICON_COLORS.yellow)[0],
-          } as CSSProperties
-        }
-      >
-        {tab === 'chat' ? (
-          <>
-            {agent.pendingApprovals > 0 && (
-              <PendingApprovals agentId={agent.id} />
-            )}
-            {error ? (
-              <div
-                className="flex flex-1 items-center justify-center px-6 text-center text-sm text-destructive"
-                role="alert"
-              >
-                {unavailableMessage(error)}
-              </div>
-            ) : workdir ? (
-              <Suspense fallback={LOADING}>
-                <ChatWindow
-                  isModal
-                  worktreeId={agent.worktreeId}
-                  worktreePath={workdir}
-                  workingLabel={
-                    advanced ? undefined : `${agent.name} is working`
-                  }
-                />
-              </Suspense>
-            ) : (
-              LOADING
-            )}
-          </>
-        ) : tab === 'inbox' ? (
-          <AgentInbox agent={agent} />
-        ) : tab === 'subagents' ? (
-          <AgentSubagentTypes agent={agent} />
-        ) : tab === 'schedules' ? (
-          <AgentSchedules agent={agent} />
-        ) : tab === 'tasks' ? (
-          <AgentTasks agent={agent} workdir={workdir} />
-        ) : tab === 'activity' ? (
-          <AgentActivity agent={agent} />
-        ) : tab === 'memory' ? (
-          <AgentMemoryView agent={agent} />
+            {unavailableMessage(error)}
+          </div>
+        ) : workdir ? (
+          <Suspense fallback={LOADING}>
+            <ChatWindow
+              isModal
+              worktreeId={agent.worktreeId}
+              worktreePath={workdir}
+              workingLabel={advanced ? undefined : `${agent.name} is working`}
+            />
+          </Suspense>
         ) : (
-          <AgentSettings agent={agent} />
+          LOADING
         )}
       </div>
+      {panelOpen && (
+        <aside
+          className="absolute inset-0 z-30 flex min-h-0 flex-col bg-background sm:static sm:w-[28rem] sm:shrink-0 sm:border-l"
+          aria-label={`${agent.name} details`}
+        >
+          <div className="flex shrink-0 justify-end gap-1 px-3 pt-3">
+            {!agent.builtin && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setConfirmDelete(true)}
+                aria-label="Delete agent"
+              >
+                <Trash2 />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => setPanelOpen(false)}
+              aria-label="Close details"
+            >
+              <X />
+            </Button>
+          </div>
+          <div className="flex shrink-0 flex-col items-center gap-1 px-6 pb-3 text-center">
+            <AgentIcon icon={agent.icon} className="mb-1 size-14" />
+            <h1 className="max-w-full truncate text-base font-semibold text-foreground">
+              {agent.name}
+            </h1>
+            <p
+              className={cn(
+                'text-xs',
+                agent.pendingApprovals > 0 || agent.status === 'waiting'
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : 'text-muted-foreground'
+              )}
+            >
+              {agentStatusLabel(agent)}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {agent.serverId !== LOCAL_SERVER_ID && (
+                <span className="mr-1.5 rounded bg-muted px-1.5 py-0.5">
+                  on {agent.serverName}
+                </span>
+              )}
+              {[agent.description, agentRunSummary(agent)]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          </div>
+          <div
+            className="flex shrink-0 flex-wrap justify-center gap-1 border-b px-3 pb-2"
+            role="tablist"
+            aria-label="Agent details"
+          >
+            {tabs.map(({ id, label, badge, muted }) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={tab === id}
+                className={cn(
+                  'flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                  tab === id
+                    ? 'bg-muted text-foreground'
+                    : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+                )}
+                onClick={() => setTab(id)}
+              >
+                {label}
+                {badge ? (
+                  <span
+                    className={cn(
+                      'min-w-4 rounded-full px-1 text-center text-[10px] tabular-nums leading-4',
+                      muted
+                        ? 'bg-muted-foreground/20 text-foreground'
+                        : 'bg-amber-500 text-white'
+                    )}
+                  >
+                    {badge}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto">
+            {tab === 'inbox' ? (
+              <AgentInbox agent={agent} />
+            ) : tab === 'subagents' ? (
+              <AgentSubagentTypes agent={agent} />
+            ) : tab === 'schedules' ? (
+              <AgentSchedules agent={agent} />
+            ) : tab === 'tasks' ? (
+              <AgentTasks agent={agent} workdir={workdir} />
+            ) : tab === 'activity' ? (
+              <AgentActivity agent={agent} />
+            ) : tab === 'memory' ? (
+              <AgentMemoryView agent={agent} />
+            ) : (
+              <AgentSettings agent={agent} />
+            )}
+          </div>
+          <label
+            className="flex shrink-0 cursor-pointer items-center gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground select-none hover:text-foreground"
+            title="Show tasks, subagents, activity, memory, settings, and tool activity in chat"
+          >
+            <Checkbox
+              checked={advanced}
+              onCheckedChange={value =>
+                useUIStore.getState().setAgentsAdvanced(value === true)
+              }
+              aria-label="Advanced"
+            />
+            Advanced
+          </label>
+        </aside>
+      )}
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
           <AlertDialogHeader>

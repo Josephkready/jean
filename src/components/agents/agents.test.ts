@@ -346,19 +346,17 @@ describe('groupTasks', () => {
 })
 
 describe('visibleAgentTabs', () => {
-  it('shows only Chat and Schedules by default', () => {
-    expect(visibleAgentTabs(false, agent({}), 'chat')).toEqual([
-      'chat',
+  it('shows only Schedules by default', () => {
+    expect(visibleAgentTabs(false, agent({}), 'schedules')).toEqual([
       'schedules',
     ])
   })
 
   it('adds Inbox while it has unread messages or is open', () => {
     expect(
-      visibleAgentTabs(false, agent({ unreadNotifications: 2 }), 'chat')
-    ).toEqual(['chat', 'inbox', 'schedules'])
+      visibleAgentTabs(false, agent({ unreadNotifications: 2 }), 'schedules')
+    ).toEqual(['inbox', 'schedules'])
     expect(visibleAgentTabs(false, agent({}), 'inbox')).toEqual([
-      'chat',
       'inbox',
       'schedules',
     ])
@@ -369,8 +367,7 @@ describe('visibleAgentTabs', () => {
   })
 
   it('shows every tab in advanced mode', () => {
-    expect(visibleAgentTabs(true, agent({}), 'chat')).toEqual([
-      'chat',
+    expect(visibleAgentTabs(true, agent({}), 'schedules')).toEqual([
       'inbox',
       'tasks',
       'subagents',

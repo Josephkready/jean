@@ -1032,6 +1032,43 @@ describe('close shortcut on the Agents page', () => {
   })
 })
 
+describe('sidebar section shortcuts', () => {
+  function press(digit: string) {
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: digit,
+        code: `Digit${digit}`,
+        metaKey: true,
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+    )
+  }
+
+  it('switches the section and shows the hidden sidebar', () => {
+    document.body.innerHTML = ''
+    useUIStore.setState({ railSection: 'workspace', leftSidebarVisible: false })
+    const queryClient = new QueryClient()
+    const { unmount } = renderHook(() => useMainWindowEventListeners(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      ),
+    })
+
+    press('2')
+    expect(useUIStore.getState().railSection).toBe('agents')
+    expect(useUIStore.getState().leftSidebarVisible).toBe(true)
+
+    press('1')
+    expect(useUIStore.getState().railSection).toBe('workspace')
+    unmount()
+  })
+})
+
 describe('text editing shortcuts in editable fields', () => {
   function pressRedo(target: HTMLElement): KeyboardEvent {
     const event = new KeyboardEvent('keydown', {

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import useStreamingEvents from './useStreamingEvents'
 import { useChatStore } from '@/store/chat-store'
 import { preferencesQueryKeys } from '@/services/preferences'
+import { SEND_MESSAGE_MUTATION_KEY } from '@/services/chat'
 import type { AppPreferences } from '@/types/preferences'
 
 const {
@@ -2719,6 +2720,107 @@ describe('useStreamingEvents notification session names', () => {
     expect(mockNotifyIfBackground).toHaveBeenCalledWith(
       'Session failed',
       'Failed work'
+    )
+  })
+})
+
+describe('useStreamingEvents completion hydration', () => {
+  const userMessage = {
+    id: 'user-1',
+    session_id: 'session-1',
+    role: 'user' as const,
+    content: 'do the work',
+    timestamp: 1,
+    tool_calls: [],
+  }
+  const persistedReply = {
+    id: 'assistant-1',
+    session_id: 'session-1',
+    role: 'assistant' as const,
+    content: 'First. Middle. Final.',
+    timestamp: 2,
+    tool_calls: [],
+    content_blocks: [
+      { type: 'text', text: 'First.' },
+      { type: 'text', text: 'Middle.' },
+      { type: 'text', text: 'Final.' },
+    ],
+  }
+
+  async function finishTurn(queryClient: QueryClient) {
+    setupListenMock()
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === 'list_pending_wakeups') return Promise.resolve([])
+      if (command === 'get_session')
+        return Promise.resolve({
+          id: 'session-1',
+          messages: [userMessage, persistedReply],
+        })
+      return Promise.resolve(undefined)
+    })
+    queryClient.setQueryData(['chat', 'session', 'session-1'], {
+      id: 'session-1',
+      messages: [userMessage],
+    })
+    useChatStore.setState({
+      // Live blocks lost the middle text part
+      streamingContents: { 'session-1': 'First.Final.' },
+      streamingContentBlocks: {
+        'session-1': [
+          { type: 'text', text: 'First.' },
+          { type: 'tool_use', tool_call_id: 'tool-1' },
+          { type: 'text', text: 'Final.' },
+        ],
+      },
+      activeToolCalls: {
+        'session-1': [{ id: 'tool-1', name: 'Bash', input: {} }],
+      },
+      sendingSessionIds: { 'session-1': true },
+      sendStartedAt: { 'session-1': 1000 },
+      sessionWorktreeMap: { 'session-1': 'worktree-1' },
+      worktreePaths: { 'worktree-1': '/tmp/worktree' },
+    })
+
+    renderHook(() => useStreamingEvents({ queryClient }), {
+      wrapper: createWrapper(queryClient),
+    })
+    await waitFor(() => expect(registeredListeners.has('chat:done')).toBe(true))
+    registeredListeners.get('chat:done')?.({
+      payload: { session_id: 'session-1', worktree_id: 'worktree-1' },
+    })
+  }
+
+  it('loads the persisted reply for a turn started outside this client', async () => {
+    const queryClient = createQueryClient()
+
+    await finishTurn(queryClient)
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<{ messages: unknown[] }>([
+          'chat',
+          'session',
+          'session-1',
+        ])?.messages
+      ).toEqual([userMessage, persistedReply])
+    )
+  })
+
+  it('leaves the reply to the local send when one is in flight', async () => {
+    const queryClient = createQueryClient()
+    void queryClient
+      .getMutationCache()
+      .build(queryClient, {
+        mutationKey: SEND_MESSAGE_MUTATION_KEY,
+        mutationFn: () => new Promise(() => undefined),
+      })
+      .execute({ sessionId: 'session-1' })
+
+    await finishTurn(queryClient)
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      'get_session',
+      expect.anything()
     )
   })
 })

@@ -540,10 +540,10 @@ async fn ensure_session_mode(
 }
 
 /// Wake-ups need the Jean MCP tools, which Plan mode blocks: keep the
-/// session's Build/Yolo mode, use Build otherwise.
+/// session's mode (the user's default), use Build only instead of Plan.
 pub(crate) fn wake_execution_mode(selected: Option<&str>) -> Option<&'static str> {
     match selected {
-        Some("build") | Some("yolo") => None,
+        Some("build") | Some("yolo") | Some("supervised") | Some("auto") => None,
         _ => Some("build"),
     }
 }
@@ -1456,6 +1456,8 @@ mod tests {
         assert_eq!(wake_execution_mode(None), Some("build"));
         assert_eq!(wake_execution_mode(Some("build")), None);
         assert_eq!(wake_execution_mode(Some("yolo")), None);
+        assert_eq!(wake_execution_mode(Some("supervised")), None);
+        assert_eq!(wake_execution_mode(Some("auto")), None);
         assert_eq!(
             wake_execution_mode_for(Some("plan"), Some("cursor")),
             Some("yolo")
