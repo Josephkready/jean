@@ -139,9 +139,10 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
       className="relative flex h-full min-h-0 w-full font-sans"
       style={
         {
-          // Tints the user's prompt bubbles in this agent's color
+          // Fills the user's prompt bubbles with this agent's strong color
           '--agent-accent': (AGENT_ICON_COLORS[agent.icon as AgentIconKey] ??
-            AGENT_ICON_COLORS.yellow)[0],
+            AGENT_ICON_COLORS.yellow)[2],
+          '--agent-accent-fg': '#ffffff',
         } as CSSProperties
       }
     >

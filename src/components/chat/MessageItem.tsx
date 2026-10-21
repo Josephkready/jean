@@ -1017,7 +1017,9 @@ export const MessageItem = memo(function MessageItem({
               hideSettingsBadges
                 ? cn(
                     PILL_BUBBLE_CLASS,
-                    '[--bubble-bg:color-mix(in_oklab,var(--agent-accent,var(--muted))_22%,var(--background))] bg-(--bubble-bg)',
+                    '[--bubble-bg:var(--agent-accent,var(--muted))] bg-(--bubble-bg)',
+                    // Agent-colored bubbles are strong shades: use white text
+                    '[--bubble-fg:var(--agent-accent-fg,var(--foreground))] text-(--bubble-fg) [&_a]:text-inherit',
                     // Attachments: the bubble color, a bit darker
                     '[&_[data-attachments]>*]:border-transparent [&_[data-attachments]>*]:bg-[color-mix(in_oklab,var(--bubble-bg)_80%,black)]'
                   )
