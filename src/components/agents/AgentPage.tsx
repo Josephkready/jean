@@ -1,4 +1,11 @@
-import { Suspense, lazy, useEffect, useState, type CSSProperties } from 'react'
+import {
+  Suspense,
+  lazy,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
 import { toast } from 'sonner'
 import { Trash2, X } from '@/components/icons/reicon'
 import {
@@ -99,6 +106,19 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
   }, [agent.worktreeId, agent.homeSessionId])
   const deleteAgent = useDeleteAgent()
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // The header floats over the chat, so messages scroll beneath it
+  const headerRef = useRef<HTMLDivElement>(null)
+  const [headerHeight, setHeaderHeight] = useState(0)
+
+  useEffect(() => {
+    const header = headerRef.current
+    if (!header) return
+    const observer = new ResizeObserver(() =>
+      setHeaderHeight(header.offsetHeight)
+    )
+    observer.observe(header)
+    return () => observer.disconnect()
+  }, [])
 
   const handleDelete = () =>
     deleteAgent.mutate(
@@ -143,46 +163,54 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
           '--agent-accent': (AGENT_ICON_COLORS[agent.icon as AgentIconKey] ??
             AGENT_ICON_COLORS.yellow)[2],
           '--agent-accent-fg': '#ffffff',
+          '--chat-top-inset': `${headerHeight}px`,
         } as CSSProperties
       }
     >
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex shrink-0 justify-center gap-2 bg-background px-3 pt-2">
-          <button
-            type="button"
-            className={cn(
-              'flex h-9 max-w-full min-w-0 items-center gap-2 rounded-full border pl-1.5 pr-3.5 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-              panelOpen && 'bg-muted'
-            )}
-            onClick={() => setPanelOpen(open => !open)}
-            aria-expanded={panelOpen}
-            aria-label={`${agent.name} details`}
-          >
-            <AgentIcon icon={agent.icon} className="size-6 shrink-0" />
-            <span className="truncate" data-testid="agent-header-name">
-              {agent.name}
-            </span>
-            {statusLabel && (
-              <span
-                className={cn(
-                  'shrink-0 whitespace-nowrap text-xs font-normal',
-                  needsUser
-                    ? 'text-amber-600 dark:text-amber-400'
-                    : 'text-muted-foreground'
-                )}
-                data-testid="agent-header-status"
-              >
-                {statusLabel}
+        <div
+          ref={headerRef}
+          className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col"
+        >
+          <div className="flex shrink-0 justify-center gap-2 bg-gradient-to-b from-background via-background/70 to-transparent px-3 pt-2 pb-3">
+            <button
+              type="button"
+              className={cn(
+                'pointer-events-auto flex h-9 max-w-full min-w-0 items-center gap-2 rounded-full border bg-background/80 pl-1.5 pr-3.5 text-sm font-medium text-foreground backdrop-blur-md transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                panelOpen && 'bg-muted'
+              )}
+              onClick={() => setPanelOpen(open => !open)}
+              aria-expanded={panelOpen}
+              aria-label={`${agent.name} details`}
+            >
+              <AgentIcon icon={agent.icon} className="size-6 shrink-0" />
+              <span className="truncate" data-testid="agent-header-name">
+                {agent.name}
               </span>
-            )}
-          </button>
-          <div className="flex items-center rounded-full border empty:hidden">
-            <AgentUpdatesButton agent={agent} workdir={workdir} />
+              {statusLabel && (
+                <span
+                  className={cn(
+                    'shrink-0 whitespace-nowrap text-xs font-normal',
+                    needsUser
+                      ? 'text-amber-600 dark:text-amber-400'
+                      : 'text-muted-foreground'
+                  )}
+                  data-testid="agent-header-status"
+                >
+                  {statusLabel}
+                </span>
+              )}
+            </button>
+            <div className="pointer-events-auto flex items-center rounded-full border bg-background/80 backdrop-blur-md empty:hidden">
+              <AgentUpdatesButton agent={agent} workdir={workdir} />
+            </div>
           </div>
+          {agent.pendingApprovals > 0 && (
+            <div className="pointer-events-auto -mt-3 bg-background">
+              <PendingApprovals agentId={agent.id} />
+            </div>
+          )}
         </div>
-        {agent.pendingApprovals > 0 && (
-          <PendingApprovals agentId={agent.id} />
-        )}
         {error ? (
           <div
             className="flex flex-1 items-center justify-center px-6 text-center text-sm text-destructive"
