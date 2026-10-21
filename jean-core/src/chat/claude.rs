@@ -1333,13 +1333,10 @@ fn build_claude_args(
         args.push("off".to_string());
     }
 
-    // Disable background tasks - forces all Task subagents to run in foreground.
-    // Background tasks are killed when --print mode exits the CLI process.
-    // Foreground tasks still run in parallel when called in the same message.
-    env_vars.push((
-        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_string(),
-        "1".to_string(),
-    ));
+    // Background tasks (Agent/Bash `run_in_background`) stay enabled: with
+    // stdin closed, `--print` keeps the process alive until they finish and
+    // continues the turn on their notification. `tail_claude_output` waits
+    // for process exit once a background task starts.
 
     // Debug env vars
     env_vars.push(("JEAN_SESSION_ID".to_string(), session_id.to_string()));
@@ -1799,6 +1796,10 @@ pub fn tail_claude_output(
     let mut armed_monitors: std::collections::HashMap<String, MonitorArm> =
         std::collections::HashMap::new();
     let mut saw_final_result = false;
+    // Once a background task starts, a `result` no longer ends the run: the
+    // CLI starts a new turn when the task finishes, and its first `result`
+    // can even arrive after that turn. Wait for the process to exit instead.
+    let mut saw_background_task = false;
 
     // Optional raw-stream dump for diagnosing new event shapes (Monitor, etc.).
     // Enable with JEAN_DUMP_STREAM=1.
@@ -2539,7 +2540,11 @@ pub fn tail_claude_output(
                     for arm in armed_monitors.values_mut() {
                         arm.initial_turn_finished = true;
                     }
-                    if armed_monitors.is_empty() {
+                    if saw_background_task {
+                        log::trace!(
+                            "Received result message but a background task ran; waiting for process exit"
+                        );
+                    } else if armed_monitors.is_empty() {
                         completed = true;
                         log::trace!("Received result message - Claude CLI completed");
                     } else {
@@ -2551,6 +2556,12 @@ pub fn tail_claude_output(
                 }
                 "system" => {
                     let subtype = msg.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+
+                    if let Some(tool_id) = backgrounded_task_tool_use_id(&msg) {
+                        if !armed_monitors.contains_key(tool_id) {
+                            saw_background_task = true;
+                        }
+                    }
 
                     // Monitor lifecycle events from Claude CLI:
                     //   task_started      → arms confirmed, carries task_id
@@ -2625,7 +2636,10 @@ pub fn tail_claude_output(
 
                             if is_final {
                                 armed_monitors.remove(&tool_id);
-                                if saw_final_result && armed_monitors.is_empty() {
+                                if saw_final_result
+                                    && armed_monitors.is_empty()
+                                    && !saw_background_task
+                                {
                                     completed = true;
                                 }
                             }
@@ -2742,7 +2756,7 @@ pub fn tail_claude_output(
                     log::error!("Failed to emit tool_event (timeout): {e}");
                 }
             }
-            if saw_final_result && armed_monitors.is_empty() {
+            if saw_final_result && armed_monitors.is_empty() && !saw_background_task {
                 completed = true;
             }
         }
@@ -2770,6 +2784,11 @@ pub fn tail_claude_output(
         if received_claude_output {
             // After receiving output, use shorter timeout for detecting dead process
             if !process_alive && last_output_time.elapsed() > dead_process_timeout {
+                if saw_background_task && saw_final_result {
+                    // Normal end of a run that waited for background tasks.
+                    log::trace!("Process {pid} exited after background tasks finished");
+                    break;
+                }
                 log::trace!(
                     "Process {pid} is no longer running and no new output after receiving content"
                 );
@@ -3044,9 +3063,48 @@ fn result_error_text(msg: &serde_json::Value) -> Option<String> {
     Some(format!("Claude CLI failed: {subtype}"))
 }
 
+/// Tool use id of a `system.task_started` event for a backgrounded task
+/// (Agent/Bash `run_in_background`). Foreground tasks have `is_backgrounded: false`.
+fn backgrounded_task_tool_use_id(msg: &serde_json::Value) -> Option<&str> {
+    if msg.get("subtype").and_then(|v| v.as_str()) != Some("task_started")
+        || msg.get("is_backgrounded").and_then(|v| v.as_bool()) != Some(true)
+    {
+        return None;
+    }
+    msg.get("tool_use_id").and_then(|v| v.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backgrounded_task_tool_use_id_detects_background_tasks_only() {
+        // Real events from Claude Code 2.1.304 `--print` runs (issue #14).
+        let background_agent = serde_json::json!({
+            "type": "system", "subtype": "task_started", "task_id": "a1",
+            "tool_use_id": "toolu_agent", "is_backgrounded": true, "task_type": "local_agent"
+        });
+        let foreground_bash = serde_json::json!({
+            "type": "system", "subtype": "task_started", "task_id": "b1",
+            "tool_use_id": "toolu_bash", "is_backgrounded": false, "task_type": "local_bash"
+        });
+        let notification = serde_json::json!({
+            "type": "system", "subtype": "task_notification", "task_id": "a1",
+            "tool_use_id": "toolu_agent", "status": "completed"
+        });
+        let no_flag = serde_json::json!({
+            "type": "system", "subtype": "task_started", "tool_use_id": "toolu_monitor"
+        });
+
+        assert_eq!(
+            backgrounded_task_tool_use_id(&background_agent),
+            Some("toolu_agent")
+        );
+        assert_eq!(backgrounded_task_tool_use_id(&foreground_bash), None);
+        assert_eq!(backgrounded_task_tool_use_id(&notification), None);
+        assert_eq!(backgrounded_task_tool_use_id(&no_flag), None);
+    }
 
     #[test]
     fn startup_failure_uses_cli_output_when_available() {
