@@ -45,6 +45,7 @@ pub mod agents;
 mod antigravity_cli;
 mod auto_fix;
 mod background_tasks;
+mod bug_report;
 mod chat;
 mod claude_cli;
 mod cli_update;

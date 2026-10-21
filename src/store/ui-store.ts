@@ -217,6 +217,8 @@ interface UIState {
   contextViewerOpen: boolean
   /** Whether the feature tour dialog is open */
   featureTourOpen: boolean
+  /** Whether the "Report a bug" dialog is open */
+  bugReportOpen: boolean
   /** Whether the one-time Jean MCP introduction dialog is open */
   jeanMcpIntroOpen: boolean
   /** Whether UI state has been restored from persisted storage */
@@ -358,6 +360,7 @@ interface UIState {
   setPlanDialogOpen: (open: boolean) => void
   setContextViewerOpen: (open: boolean) => void
   setFeatureTourOpen: (open: boolean) => void
+  setBugReportOpen: (open: boolean) => void
   setJeanMcpIntroOpen: (open: boolean) => void
   setUIStateInitialized: (initialized: boolean) => void
   setPendingUpdateVersion: (version: string | null) => void
@@ -477,6 +480,7 @@ export const useUIStore = create<UIState>()(
       planDialogOpen: false,
       contextViewerOpen: false,
       featureTourOpen: false,
+      bugReportOpen: false,
       jeanMcpIntroOpen: false,
       uiStateInitialized: false,
       pendingUpdateVersion: null,
@@ -1518,6 +1522,14 @@ export const useUIStore = create<UIState>()(
             state.featureTourOpen === open ? state : { featureTourOpen: open },
           undefined,
           'setFeatureTourOpen'
+        ),
+
+      setBugReportOpen: (open: boolean) =>
+        set(
+          state =>
+            state.bugReportOpen === open ? state : { bugReportOpen: open },
+          undefined,
+          'setBugReportOpen'
         ),
 
       setJeanMcpIntroOpen: (open: boolean) =>

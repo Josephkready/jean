@@ -104,6 +104,22 @@ fn parse_open_worktree_in_terminal_args(
     })
 }
 
+struct SubmitBugReportArgs {
+    id: String,
+    description: String,
+    context: std::collections::HashMap<String, String>,
+    attachments: Vec<crate::bug_report::BugReportAttachmentInput>,
+}
+
+fn parse_submit_bug_report_args(args: &Value) -> Result<SubmitBugReportArgs, String> {
+    Ok(SubmitBugReportArgs {
+        id: from_field(args, "id")?,
+        description: from_field(args, "description")?,
+        context: from_field_opt(args, "context")?.unwrap_or_default(),
+        attachments: from_field_opt(args, "attachments")?.unwrap_or_default(),
+    })
+}
+
 /// Dispatch a command by name to the corresponding Rust handler.
 /// This mirrors Tauri's invoke system but routes through WebSocket.
 ///
@@ -2184,6 +2200,25 @@ pub async fn dispatch_command(
         }
         "get_app_data_dir" => {
             let result = crate::projects::get_app_data_dir(app.clone()).await?;
+            to_value(result)
+        }
+
+        // Bug reports
+        "submit_bug_report" => {
+            let parsed = parse_submit_bug_report_args(&args)?;
+            let result = crate::bug_report::submit_bug_report(
+                app.clone(),
+                parsed.id,
+                parsed.description,
+                parsed.context,
+                parsed.attachments,
+            )
+            .await?;
+            to_value(result)
+        }
+        "get_bug_report_status" => {
+            let id: String = from_field(&args, "id")?;
+            let result = crate::bug_report::get_bug_report_status(app.clone(), id).await?;
             to_value(result)
         }
 
@@ -4403,6 +4438,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value.unwrap().unwrap().issue_limit, 4);
+    }
+
+    #[test]
+    fn parse_submit_bug_report_args_accepts_full_payload() {
+        let parsed = parse_submit_bug_report_args(&json!({
+            "id": "report-1",
+            "description": "Button does nothing",
+            "context": { "appVersion": "1.2.3" },
+            "attachments": []
+        }))
+        .unwrap();
+        assert_eq!(parsed.id, "report-1");
+        assert_eq!(parsed.description, "Button does nothing");
+        assert_eq!(
+            parsed.context.get("appVersion").map(String::as_str),
+            Some("1.2.3")
+        );
+        assert!(parsed.attachments.is_empty());
+    }
+
+    #[test]
+    fn parse_submit_bug_report_args_defaults_missing_context_and_attachments() {
+        let parsed = parse_submit_bug_report_args(&json!({
+            "id": "report-2",
+            "description": "No extras"
+        }))
+        .unwrap();
+        assert_eq!(parsed.id, "report-2");
+        assert!(parsed.context.is_empty());
+        assert!(parsed.attachments.is_empty());
+    }
+
+    #[test]
+    fn parse_submit_bug_report_args_rejects_non_object_context() {
+        assert!(parse_submit_bug_report_args(&json!({
+            "id": "report-3",
+            "description": "Bad context",
+            "context": "nope"
+        }))
+        .is_err());
     }
 
     #[test]

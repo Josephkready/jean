@@ -14,6 +14,7 @@ import {
   isTextFilename,
   processAttachmentFiles,
 } from '../attachment-processing'
+import { useUIStore } from '@/store/ui-store'
 
 /** Tracks image paths currently being processed to prevent duplicates */
 const processingPaths = new Set<string>()
@@ -62,6 +63,8 @@ export function useDragAndDropImages(
 
     const handleBrowserDrop = (event: DragEvent) => {
       if (!hasFiles(event)) return
+      // A drop over the bug report dialog is not meant for the chat.
+      if (useUIStore.getState().bugReportOpen) return
       event.preventDefault()
       setIsDragging(false)
 
@@ -124,6 +127,9 @@ export function useDragAndDropImages(
           const now = Date.now()
           if (now - lastDropTime < 500) return
           lastDropTime = now
+
+          // A drop over the bug report dialog is not meant for the chat.
+          if (useUIStore.getState().bugReportOpen) return
 
           if (!sessionId) {
             toast.error('No active session')

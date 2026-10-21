@@ -68,6 +68,11 @@ const FeatureTourDialog = lazy(() =>
     default: mod.FeatureTourDialog,
   }))
 )
+const BugReportDialog = lazy(() =>
+  import('@/components/bug-report/BugReportDialog').then(mod => ({
+    default: mod.BugReportDialog,
+  }))
+)
 const JeanConfigWizard = lazy(() =>
   import('@/components/onboarding/JeanConfigWizard').then(mod => ({
     default: mod.JeanConfigWizard,
@@ -266,6 +271,7 @@ export function MainWindow() {
   const commitModalOpen = useUIStore(state => state.commitModalOpen)
   const onboardingOpen = useUIStore(state => state.onboardingOpen)
   const featureTourOpen = useUIStore(state => state.featureTourOpen)
+  const bugReportOpen = useUIStore(state => state.bugReportOpen)
   const openInModalOpen = useUIStore(state => state.openInModalOpen)
   const remotePickerOpen = useUIStore(state => state.remotePickerOpen)
   const resolveConflictsDialogOpen = useUIStore(
@@ -526,6 +532,7 @@ export function MainWindow() {
   const shouldRenderCommitModal = useRetainedMount(commitModalOpen)
   const shouldRenderOnboardingDialog = useRetainedMount(onboardingOpen)
   const shouldRenderFeatureTourDialog = useRetainedMount(featureTourOpen)
+  const shouldRenderBugReportDialog = useRetainedMount(bugReportOpen)
   const shouldRenderJeanConfigWizard = useRetainedMount(jeanConfigWizardOpen)
   const shouldRenderCliUpdateModal = useRetainedMount(cliUpdateModalOpen)
   const shouldRenderUpdateAvailableModal = useRetainedMount(
@@ -769,6 +776,11 @@ export function MainWindow() {
       {shouldRenderFeatureTourDialog && (
         <Suspense fallback={null}>
           <FeatureTourDialog />
+        </Suspense>
+      )}
+      {shouldRenderBugReportDialog && (
+        <Suspense fallback={null}>
+          <BugReportDialog />
         </Suspense>
       )}
       {shouldRenderJeanConfigWizard && (
