@@ -1726,8 +1726,11 @@ fn kill_claude_process_tree(pid: u32) {
 /// directly to a file and Jean tails it for real-time updates.
 ///
 /// Returns when:
-/// - A "result" message is received (completion)
+/// - A "result" message is received and no background task started (completion)
+/// - A background task started and the process exits after a result (normal completion)
 /// - The process is no longer running and no new output (timeout)
+/// - The user cancels the run
+/// - Startup fails (process died, or no output within the startup timeout)
 /// - An error occurs
 pub fn tail_claude_output(
     app: &tauri::AppHandle,
@@ -1799,7 +1802,7 @@ pub fn tail_claude_output(
     // Once a background task starts, a `result` no longer ends the run: the
     // CLI starts a new turn when the task finishes, and its first `result`
     // can even arrive after that turn. Wait for the process to exit instead.
-    let mut saw_background_task = false;
+    let mut background_wait = BackgroundWait::default();
 
     // Optional raw-stream dump for diagnosing new event shapes (Monitor, etc.).
     // Enable with JEAN_DUMP_STREAM=1.
@@ -2540,11 +2543,11 @@ pub fn tail_claude_output(
                     for arm in armed_monitors.values_mut() {
                         arm.initial_turn_finished = true;
                     }
-                    if saw_background_task {
+                    if background_wait.saw_background_task {
                         log::trace!(
                             "Received result message but a background task ran; waiting for process exit"
                         );
-                    } else if armed_monitors.is_empty() {
+                    } else if background_wait.result_ends_run(armed_monitors.len()) {
                         completed = true;
                         log::trace!("Received result message - Claude CLI completed");
                     } else {
@@ -2557,10 +2560,13 @@ pub fn tail_claude_output(
                 "system" => {
                     let subtype = msg.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
 
-                    if let Some(tool_id) = backgrounded_task_tool_use_id(&msg) {
-                        if !armed_monitors.contains_key(tool_id) {
-                            saw_background_task = true;
-                        }
+                    if let Some(tool_id) =
+                        background_wait.observe(&msg, |id| armed_monitors.contains_key(id))
+                    {
+                        let task_id = msg.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                        log::debug!(
+                            "Session {session_id}: background task {task_id} (tool_use_id {tool_id}) started; turn will wait for process exit"
+                        );
                     }
 
                     // Monitor lifecycle events from Claude CLI:
@@ -2637,8 +2643,7 @@ pub fn tail_claude_output(
                             if is_final {
                                 armed_monitors.remove(&tool_id);
                                 if saw_final_result
-                                    && armed_monitors.is_empty()
-                                    && !saw_background_task
+                                    && background_wait.result_ends_run(armed_monitors.len())
                                 {
                                     completed = true;
                                 }
@@ -2756,7 +2761,7 @@ pub fn tail_claude_output(
                     log::error!("Failed to emit tool_event (timeout): {e}");
                 }
             }
-            if saw_final_result && armed_monitors.is_empty() && !saw_background_task {
+            if saw_final_result && background_wait.result_ends_run(armed_monitors.len()) {
                 completed = true;
             }
         }
@@ -2784,7 +2789,7 @@ pub fn tail_claude_output(
         if received_claude_output {
             // After receiving output, use shorter timeout for detecting dead process
             if !process_alive && last_output_time.elapsed() > dead_process_timeout {
-                if saw_background_task && saw_final_result {
+                if background_wait.exit_is_normal(saw_final_result) {
                     // Normal end of a run that waited for background tasks.
                     log::trace!("Process {pid} exited after background tasks finished");
                     break;
@@ -3063,6 +3068,41 @@ fn result_error_text(msg: &serde_json::Value) -> Option<String> {
     Some(format!("Claude CLI failed: {subtype}"))
 }
 
+/// Tracks whether a Claude run must wait for process exit (background tasks).
+#[derive(Default)]
+struct BackgroundWait {
+    saw_background_task: bool,
+}
+
+impl BackgroundWait {
+    /// Record a stream line; `is_monitor(tool_use_id)` excludes armed Monitors.
+    /// Returns the tool_use_id when a background task starts.
+    fn observe<'a>(
+        &mut self,
+        msg: &'a serde_json::Value,
+        is_monitor: impl Fn(&str) -> bool,
+    ) -> Option<&'a str> {
+        let tool_id = backgrounded_task_tool_use_id(msg)?;
+        if is_monitor(tool_id) {
+            return None;
+        }
+        self.saw_background_task = true;
+        Some(tool_id)
+    }
+
+    /// Whether a `result` (or a finished Monitor after a result) ends the run.
+    /// After a background task the CLI may start a follow-up turn, so only
+    /// process exit ends the run then.
+    fn result_ends_run(&self, armed_monitor_count: usize) -> bool {
+        !self.saw_background_task && armed_monitor_count == 0
+    }
+
+    /// Whether process exit after a `result` is a normal end, not a cancel.
+    fn exit_is_normal(&self, saw_final_result: bool) -> bool {
+        self.saw_background_task && saw_final_result
+    }
+}
+
 /// Tool use id of a `system.task_started` event for a backgrounded task
 /// (Agent/Bash `run_in_background`). Foreground tasks have `is_backgrounded: false`.
 fn backgrounded_task_tool_use_id(msg: &serde_json::Value) -> Option<&str> {
@@ -3104,6 +3144,75 @@ mod tests {
         assert_eq!(backgrounded_task_tool_use_id(&foreground_bash), None);
         assert_eq!(backgrounded_task_tool_use_id(&notification), None);
         assert_eq!(backgrounded_task_tool_use_id(&no_flag), None);
+    }
+
+    /// Feed lines in order; returns `result_ends_run(0)` at each `result` line.
+    fn run_lines(
+        wait: &mut BackgroundWait,
+        lines: &[serde_json::Value],
+        is_monitor: impl Fn(&str) -> bool + Copy,
+    ) -> Vec<bool> {
+        let mut at_results = Vec::new();
+        for line in lines {
+            wait.observe(line, is_monitor);
+            if line["type"] == "result" {
+                at_results.push(wait.result_ends_run(0));
+            }
+        }
+        at_results
+    }
+
+    #[test]
+    fn background_bash_waits_for_exit_after_final_result() {
+        // Claude Code 2.1.304: started -> result -> notification -> result.
+        let lines = [
+            serde_json::json!({"type": "system", "subtype": "task_started", "task_id": "b1",
+                "tool_use_id": "toolu_bash", "is_backgrounded": true, "task_type": "local_bash"}),
+            serde_json::json!({"type": "result", "subtype": "success"}),
+            serde_json::json!({"type": "system", "subtype": "task_notification", "task_id": "b1",
+                "tool_use_id": "toolu_bash", "status": "completed"}),
+            serde_json::json!({"type": "result", "subtype": "success"}),
+        ];
+        let mut wait = BackgroundWait::default();
+        assert_eq!(run_lines(&mut wait, &lines, |_| false), vec![false, false]);
+        assert!(wait.exit_is_normal(true));
+    }
+
+    #[test]
+    fn background_agent_with_late_first_result_waits_for_exit() {
+        let lines = [
+            serde_json::json!({"type": "system", "subtype": "task_started", "task_id": "a1",
+                "tool_use_id": "toolu_agent", "is_backgrounded": true, "task_type": "local_agent"}),
+            serde_json::json!({"type": "system", "subtype": "task_started", "task_id": "b1",
+                "tool_use_id": "toolu_bash", "is_backgrounded": false, "task_type": "local_bash"}),
+            serde_json::json!({"type": "system", "subtype": "task_notification", "task_id": "a1",
+                "tool_use_id": "toolu_agent", "status": "completed"}),
+            serde_json::json!({"type": "result", "subtype": "success"}),
+            serde_json::json!({"type": "result", "subtype": "success"}),
+        ];
+        let mut wait = BackgroundWait::default();
+        assert_eq!(run_lines(&mut wait, &lines, |_| false), vec![false, false]);
+        assert!(wait.exit_is_normal(true));
+    }
+
+    #[test]
+    fn plain_run_ends_on_result_and_dead_process_stays_cancel() {
+        let lines = [serde_json::json!({"type": "result", "subtype": "success"})];
+        let mut wait = BackgroundWait::default();
+        assert_eq!(run_lines(&mut wait, &lines, |_| false), vec![true]);
+        assert!(!wait.result_ends_run(1), "armed Monitor keeps stream open");
+        assert!(!wait.exit_is_normal(true));
+    }
+
+    #[test]
+    fn armed_monitor_task_started_does_not_set_wait() {
+        let line = serde_json::json!({"type": "system", "subtype": "task_started",
+            "task_id": "m1", "tool_use_id": "toolu_monitor", "is_backgrounded": true});
+        let mut wait = BackgroundWait::default();
+        assert_eq!(wait.observe(&line, |id| id == "toolu_monitor"), None);
+        assert!(!wait.saw_background_task);
+        assert_eq!(wait.observe(&line, |_| false), Some("toolu_monitor"));
+        assert!(wait.saw_background_task);
     }
 
     #[test]
