@@ -29,6 +29,8 @@ export interface ClientViewState {
   zen_mode: boolean
   /** Open left rail section; Agents shows only while the feature is on */
   rail_section: 'workspace' | 'agents'
+  /** Last sidebar visibility of each rail section */
+  rail_sidebar_visible: Partial<Record<'workspace' | 'agents', boolean>>
   /** Agent open on the Agents page */
   selected_agent_id: string
   /** Agents sidebar server filter: 'all' or a server ID */
@@ -73,6 +75,7 @@ export const defaultClientViewState: ClientViewState = {
   right_sidebar_visible: false,
   zen_mode: false,
   rail_section: 'workspace',
+  rail_sidebar_visible: {},
   selected_agent_id: 'jean',
   agents_server_filter: 'all',
   agents_advanced: false,
@@ -248,6 +251,17 @@ function parseClientViewState(value: unknown): ClientViewState {
   }
   if (value.rail_section === 'workspace' || value.rail_section === 'agents')
     assign('rail_section', value.rail_section)
+  if (isRecord(value.rail_sidebar_visible)) {
+    const visible = value.rail_sidebar_visible
+    assign(
+      'rail_sidebar_visible',
+      Object.fromEntries(
+        (['workspace', 'agents'] as const)
+          .filter(section => isBoolean(visible[section]))
+          .map(section => [section, visible[section]])
+      )
+    )
+  }
   if (isString(value.selected_agent_id) && value.selected_agent_id)
     assign('selected_agent_id', value.selected_agent_id)
   if (isString(value.agents_server_filter) && value.agents_server_filter)

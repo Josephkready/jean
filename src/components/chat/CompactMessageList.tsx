@@ -55,6 +55,8 @@ import {
 } from './tool-call-utils'
 import { MessageTiming } from './MessageTiming'
 import { getAssistantDurationMs } from './time-utils'
+import { AgentMessageLinkRow } from '@/components/agents/AgentMessageLink'
+import { assistantReplyItems } from '@/components/agents/agent-messages'
 import {
   TOOL_CALL_ROW_CLASS,
   TOOL_CALL_DETAIL_PILL_CLASS,
@@ -1280,15 +1282,30 @@ export const CompactMessageList = memo(
             }
 
             if (hideToolActivity) {
-              const parts = collectAssistantText(item.messages)
-              if (parts.length === 0) return null
+              // Messages to other agents or sessions: one line each
+              const replyItems = assistantReplyItems(item.messages)
+              if (replyItems.length === 0) return null
               return (
-                <div key={item.key} className="pb-4">
-                  <ReplyBubbles
-                    parts={parts}
-                    messageId={item.key}
-                    sessionId={sessionId}
-                  />
+                <div key={item.key} className="flex flex-col gap-1.5 pb-4">
+                  {replyItems.map((reply, index) =>
+                    reply.type === 'text' ? (
+                      <ReplyBubbles
+                        key={`text-${index}`}
+                        parts={reply.texts}
+                        messageId={
+                          index === 0 ? item.key : `${item.key}:group${index}`
+                        }
+                        sessionId={sessionId}
+                      />
+                    ) : (
+                      <AgentMessageLinkRow
+                        key={reply.link.toolId}
+                        link={reply.link}
+                        sentAt={reply.sentAt}
+                        worktreeId={worktreeId}
+                      />
+                    )
+                  )}
                 </div>
               )
             }

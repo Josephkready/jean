@@ -1,4 +1,6 @@
 import { memo, useCallback, useMemo } from 'react'
+import { AgentMessageFromRow } from '@/components/agents/AgentMessageLink'
+import { parseAgentSentMessage } from '@/components/agents/agent-messages'
 import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { PILL_BUBBLE_CLASS, ReplyBubble } from './ReplyBubble'
@@ -1107,6 +1109,17 @@ export const MessageItem = memo(function MessageItem({
     if (isAgentUpdateMessage(message.content)) return null
     if (isChatContinuedMessage(message.content))
       return <ChatContinuedNotice content={message.content} />
+    // A message from an agent: one line that opens the conversation
+    const agentSent = parseAgentSentMessage(message.content)
+    if (agentSent)
+      return (
+        <AgentMessageFromRow
+          sent={agentSent}
+          sessionId={sessionId}
+          worktreeId={worktreeId}
+          worktreePath={worktreePath}
+        />
+      )
     return (
       <MessageThreadContextMenu
         messageText={displayContent}

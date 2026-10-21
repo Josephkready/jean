@@ -3437,7 +3437,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                             className={cn(
                               'relative overflow-hidden border-t border-border bg-card transition-[background-color,box-shadow] duration-150 sm:rounded-lg sm:border',
                               pillComposer &&
-                                'mx-2 mb-4 rounded-[28px] border sm:mx-0 sm:mb-3 sm:rounded-[28px]',
+                                'mx-2 mb-4 rounded-[22px] border sm:mx-0 sm:mb-3 sm:rounded-[22px]',
                               activeSessionId &&
                                 currentQueuedMessages.length > 0 &&
                                 'sm:rounded-t-none',
@@ -3520,7 +3520,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                               className={cn(
                                 zenMode && 'flex items-center overflow-hidden',
                                 zenMode && 'max-h-20',
-                                pillComposer && 'flex items-end gap-2 p-2'
+                                pillComposer && 'flex items-end gap-2 p-1.5'
                               )}
                             >
                               {pillComposer && (
@@ -3528,9 +3528,9 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                   type="button"
                                   onClick={handleToolbarAttach}
                                   aria-label="Attach files"
-                                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+                                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
                                 >
-                                  <Plus className="h-5 w-5" />
+                                  <Plus className="h-4 w-4" />
                                 </button>
                               )}
                               {/* Textarea section */}
@@ -3588,9 +3588,9 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                     type="button"
                                     onClick={handleCancel}
                                     aria-label="Stop"
-                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90"
+                                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90"
                                   >
-                                    <Square className="h-4 w-4" />
+                                    <Square className="h-3.5 w-3.5" />
                                   </button>
                                 ) : (
                                   <button
@@ -3599,9 +3599,9 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       !hasInputValue && !hasPendingAttachments
                                     }
                                     aria-label={isSending ? 'Queue' : 'Send'}
-                                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
+                                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
                                   >
-                                    <ArrowUp className="h-5 w-5" />
+                                    <ArrowUp className="h-4 w-4" />
                                   </button>
                                 )
                               ) : zenMode ? (

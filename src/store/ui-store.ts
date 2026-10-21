@@ -129,6 +129,8 @@ export type RailSection = 'workspace' | 'agents'
 interface UIState {
   leftSidebarVisible: boolean
   railSection: RailSection
+  /** Last sidebar visibility of each rail section, restored on switch */
+  railSidebarVisible: Partial<Record<RailSection, boolean>>
   /** Agent open on the Agents page */
   selectedAgentId: string
   /** When the user last left the Agents page (ms, 0 = never this session) */
@@ -260,7 +262,8 @@ interface UIState {
   availableCliUpdates: PendingCliUpdate[]
   toggleLeftSidebar: () => void
   setLeftSidebarVisible: (visible: boolean) => void
-  setRailSection: (section: RailSection) => void
+  /** restoreSidebar: show the sidebar as the section last left it (desktop rail) */
+  setRailSection: (section: RailSection, restoreSidebar?: boolean) => void
   setSelectedAgentId: (agentId: string) => void
   setAgentsServerFilter: (serverId: string) => void
   setAgentsAdvanced: (advanced: boolean) => void
@@ -436,6 +439,7 @@ export const useUIStore = create<UIState>()(
     (set, get) => ({
       leftSidebarVisible: false,
       railSection: 'workspace',
+      railSidebarVisible: {},
       selectedAgentId: 'jean',
       agentsLeftAt: 0,
       agentsServerFilter: 'all',
@@ -567,13 +571,22 @@ export const useUIStore = create<UIState>()(
           'setLeftSidebarVisible'
         ),
 
-      setRailSection: section =>
+      setRailSection: (section, restoreSidebar = false) =>
         set(
           state =>
             state.railSection === section
               ? state
               : {
                   railSection: section,
+                  railSidebarVisible: {
+                    ...state.railSidebarVisible,
+                    [state.railSection]: state.leftSidebarVisible,
+                  },
+                  // A section never opened before shows its panel
+                  ...(restoreSidebar && {
+                    leftSidebarVisible:
+                      state.railSidebarVisible[section] ?? true,
+                  }),
                   ...(state.railSection === 'agents' && {
                     agentsLeftAt: Date.now(),
                   }),

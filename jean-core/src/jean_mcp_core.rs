@@ -1110,10 +1110,27 @@ async fn run_tool(
             )?;
             // Agent callers: the agent gets an update when this session's run ends.
             crate::agents::mcp::record_delegation(app, source, &session_id, &worktree_id);
+            // Agent callers: mark the sender so the chat shows one "Message from" line
+            let message = match crate::agents::agent_for_session(app, source) {
+                Some(agent) if source != session_id => {
+                    crate::agents::agent_message_text(&agent.name, &agent.id, &message)
+                }
+                _ => message,
+            };
+            let session_name = crate::chat::storage::load_mcp_session_metadata(app, &session_id)
+                .ok()
+                .flatten()
+                .map(|metadata| metadata.name);
+            let worktree_name = crate::projects::storage::load_projects_data(app)
+                .ok()
+                .and_then(|data| data.find_worktree(&worktree_id).map(|w| w.name.clone()));
             let mut payload = serde_json::Map::new();
             payload.insert("sessionId".to_string(), Value::String(session_id.clone()));
-            payload.insert("worktreeId".to_string(), Value::String(worktree_id));
-            payload.insert("worktreePath".to_string(), Value::String(worktree_path));
+            payload.insert("worktreeId".to_string(), Value::String(worktree_id.clone()));
+            payload.insert(
+                "worktreePath".to_string(),
+                Value::String(worktree_path.clone()),
+            );
             payload.insert("message".to_string(), Value::String(message));
             for key in [
                 "model",
@@ -1137,7 +1154,14 @@ async fn run_tool(
                     log::warn!("Jean MCP send_chat_message (source={source_clone}) failed: {e}");
                 }
             });
-            Ok(json!({ "sessionId": session_id, "status": "started" }))
+            Ok(json!({
+                "sessionId": session_id,
+                "status": "started",
+                "worktreeId": worktree_id,
+                "worktreePath": worktree_path,
+                "sessionName": session_name,
+                "worktreeName": worktree_name,
+            }))
         }
         "archive_session" => {
             let session_id = require_str(&args, "sessionId")?;

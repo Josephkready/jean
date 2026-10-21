@@ -633,8 +633,10 @@ function executeKeybindingAction(
       logger.debug(`Keybinding: ${action}`)
       // Disabled Agents falls back to Workspace in the rail
       const ui = useUIStore.getState()
-      ui.setRailSection(action === 'show_agents' ? 'agents' : 'workspace')
-      ui.setLeftSidebarVisible(true)
+      const section = action === 'show_agents' ? 'agents' : 'workspace'
+      // Another section: restore its panel. Same section: show it.
+      if (ui.railSection === section) ui.setLeftSidebarVisible(true)
+      else ui.setRailSection(section, true)
       break
     }
     case 'toggle_zen_mode': {

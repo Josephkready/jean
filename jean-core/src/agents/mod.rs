@@ -92,6 +92,12 @@ pub fn agent_for_worktree(app: &AppHandle, worktree_id: &str) -> Option<Agent> {
 }
 
 /// The agent that owns this session (the session is in an agent worktree).
+/// Message an agent sends to a workspace session. The UI parses the first line
+/// (see `parseAgentSentMessage` in message-content-utils.ts).
+pub fn agent_message_text(agent_name: &str, agent_id: &str, message: &str) -> String {
+    format!("[Message from agent {agent_name} (`{agent_id}`)]\n\n{message}")
+}
+
 pub fn agent_for_session(app: &AppHandle, session_id: &str) -> Option<Agent> {
     let metadata = crate::chat::storage::load_metadata(app, session_id).ok()??;
     agent_for_worktree(app, &metadata.worktree_id)

@@ -279,6 +279,16 @@ get it per thread through a config override
 (`jean_mcp_config::codex_session_config_override`), because the persistent
 `~/.codex/config.toml` entry only has a fixed label.
 
+**Agent messages in the chat:** an agent chat shows each `message_agent` and
+`send_chat_message` call as one "Messaged <target>" line, not as the full
+text. When an agent session calls `send_chat_message`, the message starts with
+`[Message from agent <name> (`<id>`)]` (`agents::agent_message_text`), so the
+receiving session shows one "Message from <agent>" line. The tool result also
+has `worktreeId`, `worktreePath`, `sessionName` and `worktreeName`. A click on
+a line opens the conversation dialog (`AgentMessageLink.tsx`). For
+`message_agent`, the dialog finds the target's first `Request from <sender>`
+task created after the send (`findRequestTask` in `agent-messages.ts`).
+
 **Approval gate:** `delete_worktree`, `permanently_delete_worktree`,
 `push_worktree`, `merge_pull_request` and `create_pull_request` called from an
 agent session are stored in `approvals` and not run. When the user approves,
