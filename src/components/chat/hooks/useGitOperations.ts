@@ -1,5 +1,6 @@
 import { useCallback, useState, type RefObject } from 'react'
 import { invoke, listen } from '@/lib/transport'
+import { focusChatInputAfterRun } from '@/lib/restore-keyboard-focus'
 import { openExternal } from '@/lib/platform'
 import { dismissibleToast } from '@/lib/dismissible-toast'
 import { toastActionLabel } from '@/lib/toast-action-label'
@@ -341,7 +342,7 @@ export function useGitOperations({
           aiLanguage: preferences?.ai_language,
           backend: backend !== 'claude' ? backend : undefined,
         },
-        { onSettled: () => inputRef.current?.focus() }
+        { onSettled: () => focusChatInputAfterRun(inputRef.current) }
       )
     },
     [

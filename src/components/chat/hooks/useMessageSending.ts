@@ -2,6 +2,7 @@ import { useCallback, type RefObject } from 'react'
 import { generateId } from '@/lib/uuid'
 import { toast } from 'sonner'
 import { invoke } from '@/lib/transport'
+import { focusChatInputAfterRun } from '@/lib/restore-keyboard-focus'
 import { useChatStore } from '@/store/chat-store'
 import {
   chatQueryKeys,
@@ -243,7 +244,7 @@ export function useMessageSending({
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )

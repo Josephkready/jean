@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ensureBodyCanReceiveFocus,
+  focusChatInputAfterRun,
   hasFocusOwningOverlay,
   installWindowKeyboardFocusRestore,
   isMeaningfulFocusTarget,
@@ -284,6 +285,61 @@ describe('restore-keyboard-focus', () => {
 
       // Without the listener, focus stays on body
       expect(document.activeElement).toBe(document.body)
+    })
+  })
+
+  // Josephkready/jean#13: a run finishing must not pull the cursor out of
+  // the bug report box (or any other text field) into the chat input.
+  describe('focusChatInputAfterRun', () => {
+    const openDialog = () => {
+      const dialog = document.createElement('div')
+      dialog.setAttribute('role', 'dialog')
+      dialog.setAttribute('data-state', 'open')
+      document.body.appendChild(dialog)
+      return dialog
+    }
+
+    it('focuses the chat input when nothing else is in use', () => {
+      const chat = document.createElement('textarea')
+      const button = document.createElement('button')
+      document.body.append(chat, button)
+      button.focus()
+
+      focusChatInputAfterRun(chat)
+
+      expect(document.activeElement).toBe(chat)
+    })
+
+    it('keeps focus in another text field', () => {
+      const chat = document.createElement('textarea')
+      const other = document.createElement('textarea')
+      document.body.append(chat, other)
+      other.focus()
+
+      focusChatInputAfterRun(chat)
+
+      expect(document.activeElement).toBe(other)
+    })
+
+    it('does not focus behind an open dialog that does not contain the chat input', () => {
+      const chat = document.createElement('textarea')
+      document.body.appendChild(chat)
+      const button = document.createElement('button')
+      openDialog().appendChild(button)
+      button.focus()
+
+      focusChatInputAfterRun(chat)
+
+      expect(document.activeElement).toBe(button)
+    })
+
+    it('focuses the chat input inside the dialog that contains it', () => {
+      const chat = document.createElement('textarea')
+      openDialog().appendChild(chat)
+
+      focusChatInputAfterRun(chat)
+
+      expect(document.activeElement).toBe(chat)
     })
   })
 })

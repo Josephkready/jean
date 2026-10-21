@@ -1,6 +1,7 @@
 import { useCallback, type RefObject } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { invoke } from '@/lib/transport'
+import { focusChatInputAfterRun } from '@/lib/restore-keyboard-focus'
 import { toast } from 'sonner'
 import { useChatStore } from '@/store/chat-store'
 import { useProjectsStore } from '@/store/projects-store'
@@ -555,7 +556,7 @@ export function useInvestigateHandlers({
           aiLanguage: preferences?.ai_language,
           backend: investigateBackend,
         },
-        { onSettled: () => inputRef.current?.focus() }
+        { onSettled: () => focusChatInputAfterRun(inputRef.current) }
       )
     },
     [
@@ -828,7 +829,7 @@ export function useInvestigateHandlers({
             aiLanguage: preferences?.ai_language,
             backend: investigateBackend,
           },
-          { onSettled: () => inputRef.current?.focus() }
+          { onSettled: () => focusChatInputAfterRun(inputRef.current) }
         )
       }
 
@@ -1040,7 +1041,7 @@ export function useInvestigateHandlers({
             aiLanguage: preferences?.ai_language,
             backend: reviewCommentsBackend,
           },
-          { onSettled: () => inputRef.current?.focus() }
+          { onSettled: () => focusChatInputAfterRun(inputRef.current) }
         )
       }
 

@@ -252,24 +252,6 @@ export function TitleBar({
         )}
         {!zenMode && (
           <>
-            {!native && !isMobile && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    onClick={() =>
-                      openExternal('https://github.com/coollabsio/jean')
-                    }
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
-                    data-testid="open-github-web"
-                  >
-                    <Github className="size-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>GitHub</TooltipContent>
-              </Tooltip>
-            )}
             {/* Line-art bug icon: the clearest "report a problem" signal. Shown on
                 native, web and mobile so a report can be filed from anywhere. */}
             <Tooltip>

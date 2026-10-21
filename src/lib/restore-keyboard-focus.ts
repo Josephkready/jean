@@ -45,6 +45,26 @@ export function isMeaningfulFocusTarget(
 }
 
 /**
+ * Refocus the chat input after a run settles, unless the user is working
+ * elsewhere: typing in another text field, or inside an overlay (e.g. the bug
+ * report dialog) that does not contain the chat input.
+ */
+export function focusChatInputAfterRun(input: HTMLElement | null): void {
+  if (!input) return
+  const active = document.activeElement
+  if (
+    active instanceof HTMLElement &&
+    active !== input &&
+    (active.isContentEditable || active.matches('input, textarea, select'))
+  ) {
+    return
+  }
+  const overlays = document.querySelectorAll(FOCUS_OWNING_OVERLAY_SELECTOR)
+  if (Array.from(overlays).some(overlay => !overlay.contains(input))) return
+  input.focus()
+}
+
+/**
  * Ensure document.body can receive programmatic focus (needed for shortcut
  * delivery when no input is focused).
  */

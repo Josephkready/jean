@@ -2,6 +2,7 @@ import { useCallback, type RefObject } from 'react'
 import type { QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { invoke, listen } from '@/lib/transport'
+import { focusChatInputAfterRun } from '@/lib/restore-keyboard-focus'
 import {
   chatQueryKeys,
   markPlanApproved as markPlanApprovedService,
@@ -514,7 +515,7 @@ export function useMessageHandlers({
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -798,7 +799,7 @@ export function useMessageHandlers({
             },
             {
               onSettled: () => {
-                inputRef.current?.focus()
+                focusChatInputAfterRun(inputRef.current)
               },
             }
           )
@@ -970,7 +971,7 @@ export function useMessageHandlers({
             },
             {
               onSettled: () => {
-                inputRef.current?.focus()
+                focusChatInputAfterRun(inputRef.current)
               },
             }
           )
@@ -1084,7 +1085,7 @@ export function useMessageHandlers({
       },
       {
         onSettled: () => {
-          inputRef.current?.focus()
+          focusChatInputAfterRun(inputRef.current)
         },
       }
     )
@@ -1184,7 +1185,7 @@ export function useMessageHandlers({
       },
       {
         onSettled: () => {
-          inputRef.current?.focus()
+          focusChatInputAfterRun(inputRef.current)
         },
       }
     )
@@ -1257,7 +1258,14 @@ export function useMessageHandlers({
       }
 
       // Mark plan approved on original session
-      markPlanApprovedService(worktreeId, worktreePath, sessionId, messageId)
+      markPlanApprovedService(
+        worktreeId,
+        worktreePath,
+        sessionId,
+        messageId
+      ).catch(err => {
+        console.error('[useMessageHandlers] markPlanApproved failed:', err)
+      })
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(sessionId),
         old => {
@@ -1343,7 +1351,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       // Optimistically update TanStack Query cache so UI shows correct backend/model
       // immediately. Without this, session?.backend (from query cache) defaults to 'claude'
@@ -1557,7 +1564,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       // Optimistically update TanStack Query cache so UI shows correct backend/model immediately.
       queryClient.setQueryData<Session>(
@@ -1721,7 +1727,14 @@ export function useMessageHandlers({
       }
 
       // Mark plan approved on original session
-      markPlanApprovedService(worktreeId, worktreePath, sessionId, messageId)
+      markPlanApprovedService(
+        worktreeId,
+        worktreePath,
+        sessionId,
+        messageId
+      ).catch(err => {
+        console.error('[useMessageHandlers] markPlanApproved failed:', err)
+      })
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(sessionId),
         old => {
@@ -1886,7 +1899,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(newSession.id),
@@ -2172,7 +2184,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(newSession.id),
@@ -2501,7 +2512,7 @@ export function useMessageHandlers({
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -2701,7 +2712,7 @@ export function useMessageHandlers({
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -3333,7 +3344,7 @@ Please apply this fix to the file.`
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -3474,7 +3485,7 @@ Please apply all these fixes to the respective files.`
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
