@@ -5,8 +5,22 @@
 //! background task then hands the report to the host's shared `issue-queue`
 //! CLI (a separate worker owns the GitHub token; Jean never talks to GitHub).
 //!
+//! Record statuses: `pending-sync` (saved locally, not yet handed to the queue),
+//! `uncertain` (enqueue outcome unknown; not retried automatically to avoid
+//! duplicate issues), then the queue's own `pending`, `filing`, `retry`, `filed`
+//! and `failed`.
+//!
 //! Privacy: report text (description, title, body, argv, stdout/stderr) is never
 //! logged. Logs carry only the report id, job id, repo and a content-free category.
+//!
+//! Configuration (environment variables, read by `QueueConfig::from_env`):
+//!
+//! | Variable | Type | Default | Purpose |
+//! | --- | --- | --- | --- |
+//! | `JEAN_ISSUE_QUEUE_BIN` | string (path or name) | `issue-queue` | issue-queue CLI to invoke |
+//! | `JEAN_GITHUB_REPO` | string `owner/name` | `Josephkready/jean` | Repo that receives reports; invalid values fall back to the default |
+//! | `JEAN_ISSUE_QUEUE_TIMEOUT` | integer seconds | `5` (max `60`) | Timeout per issue-queue call; zero or invalid values use the default |
+//! | `ISSUE_QUEUE_DB` | file path | `~/.local/share/issue-queue/queue.db` | Queue database, always passed to the CLI |
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -32,6 +46,9 @@ const MAX_QUEUE_OUTPUT_BYTES: u64 = 64 * 1024;
 
 const STATUS_PENDING_SYNC: &str = "pending-sync";
 const STATUS_PENDING: &str = "pending";
+/// Claim written before calling the queue: the enqueue outcome is unknown, so
+/// the record is never retried automatically (avoids duplicate GitHub issues).
+const STATUS_UNCERTAIN: &str = "uncertain";
 const QUEUE_STATUSES: [&str; 6] = ["pending", "filing", "retry", "filed", "failed", "uncertain"];
 
 /// Client-supplied context keys we accept, in the order they are rendered.
@@ -358,7 +375,14 @@ fn list_pending_sync(base: &Path) -> Vec<String> {
             let name = entry.file_name().to_string_lossy().to_string();
             let id = name.strip_suffix(".json")?;
             let id = validate_report_id(id).ok()?;
-            let record = load_record(base, &id).ok()??;
+            let record = match load_record(base, &id) {
+                Ok(Some(record)) => record,
+                Ok(None) => return None,
+                Err(category) => {
+                    log::warn!("bug-report {id}: unreadable record skipped ({category})");
+                    return None;
+                }
+            };
             (record.status == STATUS_PENDING_SYNC).then_some((record.created_at, id))
         })
         .collect();
@@ -405,7 +429,7 @@ struct QueueConfig {
 }
 
 impl QueueConfig {
-    fn from_env() -> Self {
+    fn from_env() -> Result<Self, &'static str> {
         let bin = std::env::var("JEAN_ISSUE_QUEUE_BIN")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -413,21 +437,19 @@ impl QueueConfig {
         let repo = resolve_repo(std::env::var("JEAN_GITHUB_REPO").ok().as_deref());
         // The shared worker reads $HOME/.local/share/issue-queue/queue.db; issue-queue's
         // own default differs and jean-server has no ISSUE_QUEUE_DB, so always pin it.
-        let db = std::env::var_os("ISSUE_QUEUE_DB")
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_default()
-                    .join(".local/share/issue-queue/queue.db")
-            });
+        let db = match std::env::var_os("ISSUE_QUEUE_DB").filter(|s| !s.is_empty()) {
+            Some(path) => PathBuf::from(path),
+            None => dirs::home_dir()
+                .ok_or("no-home-dir")?
+                .join(".local/share/issue-queue/queue.db"),
+        };
         let timeout = resolve_timeout(std::env::var("JEAN_ISSUE_QUEUE_TIMEOUT").ok().as_deref());
-        Self {
+        Ok(Self {
             bin,
             repo,
             db,
             timeout,
-        }
+        })
     }
 }
 
@@ -457,10 +479,15 @@ fn run_queue(
         })),
         _ => None,
     };
-    let reader = child.stdout.take().map(|stdout| {
+    let reader = child.stdout.take().map(|mut stdout| {
         std::thread::spawn(move || {
+            // Keep draining past the cap so the child never blocks on a full pipe;
+            // only the first MAX_QUEUE_OUTPUT_BYTES are retained.
             let mut buf = Vec::new();
-            let _ = stdout.take(MAX_QUEUE_OUTPUT_BYTES).read_to_end(&mut buf);
+            let _ = (&mut stdout)
+                .take(MAX_QUEUE_OUTPUT_BYTES)
+                .read_to_end(&mut buf);
+            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
             buf
         })
     });
@@ -495,7 +522,8 @@ fn run_queue(
 }
 
 /// Hand one `pending-sync` record to the queue. No-op if it is no longer
-/// `pending-sync`. On any failure the record stays `pending-sync`.
+/// `pending-sync`. A definite failure leaves it `pending-sync`; an ambiguous one
+/// leaves it `uncertain` (see [`STATUS_UNCERTAIN`]).
 fn enqueue_record(base: &Path, id: &str, config: &QueueConfig) -> Result<(), &'static str> {
     let _guard = RECORD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut record = match load_record(base, id) {
@@ -518,11 +546,37 @@ fn enqueue_record(base: &Path, id: &str, config: &QueueConfig) -> Result<(), &'s
         "--body-file",
         "-",
     ];
-    let stdout = run_queue(config, &args, Some(body.into_bytes()))?;
-    let job_id = parse_enqueue_output(&stdout).ok_or("bad-output")?;
+    // Persist a claim first: issue-queue has no idempotency key, so if we crash or
+    // lose the answer after the queue inserted the job, a retry would duplicate it.
+    record.status = STATUS_UNCERTAIN.to_string();
+    if save_record(base, &record).is_err() {
+        return Err("save-failed");
+    }
+    let outcome = run_queue(config, &args, Some(body.into_bytes()))
+        .and_then(|stdout| parse_enqueue_output(&stdout).ok_or("bad-output"));
+    let job_id = match outcome {
+        Ok(job_id) => job_id,
+        // Definitely not enqueued (issue-queue never started, or exited non-zero
+        // before inserting): safe to retry later.
+        Err(category @ ("spawn-failed" | "nonzero-exit")) => {
+            record.status = STATUS_PENDING_SYNC.to_string();
+            if save_record(base, &record).is_err() {
+                log::warn!("bug-report {id}: could not restore pending-sync ({category})");
+            }
+            return Err(category);
+        }
+        // Ambiguous (timeout, wait failure, unparseable output): stay `uncertain`.
+        Err(category) => {
+            log::warn!("bug-report {id}: enqueue outcome unknown ({category}); not retrying");
+            return Err(category);
+        }
+    };
     record.job_id = Some(job_id.clone());
     record.status = STATUS_PENDING.to_string();
-    save_record(base, &record).map_err(|_| "save-failed")?;
+    if save_record(base, &record).is_err() {
+        log::warn!("bug-report {id}: job {job_id} queued but record save failed");
+        return Err("save-failed");
+    }
     log::info!(
         "bug-report {id}: enqueued job {job_id} repo {}",
         config.repo
@@ -551,7 +605,13 @@ fn sync_pending(base: &Path, first: Option<&str>, config: &QueueConfig) {
 }
 
 fn refresh_status(base: &Path, id: &str, config: &QueueConfig) -> Result<BugReportStatus, String> {
-    let mut record = load_record(base, id)?.ok_or_else(|| "Bug report not found".to_string())?;
+    // Take the lock just for this load so a poll racing an in-flight enqueue waits
+    // for it instead of observing the transient `uncertain` claim.
+    let mut record = {
+        let _guard = RECORD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        load_record(base, id)?
+    }
+    .ok_or_else(|| "Bug report not found".to_string())?;
 
     if record.status == STATUS_PENDING_SYNC {
         if let Err(category) = enqueue_record(base, id, config) {
@@ -631,8 +691,9 @@ pub async fn submit_bug_report(
     // Retry any pending-sync records too, but never block the caller.
     if record.status == STATUS_PENDING_SYNC {
         let report_id = record.id.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            sync_pending(&base, Some(&report_id), &QueueConfig::from_env());
+        tauri::async_runtime::spawn_blocking(move || match QueueConfig::from_env() {
+            Ok(config) => sync_pending(&base, Some(&report_id), &config),
+            Err(category) => log::warn!("bug-report {report_id}: enqueue skipped ({category})"),
         });
     }
     Ok(record.to_status())
@@ -646,8 +707,14 @@ pub async fn get_bug_report_status(
 ) -> Result<BugReportStatus, String> {
     let id = validate_report_id(&id)?;
     let base = app_base_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        refresh_status(&base, &id, &QueueConfig::from_env())
+    tauri::async_runtime::spawn_blocking(move || match QueueConfig::from_env() {
+        Ok(config) => refresh_status(&base, &id, &config),
+        Err(category) => {
+            log::warn!("bug-report {id}: status refresh skipped ({category})");
+            let record =
+                load_record(&base, &id)?.ok_or_else(|| "Bug report not found".to_string())?;
+            Ok(record.to_status())
+        }
     })
     .await
     .map_err(|e| format!("Bug report task failed: {e}"))?
@@ -843,6 +910,52 @@ mod tests {
     }
 
     #[test]
+    fn queue_output_parsers_are_total_and_gated() {
+        let valid_status =
+            r#"{"status":"filed","url":"https://github.com/a/b/issues/1","number":1}"#;
+        let valid_enqueue = format!(r#"{{"status":"queued","id":"{ID}"}}"#);
+        let alphabet: Vec<char> = "{}[]\":,0123456789abcdefstatusqueuedidurlnumber -\\é\n"
+            .chars()
+            .collect();
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut inputs: Vec<String> = Vec::new();
+        for source in [valid_status, valid_enqueue.as_str()] {
+            for cut in 0..=source.len() {
+                if source.is_char_boundary(cut) {
+                    inputs.push(source[..cut].to_string());
+                }
+            }
+        }
+        for _ in 0..2000 {
+            let len = (next() % 64) as usize;
+            let s: String = (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect();
+            inputs.push(s);
+        }
+        for input in &inputs {
+            if let Some(q) = parse_status_output(input) {
+                assert!(QUEUE_STATUSES.contains(&q.status.as_str()), "{input:?}");
+            }
+            if let Some(job) = parse_enqueue_output(input) {
+                assert_eq!(
+                    Uuid::parse_str(&job).unwrap().hyphenated().to_string(),
+                    job,
+                    "{input:?}"
+                );
+            }
+        }
+        assert!(parse_status_output(valid_status).is_some());
+        assert!(parse_enqueue_output(&valid_enqueue).is_some());
+    }
+
+    #[test]
     fn second_submit_with_same_id_does_not_create_another_record() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = BTreeMap::new();
@@ -876,5 +989,94 @@ mod tests {
             assert_eq!(file_mode & 0o777, 0o600);
             assert_eq!(dir_mode & 0o777, 0o700);
         }
+    }
+
+    #[cfg(unix)]
+    fn fake_queue(dir: &Path, script: &str) -> (QueueConfig, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let counter = dir.join("calls");
+        let bin = dir.join("fake-issue-queue");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho x >> '{}'\ncat >/dev/null\n{script}\n",
+                counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = QueueConfig {
+            bin: bin.display().to_string(),
+            repo: DEFAULT_REPO.to_string(),
+            db: dir.join("queue.db"),
+            timeout: Duration::from_secs(1),
+        };
+        (config, counter)
+    }
+
+    #[cfg(unix)]
+    fn setup_record(dir: &Path) -> PathBuf {
+        let base = dir.join("data");
+        create_or_get_record(
+            &base,
+            ID,
+            "a long enough description",
+            BTreeMap::new(),
+            "t1",
+        )
+        .unwrap();
+        base
+    }
+
+    #[cfg(unix)]
+    fn calls(counter: &Path) -> usize {
+        std::fs::read_to_string(counter).map_or(0, |s| s.lines().count())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enqueue_timeout_leaves_record_uncertain_and_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = setup_record(dir.path());
+        let (config, counter) = fake_queue(dir.path(), "sleep 5");
+        assert_eq!(enqueue_record(&base, ID, &config), Err("timeout"));
+        assert_eq!(
+            load_record(&base, ID).unwrap().unwrap().status,
+            STATUS_UNCERTAIN
+        );
+        assert!(list_pending_sync(&base).is_empty());
+        sync_pending(&base, Some(ID), &config);
+        assert_eq!(calls(&counter), 1);
+        let status = refresh_status(&base, ID, &config).unwrap();
+        assert_eq!(status.status, STATUS_UNCERTAIN);
+        assert_eq!(calls(&counter), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enqueue_nonzero_exit_restores_pending_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = setup_record(dir.path());
+        let (config, _) = fake_queue(dir.path(), "exit 2");
+        assert_eq!(enqueue_record(&base, ID, &config), Err("nonzero-exit"));
+        let record = load_record(&base, ID).unwrap().unwrap();
+        assert_eq!(record.status, STATUS_PENDING_SYNC);
+        assert_eq!(list_pending_sync(&base), vec![ID.to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enqueue_success_records_job_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = setup_record(dir.path());
+        let job = "223e4567-e89b-42d3-a456-426614174000";
+        let (config, _) = fake_queue(
+            dir.path(),
+            &format!("echo '{{\"status\":\"queued\",\"id\":\"{job}\"}}'"),
+        );
+        assert_eq!(enqueue_record(&base, ID, &config), Ok(()));
+        let record = load_record(&base, ID).unwrap().unwrap();
+        assert_eq!(record.status, STATUS_PENDING);
+        assert_eq!(record.job_id.as_deref(), Some(job));
     }
 }
