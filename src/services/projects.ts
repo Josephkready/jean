@@ -1698,20 +1698,31 @@ export function useWorktreeEvents() {
         invalidateProjectLists(queryClient)
 
         const toastId = `teardown-${id}`
+        const teardownPrefix = 'Teardown script failed:'
+        const isTeardownFailure = error.startsWith(teardownPrefix)
         toast.error('Failed to delete worktree', {
           id: toastId,
-          description: error,
+          // Keep the description short: the toast also holds two buttons, and
+          // a long script error squeezes the text into a thin column.
+          description: isTeardownFailure
+            ? 'The teardown script failed. View the output for details.'
+            : error,
           duration: Infinity,
           action: {
             label: toastActionLabel('View Output'),
             onClick: () =>
               window.dispatchEvent(
                 new CustomEvent('show-teardown-output', {
-                  detail: { output: error, success: false },
+                  detail: {
+                    output: isTeardownFailure
+                      ? error.slice(teardownPrefix.length).trim()
+                      : error,
+                    success: false,
+                  },
                 })
               ),
           },
-          ...(error.startsWith('Teardown script failed:')
+          ...(isTeardownFailure
             ? {
                 cancel: {
                   label: 'Delete without teardown',
