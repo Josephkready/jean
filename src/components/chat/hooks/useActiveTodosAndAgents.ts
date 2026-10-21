@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { foldTodoWriteToolCalls, isPlanToolCall } from '@/types/chat'
 import type {
   ToolCall,
@@ -328,19 +328,15 @@ export function useActiveTodosAndAgents({
     return { todos: [], sourceMessageId: null, isFromStreaming: false }
   }, [activeSessionId, isSending, currentToolCalls, lastAssistantMessage])
 
-  // Track which message's agents were dismissed
-  const [dismissedAgentMessageId, setDismissedAgentMessageId] = useState<
-    string | null
-  >(null)
+  // Agent ids shown when the panel was dismissed. Agent ids stay the same
+  // from streaming to the persisted message, but message ids do not.
+  const [dismissedAgentKey, setDismissedAgentKey] = useState<string | null>(
+    null
+  )
 
   // Get active agents from Codex collab tool calls and Claude Task/Agent calls
-  const {
-    agents: activeAgents,
-    sourceMessageId: agentSourceMessageId,
-    isFromStreaming: agentIsFromStreaming,
-  } = useMemo(() => {
-    if (!activeSessionId)
-      return { agents: [], sourceMessageId: null, isFromStreaming: false }
+  const activeAgents = useMemo((): SubAgent[] => {
+    if (!activeSessionId) return []
 
     // A new turn starts with no tool calls. Do not reuse the previous turn's
     // agents in that gap, or their persisted running state appears active again.
@@ -349,18 +345,22 @@ export function useActiveTodosAndAgents({
       : (lastAssistantMessage?.tool_calls ?? [])
 
     const cancelled = lastAssistantMessage?.cancelled === true
-    const agents = [
+    return [
       ...extractCodexAgents(toolCalls, isSending, cancelled),
       ...extractClaudeAgents(toolCalls, isSending, cancelled),
     ]
-
-    const sourceId = isSending ? null : (lastAssistantMessage?.id ?? null)
-    return {
-      agents,
-      sourceMessageId: sourceId,
-      isFromStreaming: isSending && agents.length > 0,
-    }
   }, [activeSessionId, isSending, currentToolCalls, lastAssistantMessage])
+
+  const agentKey = activeAgents.map(agent => agent.id).join('\n')
+  // New agents change the key, so the panel shows again. Running agents keep it
+  // visible for live status.
+  const isAgentWidgetDismissed =
+    dismissedAgentKey === agentKey &&
+    !activeAgents.some(agent => agent.status === 'in_progress')
+  const dismissAgentWidget = useCallback(
+    () => setDismissedAgentKey(agentKey),
+    [agentKey]
+  )
 
   // Auto-clear todo dismissal on new streaming todos
   useEffect(() => {
@@ -383,26 +383,6 @@ export function useActiveTodosAndAgents({
     dismissedTodoMessageId,
   ])
 
-  // Auto-clear agent dismissal on new streaming agents
-  useEffect(() => {
-    if (isSending && activeAgents.length > 0 && agentSourceMessageId === null) {
-      if (dismissedAgentMessageId !== '__streaming__') {
-        queueMicrotask(() => setDismissedAgentMessageId(null))
-      }
-    } else if (
-      !isSending &&
-      agentSourceMessageId !== null &&
-      dismissedAgentMessageId === '__streaming__'
-    ) {
-      queueMicrotask(() => setDismissedAgentMessageId(agentSourceMessageId))
-    }
-  }, [
-    isSending,
-    activeAgents.length,
-    agentSourceMessageId,
-    dismissedAgentMessageId,
-  ])
-
   return {
     activeTodos,
     todoSourceMessageId,
@@ -410,9 +390,7 @@ export function useActiveTodosAndAgents({
     dismissedTodoMessageId,
     setDismissedTodoMessageId,
     activeAgents,
-    agentSourceMessageId,
-    agentIsFromStreaming,
-    dismissedAgentMessageId,
-    setDismissedAgentMessageId,
+    isAgentWidgetDismissed,
+    dismissAgentWidget,
   }
 }

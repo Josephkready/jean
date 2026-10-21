@@ -1577,9 +1577,8 @@ const ChatWindowContent = memo(function ChatWindowContent({
     dismissedTodoMessageId,
     setDismissedTodoMessageId,
     activeAgents,
-    agentSourceMessageId,
-    dismissedAgentMessageId,
-    setDismissedAgentMessageId,
+    isAgentWidgetDismissed,
+    dismissAgentWidget,
   } = useActiveTodosAndAgents({
     activeSessionId,
     isSending,
@@ -3399,13 +3398,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                           {!zenMode &&
                             activeAgents.length > 0 &&
                             !pillComposer &&
-                            (dismissedAgentMessageId === null ||
-                              activeAgents.some(
-                                agent => agent.status === 'in_progress'
-                              ) ||
-                              (agentSourceMessageId !== null &&
-                                agentSourceMessageId !==
-                                  dismissedAgentMessageId)) && (
+                            !isAgentWidgetDismissed && (
                               <AgentWidget
                                 key={activeSessionId ?? undefined}
                                 className="sm:mb-2"
@@ -3421,11 +3414,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       open
                                     )
                                 }
-                                onClose={() =>
-                                  setDismissedAgentMessageId(
-                                    agentSourceMessageId ?? '__streaming__'
-                                  )
-                                }
+                                onClose={dismissAgentWidget}
                               />
                             )}
                           {/* Queued prompts - rendered as an extension above the chat input */}

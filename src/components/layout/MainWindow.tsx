@@ -608,6 +608,12 @@ export function MainWindow() {
       <TitleBar
         title={windowTitle}
         hideTitle={!isMobile}
+        contentInset={
+          isMobile || !isInitialized
+            ? 0
+            : // 72px tab rail + sidebar + 1px resize handle
+              72 + (leftSidebarVisible ? leftSidebarSize + 1 : 0)
+        }
         className="absolute top-0 left-0 right-0"
       />
 

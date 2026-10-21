@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { BellDot } from '@/components/icons/reicon'
 import {
   isAgentUpdateMessage,
@@ -72,12 +72,25 @@ export function AgentUpdatesButton({
   const [open, setOpen] = useState(false)
   const newest = updates[0]?.timestamp ?? 0
 
+  // Mark as seen up to now, not up to the newest message: the saved copy of a
+  // streamed reply carries its run end time, which is later than the live one
+  const markSeen = useCallback(() => {
+    const now = Math.floor(Date.now() / 1000)
+    useUIStore.getState().markAgentUpdatesSeen(agent.id, Math.max(newest, now))
+  }, [agent.id, newest])
+
   // Updates that arrive while the panel is open are seen
   useEffect(() => {
-    if (open && newest > 0) {
-      useUIStore.getState().markAgentUpdatesSeen(agent.id, newest)
-    }
-  }, [open, newest, agent.id])
+    if (open && newest > 0) markSeen()
+  }, [open, newest, markSeen])
+
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!next) markSeen()
+      setOpen(next)
+    },
+    [markSeen]
+  )
 
   // Shown only when there is something new (kept while the panel is open)
   if (unread === 0 && !open) return null
@@ -99,7 +112,7 @@ export function AgentUpdatesButton({
           </span>
         )}
       </Button>
-      <Sheet open={open} onOpenChange={setOpen}>
+      <Sheet open={open} onOpenChange={handleOpenChange}>
         <SheetContent side="right" className="gap-0 sm:max-w-md">
           <SheetHeader className="border-b">
             <SheetTitle>Updates</SheetTitle>

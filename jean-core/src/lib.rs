@@ -3420,6 +3420,10 @@ pub struct UIState {
     #[serde(default)]
     pub seen_failed_workflow_run_ids: Vec<u64>,
 
+    /// Agent ID → newest agent update time (Unix seconds) the user has seen
+    #[serde(default)]
+    pub agent_updates_seen_at: std::collections::HashMap<String, u64>,
+
     /// Sessions armed for auto-continue after a usage limit resets
     #[serde(default)]
     pub auto_resume: Vec<AutoResumeEntry>,
@@ -3577,6 +3581,7 @@ impl Default for UIState {
             pinned_recent_session_ids: Vec::new(),
             last_opened_per_project: std::collections::HashMap::new(),
             seen_failed_workflow_run_ids: Vec::new(),
+            agent_updates_seen_at: std::collections::HashMap::new(),
             auto_resume: Vec::new(),
             git_diff_view_mode: None,
             version: default_ui_state_version(),
@@ -4234,6 +4239,7 @@ mod ui_state_pin_tests {
         let incoming = UIState {
             active_worktree_id: Some("worktree-1".to_string()),
             seen_failed_workflow_run_ids: vec![42],
+            agent_updates_seen_at: [("agent-1".to_string(), 1_700_000_000)].into(),
             pinned_recent_session_ids: pins(&["stale-pin"]),
             ..UIState::default()
         };
@@ -4246,6 +4252,10 @@ mod ui_state_pin_tests {
         );
         assert_eq!(saved.active_worktree_id.as_deref(), Some("worktree-1"));
         assert_eq!(saved.seen_failed_workflow_run_ids, vec![42]);
+        assert_eq!(
+            saved.agent_updates_seen_at.get("agent-1"),
+            Some(&1_700_000_000)
+        );
     }
 
     #[test]

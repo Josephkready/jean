@@ -142,18 +142,15 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
           // Tints the user's prompt bubbles in this agent's color
           '--agent-accent': (AGENT_ICON_COLORS[agent.icon as AgentIconKey] ??
             AGENT_ICON_COLORS.yellow)[0],
-          // Keeps the first message clear of the floating name pill (pending
-          // approvals already push the chat down)
-          '--chat-top-inset': agent.pendingApprovals > 0 ? '0px' : '2.5rem',
         } as CSSProperties
       }
     >
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center gap-2 px-3">
+        <div className="flex shrink-0 justify-center gap-2 bg-background px-3 pt-2">
           <button
             type="button"
             className={cn(
-              'pointer-events-auto flex h-9 max-w-full min-w-0 items-center gap-2 rounded-full border bg-background/80 pl-1.5 pr-3.5 text-sm font-medium text-foreground shadow-sm backdrop-blur transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+              'flex h-9 max-w-full min-w-0 items-center gap-2 rounded-full border pl-1.5 pr-3.5 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
               panelOpen && 'bg-muted'
             )}
             onClick={() => setPanelOpen(open => !open)}
@@ -178,14 +175,12 @@ function AgentPageContent({ agent }: { agent: AgentSummary }) {
               </span>
             )}
           </button>
-          <div className="pointer-events-auto flex items-center rounded-full border bg-background/80 shadow-sm backdrop-blur empty:hidden">
+          <div className="flex items-center rounded-full border empty:hidden">
             <AgentUpdatesButton agent={agent} workdir={workdir} />
           </div>
         </div>
         {agent.pendingApprovals > 0 && (
-          <div className="pt-12">
-            <PendingApprovals agentId={agent.id} />
-          </div>
+          <PendingApprovals agentId={agent.id} />
         )}
         {error ? (
           <div

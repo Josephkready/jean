@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react'
+import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import {
   extractClaudeAgents,
@@ -185,6 +185,54 @@ describe('useActiveTodosAndAgents', () => {
     rerender({ isSending: true })
 
     expect(result.current.activeAgents).toEqual([])
+  })
+
+  it('keeps the panel dismissed when the finished turn gets a new message id', () => {
+    const agentCall = toolCall(
+      'Agent',
+      { id: 'task-1', description: 'Explore' },
+      'Report'
+    )
+    const { result, rerender } = renderHook(
+      props =>
+        useActiveTodosAndAgents({ activeSessionId: 'session-1', ...props }),
+      {
+        initialProps: {
+          isSending: true,
+          currentToolCalls: [agentCall],
+          lastAssistantMessage: undefined as ChatMessage | undefined,
+        },
+      }
+    )
+
+    expect(result.current.isAgentWidgetDismissed).toBe(false)
+    act(() => result.current.dismissAgentWidget())
+    expect(result.current.isAgentWidgetDismissed).toBe(true)
+
+    // Turn ends: the optimistic message, then the persisted one with another id
+    for (const id of ['optimistic-id', 'persisted-id']) {
+      rerender({
+        isSending: false,
+        currentToolCalls: [],
+        lastAssistantMessage: {
+          id,
+          role: 'assistant',
+          content: '',
+          tool_calls: [agentCall],
+        } as ChatMessage,
+      })
+      expect(result.current.isAgentWidgetDismissed).toBe(true)
+    }
+
+    // A new subagent shows the panel again
+    rerender({
+      isSending: true,
+      currentToolCalls: [
+        toolCall('Agent', { id: 'task-2', description: 'Next' }),
+      ],
+      lastAssistantMessage: undefined,
+    })
+    expect(result.current.isAgentWidgetDismissed).toBe(false)
   })
 })
 

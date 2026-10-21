@@ -265,6 +265,7 @@ interface UIState {
   setAgentsServerFilter: (serverId: string) => void
   setAgentsAdvanced: (advanced: boolean) => void
   markAgentUpdatesSeen: (agentId: string, timestamp: number) => void
+  setAgentUpdatesSeenAt: (seenAt: Record<string, number>) => void
   setLeftSidebarSize: (size: number) => void
   setAgentsSidebarSize: (size: number) => void
   leftSidebarSwipe: {
@@ -614,6 +615,16 @@ export const useUIStore = create<UIState>()(
                 },
           undefined,
           'markAgentUpdatesSeen'
+        ),
+
+      setAgentUpdatesSeenAt: seenAt =>
+        set(
+          state =>
+            state.agentUpdatesSeenAt === seenAt
+              ? state
+              : { agentUpdatesSeenAt: seenAt },
+          undefined,
+          'setAgentUpdatesSeenAt'
         ),
 
       setAgentsServerFilter: serverId =>
