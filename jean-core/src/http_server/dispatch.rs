@@ -2193,8 +2193,16 @@ pub async fn dispatch_command(
             let description: String = from_field(&args, "description")?;
             let context: std::collections::HashMap<String, String> =
                 from_field_opt(&args, "context")?.unwrap_or_default();
-            let result =
-                crate::bug_report::submit_bug_report(app.clone(), id, description, context).await?;
+            let attachments: Vec<crate::bug_report::BugReportAttachmentInput> =
+                from_field_opt(&args, "attachments")?.unwrap_or_default();
+            let result = crate::bug_report::submit_bug_report(
+                app.clone(),
+                id,
+                description,
+                context,
+                attachments,
+            )
+            .await?;
             to_value(result)
         }
         "get_bug_report_status" => {

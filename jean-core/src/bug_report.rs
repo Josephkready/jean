@@ -10,8 +10,20 @@
 //! duplicate issues), then the queue's own `pending`, `filing`, `retry`, `filed`
 //! and `failed`.
 //!
-//! Privacy: report text (description, title, body, argv, stdout/stderr) is never
-//! logged. Logs carry only the report id, job id, repo and a content-free category.
+//! Context: the client sends an allowlisted set of environment/app facts (see
+//! `CLIENT_CONTEXT_ALLOWLIST`); the server adds authoritative facts (app version,
+//! platform, host OS release, report time) that override client values.
+//!
+//! Screenshots: up to 3 images (jpeg/png/gif/webp, 2 MB each) arrive base64
+//! encoded and are re-validated here (count, size, magic bytes). They are stored
+//! under `<app_data_dir>/bug-reports/<id>/` only when the record is first created.
+//! At enqueue time a `manifest.json` of absolute paths is passed to
+//! `issue-queue enqueue --attachments-manifest`; the queue copies the bytes into its
+//! own storage and its worker uploads them in place of the screenshots token in the body.
+//!
+//! Privacy: report text (description, title, body, argv, stdout/stderr) and
+//! screenshot names/bytes are never logged. Logs carry only the report id, job id,
+//! repo and a content-free category.
 //!
 //! Configuration (environment variables, read by `QueueConfig::from_env`):
 //!
@@ -26,9 +38,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -39,7 +52,12 @@ const DEFAULT_TIMEOUT_SECS: u64 = 5;
 const MAX_TIMEOUT_SECS: u64 = 60;
 const MIN_DESCRIPTION_CHARS: usize = 10;
 const MAX_DESCRIPTION_CHARS: usize = 8000;
-const MAX_CONTEXT_VALUE_CHARS: usize = 300;
+const MAX_CONTEXT_VALUE_CHARS: usize = 500;
+const MAX_ATTACHMENTS: usize = 3;
+const MAX_ATTACHMENT_BYTES: usize = 2_000_000;
+const MAX_ATTACHMENT_NAME_CHARS: usize = 64;
+const SCREENSHOTS_TOKEN: &str = "<!-- issue-queue:screenshots -->";
+const MANIFEST_FILE: &str = "manifest.json";
 const MAX_TITLE_CHARS: usize = 72;
 const MAX_SYNC_BATCH: usize = 20;
 const MAX_QUEUE_OUTPUT_BYTES: u64 = 64 * 1024;
@@ -52,7 +70,7 @@ const STATUS_UNCERTAIN: &str = "uncertain";
 const QUEUE_STATUSES: [&str; 6] = ["pending", "filing", "retry", "filed", "failed", "uncertain"];
 
 /// Client-supplied context keys we accept, in the order they are rendered.
-const CLIENT_CONTEXT_ALLOWLIST: [&str; 13] = [
+const CLIENT_CONTEXT_ALLOWLIST: [&str; 28] = [
     "view",
     "projectName",
     "projectPath",
@@ -63,11 +81,26 @@ const CLIENT_CONTEXT_ALLOWLIST: [&str; 13] = [
     "model",
     "executionMode",
     "runtime",
+    "deviceType",
+    "os",
+    "browser",
+    "userAgent",
+    "screen",
     "viewport",
+    "pixelRatio",
+    "touch",
+    "colorScheme",
     "theme",
+    "language",
+    "timezone",
+    "online",
     "clientVersion",
+    "webBuildId",
+    "gitSha",
+    "tauriVersion",
+    "cliVersions",
 ];
-const SERVER_FACT_KEYS: [&str; 3] = ["appVersion", "platform", "reportedAt"];
+const SERVER_FACT_KEYS: [&str; 4] = ["appVersion", "platform", "osRelease", "reportedAt"];
 
 /// Serializes every read-modify-write of report records (and the enqueue that
 /// precedes it) so a report is never handed to the queue twice by this process.
@@ -80,6 +113,30 @@ pub struct BugReportStatus {
     pub status: String,
     pub issue_url: Option<String>,
     pub issue_number: Option<u64>,
+}
+
+/// A screenshot as sent by the client: standard base64, no `data:` prefix.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BugReportAttachmentInput {
+    pub name: String,
+    pub data: String,
+}
+
+/// A re-validated screenshot ready to be stored.
+#[derive(Debug)]
+struct ValidatedAttachment {
+    name: String,
+    mime: &'static str,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredAttachment {
+    name: String,
+    mime: String,
+    /// File name only, relative to the report's attachment dir.
+    file: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +152,8 @@ struct BugReportRecord {
     issue_url: Option<String>,
     #[serde(default)]
     issue_number: Option<u64>,
+    #[serde(default)]
+    attachments: Vec<StoredAttachment>,
 }
 
 impl BugReportRecord {
@@ -159,6 +218,7 @@ fn build_context(
     client: &HashMap<String, String>,
     app_version: &str,
     platform: &str,
+    os_release: &str,
     reported_at: &str,
 ) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -175,11 +235,139 @@ fn build_context(
         sanitize_context_value(app_version),
     );
     out.insert("platform".to_string(), sanitize_context_value(platform));
+    let os_release = sanitize_context_value(os_release);
+    if !os_release.is_empty() {
+        out.insert("osRelease".to_string(), os_release);
+    }
     out.insert(
         "reportedAt".to_string(),
         sanitize_context_value(reported_at),
     );
     out
+}
+
+/// Identify an allowed image type from its magic bytes: `(mime, extension)`.
+fn sniff_image_type(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(("image/jpeg", "jpg"))
+    } else if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(("image/png", "png"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("image/gif", "gif"))
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(("image/webp", "webp"))
+    } else {
+        None
+    }
+}
+
+/// Basename only, `[A-Za-z0-9._-]`, no `..`, capped, extension forced to `ext`.
+fn sanitize_attachment_name(raw: &str, ext: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let stem = base.rsplit_once('.').map_or(base, |(stem, _)| stem);
+    let mut clean: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while clean.contains("..") {
+        clean = clean.replace("..", ".");
+    }
+    let budget = MAX_ATTACHMENT_NAME_CHARS - ext.len() - 1;
+    let clean: String = clean.chars().take(budget).collect();
+    let clean = clean.trim_matches('.');
+    let stem = if clean.is_empty() {
+        "screenshot"
+    } else {
+        clean
+    };
+    format!("{stem}.{ext}")
+}
+
+/// Re-validate client attachments (never trust the client). Pure: writes nothing.
+fn validate_attachments(
+    inputs: &[BugReportAttachmentInput],
+) -> Result<Vec<ValidatedAttachment>, String> {
+    if inputs.len() > MAX_ATTACHMENTS {
+        return Err(format!("Up to {MAX_ATTACHMENTS} screenshots per report"));
+    }
+    let too_large = || "Screenshot is too large (max 2 MB)".to_string();
+    let mut out = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        // Bound memory before decoding: base64 expands 3 bytes into 4 characters.
+        if input.data.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4 {
+            return Err(too_large());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(input.data.trim())
+            .map_err(|_| "Invalid screenshot data".to_string())?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(too_large());
+        }
+        let (mime, ext) = sniff_image_type(&bytes).ok_or("Unsupported image type")?;
+        out.push(ValidatedAttachment {
+            name: sanitize_attachment_name(&input.name, ext),
+            mime,
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+/// `PRETTY_NAME` from `/etc/os-release` content (quotes stripped).
+fn parse_os_release_pretty_name(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("PRETTY_NAME=")?.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value)
+            .trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn format_linux_release(pretty_name: Option<&str>, kernel: Option<&str>) -> String {
+    match (pretty_name, kernel.map(str::trim).filter(|k| !k.is_empty())) {
+        (Some(name), Some(kernel)) => format!("{name} (kernel {kernel})"),
+        (Some(name), None) => name.to_string(),
+        (None, Some(kernel)) => format!("Linux (kernel {kernel})"),
+        (None, None) => String::new(),
+    }
+}
+
+fn compute_os_release() -> String {
+    match std::env::consts::OS {
+        "linux" => {
+            let pretty = std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|c| parse_os_release_pretty_name(&c));
+            let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+            format_linux_release(pretty.as_deref(), kernel.as_deref())
+        }
+        "macos" => silent_command("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(|v| format!("macOS {v}"))
+            .unwrap_or_default(),
+        other => other.to_string(),
+    }
+}
+
+/// Best-effort host OS description, computed once.
+fn host_os_release() -> &'static str {
+    static OS_RELEASE: OnceLock<String> = OnceLock::new();
+    OS_RELEASE.get_or_init(compute_os_release)
 }
 
 fn build_issue_title(description: &str) -> String {
@@ -217,9 +405,13 @@ fn build_issue_body(
     description: &str,
     context: &BTreeMap<String, String>,
     report_id: &str,
+    attachment_count: usize,
 ) -> String {
     let mut body = String::new();
     body.push_str(description);
+    if attachment_count > 0 {
+        body.push_str(&format!("\n\n{SCREENSHOTS_TOKEN}"));
+    }
     body.push_str("\n\n---\n<details><summary>Reported from Jean</summary>\n\n");
     body.push_str("| Field | Value |\n| --- | --- |\n");
     let ordered = SERVER_FACT_KEYS
@@ -229,6 +421,9 @@ fn build_issue_body(
         if let Some(value) = context.get(*key) {
             body.push_str(&format!("| {key} | {value} |\n"));
         }
+    }
+    if attachment_count > 0 {
+        body.push_str(&format!("| screenshots | {attachment_count} |\n"));
     }
     body.push_str(&format!("| localReport | {report_id} |\n"));
     body.push_str("\n</details>\n");
@@ -317,6 +512,10 @@ fn record_path(base: &Path, id: &str) -> PathBuf {
     reports_dir(base).join(format!("{id}.json"))
 }
 
+fn report_dir(base: &Path, id: &str) -> PathBuf {
+    reports_dir(base).join(id)
+}
+
 fn ensure_reports_dir(base: &Path) -> Result<PathBuf, String> {
     let dir = reports_dir(base);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create bug report dir: {e}"))?;
@@ -390,19 +589,93 @@ fn list_pending_sync(base: &Path) -> Vec<String> {
     pending.into_iter().map(|(_, id)| id).collect()
 }
 
+fn write_private_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(data).and_then(|_| file.sync_all())
+}
+
+/// Write screenshots to `<base>/bug-reports/<id>/<n>-<name>` (dir 0700, files 0600).
+/// Removes the dir again on failure so nothing is left half-written.
+fn store_attachments(
+    base: &Path,
+    id: &str,
+    attachments: &[ValidatedAttachment],
+) -> Result<Vec<StoredAttachment>, String> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_reports_dir(base)?;
+    let dir = report_dir(base, id);
+    let write_all = || -> Result<Vec<StoredAttachment>, String> {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create screenshot dir: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("Failed to secure screenshot dir: {e}"))?;
+        }
+        let mut stored = Vec::with_capacity(attachments.len());
+        for (index, attachment) in attachments.iter().enumerate() {
+            let file = format!("{}-{}", index + 1, attachment.name);
+            write_private_file(&dir.join(&file), &attachment.bytes)
+                .map_err(|e| format!("Failed to save screenshot: {e}"))?;
+            stored.push(StoredAttachment {
+                name: attachment.name.clone(),
+                mime: attachment.mime.to_string(),
+                file,
+            });
+        }
+        Ok(stored)
+    };
+    write_all().inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&dir);
+    })
+}
+
+/// Write `manifest.json` (`[{"path": <absolute>, "name": <name>}]`) for the queue.
+fn write_attachments_manifest(base: &Path, record: &BugReportRecord) -> Result<PathBuf, String> {
+    let dir = report_dir(base, &record.id);
+    let dir = std::path::absolute(&dir).unwrap_or(dir);
+    let entries: Vec<serde_json::Value> = record
+        .attachments
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "path": dir.join(&a.file).display().to_string(),
+                "name": a.name,
+            })
+        })
+        .collect();
+    let data = serde_json::to_vec_pretty(&entries)
+        .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
+    let path = dir.join(MANIFEST_FILE);
+    write_private_file(&path, &data).map_err(|e| format!("Failed to write manifest: {e}"))?;
+    Ok(path)
+}
+
 /// Create the record unless one with this id already exists. Returns the
-/// stored record either way (idempotent).
+/// stored record either way (idempotent; an existing id ignores `attachments`).
 fn create_or_get_record(
     base: &Path,
     id: &str,
     description: &str,
     context: BTreeMap<String, String>,
     created_at: &str,
+    attachments: &[ValidatedAttachment],
 ) -> Result<BugReportRecord, String> {
     let _guard = RECORD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = load_record(base, id)? {
         return Ok(existing);
     }
+    let stored = store_attachments(base, id, attachments)?;
     let record = BugReportRecord {
         id: id.to_string(),
         description: description.to_string(),
@@ -412,8 +685,14 @@ fn create_or_get_record(
         job_id: None,
         issue_url: None,
         issue_number: None,
+        attachments: stored,
     };
-    save_record(base, &record)?;
+    if let Err(e) = save_record(base, &record) {
+        if !record.attachments.is_empty() {
+            let _ = std::fs::remove_dir_all(report_dir(base, id));
+        }
+        return Err(e);
+    }
     Ok(record)
 }
 
@@ -534,8 +813,21 @@ fn enqueue_record(base: &Path, id: &str, config: &QueueConfig) -> Result<(), &'s
         return Ok(());
     }
     let title = build_issue_title(&record.description);
-    let body = build_issue_body(&record.description, &record.context, &record.id);
-    let args = [
+    let body = build_issue_body(
+        &record.description,
+        &record.context,
+        &record.id,
+        record.attachments.len(),
+    );
+    let manifest = if record.attachments.is_empty() {
+        None
+    } else {
+        match write_attachments_manifest(base, &record) {
+            Ok(path) => Some(path.display().to_string()),
+            Err(_) => return Err("manifest-failed"),
+        }
+    };
+    let mut args = vec![
         "enqueue",
         "--repo",
         config.repo.as_str(),
@@ -546,6 +838,9 @@ fn enqueue_record(base: &Path, id: &str, config: &QueueConfig) -> Result<(), &'s
         "--body-file",
         "-",
     ];
+    if let Some(manifest) = manifest.as_deref() {
+        args.extend(["--attachments-manifest", manifest]);
+    }
     // Persist a claim first: issue-queue has no idempotency key, so if we crash or
     // lose the answer after the queue inserted the job, a retry would duplicate it.
     record.status = STATUS_UNCERTAIN.to_string();
@@ -668,21 +963,30 @@ pub async fn submit_bug_report(
     id: String,
     description: String,
     context: HashMap<String, String>,
+    attachments: Vec<BugReportAttachmentInput>,
 ) -> Result<BugReportStatus, String> {
     let id = validate_report_id(&id)?;
     let description = validate_description(&description)?;
+    // Validate everything before writing anything.
+    let attachments = validate_attachments(&attachments)?;
     let base = app_base_dir(&app)?;
 
     let platform = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
     let reported_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let context = build_context(&context, crate::app_version(), &platform, &reported_at);
 
     let record = {
         let base = base.clone();
         let id = id.clone();
         let created_at = reported_at.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            create_or_get_record(&base, &id, &description, context, &created_at)
+            let context = build_context(
+                &context,
+                crate::app_version(),
+                &platform,
+                host_os_release(),
+                &created_at,
+            );
+            create_or_get_record(&base, &id, &description, context, &created_at, &attachments)
         })
         .await
         .map_err(|e| format!("Bug report task failed: {e}"))??
@@ -768,9 +1072,10 @@ mod tests {
             &client(&[("view", "chat"), ("theme", "dark")]),
             "1.2.3",
             "linux/x86_64",
+            "Debian GNU/Linux 12 (kernel 6.1.0)",
             "2026-01-01T00:00:00Z",
         );
-        let body = build_issue_body("It crashes when I click save", &ctx, ID);
+        let body = build_issue_body("It crashes when I click save", &ctx, ID, 0);
         assert!(body.starts_with("It crashes when I click save\n\n---\n"));
         assert!(body.contains("<details><summary>Reported from Jean</summary>"));
         assert!(body.contains("| Field | Value |"));
@@ -778,7 +1083,10 @@ mod tests {
         assert!(body.trim_end().ends_with("</details>"));
         let pos = |needle: &str| body.find(needle).unwrap();
         assert!(pos("| appVersion |") < pos("| platform |"));
-        assert!(pos("| platform |") < pos("| reportedAt |"));
+        assert!(pos("| platform |") < pos("| osRelease |"));
+        assert!(pos("| osRelease |") < pos("| reportedAt |"));
+        assert!(!body.contains(SCREENSHOTS_TOKEN));
+        assert!(!body.contains("| screenshots |"));
         assert!(pos("| reportedAt |") < pos("| view |"));
         assert!(pos("| view |") < pos("| theme |"));
     }
@@ -789,11 +1097,14 @@ mod tests {
             &client(&[
                 ("appVersion", "9.9.9-evil"),
                 ("platform", "spoofed"),
+                ("osRelease", "spoofed"),
+                ("reportedAt", "spoofed"),
                 ("secretToken", "hunter2"),
                 ("backend", "claude"),
             ]),
             "1.2.3",
             "linux/x86_64",
+            "Debian 12",
             "2026-01-01T00:00:00Z",
         );
         assert_eq!(ctx.get("appVersion").map(String::as_str), Some("1.2.3"));
@@ -802,6 +1113,11 @@ mod tests {
             Some("linux/x86_64")
         );
         assert_eq!(ctx.get("backend").map(String::as_str), Some("claude"));
+        assert_eq!(ctx.get("osRelease").map(String::as_str), Some("Debian 12"));
+        assert_eq!(
+            ctx.get("reportedAt").map(String::as_str),
+            Some("2026-01-01T00:00:00Z")
+        );
         assert!(!ctx.contains_key("secretToken"));
     }
 
@@ -893,6 +1209,7 @@ mod tests {
             job_id: Some(ID.into()),
             issue_url: None,
             issue_number: None,
+            attachments: Vec::new(),
         };
         apply_queue_status(&mut record, q);
         let status = record.to_status();
@@ -959,12 +1276,19 @@ mod tests {
     fn second_submit_with_same_id_does_not_create_another_record() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = BTreeMap::new();
-        let first =
-            create_or_get_record(dir.path(), ID, "first description text", ctx.clone(), "t1")
-                .unwrap();
+        let first = create_or_get_record(
+            dir.path(),
+            ID,
+            "first description text",
+            ctx.clone(),
+            "t1",
+            &[],
+        )
+        .unwrap();
         assert_eq!(first.status, STATUS_PENDING_SYNC);
         let second =
-            create_or_get_record(dir.path(), ID, "DIFFERENT description text", ctx, "t2").unwrap();
+            create_or_get_record(dir.path(), ID, "DIFFERENT description text", ctx, "t2", &[])
+                .unwrap();
         assert_eq!(second.description, "first description text");
         assert_eq!(second.created_at, "t1");
 
@@ -999,8 +1323,9 @@ mod tests {
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\necho x >> '{}'\ncat >/dev/null\n{script}\n",
-                counter.display()
+                "#!/bin/sh\necho x >> '{}'\nprintf '%s\\n' \"$@\" > '{}'\ncat >/dev/null\n{script}\n",
+                counter.display(),
+                dir.join("argv").display()
             ),
         )
         .unwrap();
@@ -1023,6 +1348,7 @@ mod tests {
             "a long enough description",
             BTreeMap::new(),
             "t1",
+            &[],
         )
         .unwrap();
         base
@@ -1078,5 +1404,273 @@ mod tests {
         let record = load_record(&base, ID).unwrap().unwrap();
         assert_eq!(record.status, STATUS_PENDING);
         assert_eq!(record.job_id.as_deref(), Some(job));
+    }
+
+    // ---- attachments -------------------------------------------------------
+
+    fn png() -> Vec<u8> {
+        let mut b = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        b.extend_from_slice(b"png-body");
+        b
+    }
+
+    fn input(name: &str, bytes: &[u8]) -> BugReportAttachmentInput {
+        BugReportAttachmentInput {
+            name: name.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    fn validated_png(name: &str) -> ValidatedAttachment {
+        ValidatedAttachment {
+            name: name.to_string(),
+            mime: "image/png",
+            bytes: png(),
+        }
+    }
+
+    #[test]
+    fn attachment_validation_rejects_bad_input() {
+        let four: Vec<_> = (0..4).map(|_| input("a.png", &png())).collect();
+        assert_eq!(
+            validate_attachments(&four).unwrap_err(),
+            "Up to 3 screenshots per report"
+        );
+        let mut big = png();
+        big.resize(MAX_ATTACHMENT_BYTES + 1, 0);
+        assert_eq!(
+            validate_attachments(&[input("a.png", &big)]).unwrap_err(),
+            "Screenshot is too large (max 2 MB)"
+        );
+        let mut exact = png();
+        exact.resize(MAX_ATTACHMENT_BYTES, 0);
+        assert!(validate_attachments(&[input("a.png", &exact)]).is_ok());
+        assert_eq!(
+            validate_attachments(&[input("a.png", b"<svg onload=alert(1)>")]).unwrap_err(),
+            "Unsupported image type"
+        );
+        let bad = BugReportAttachmentInput {
+            name: "a.png".into(),
+            data: "!!not base64!!".into(),
+        };
+        assert_eq!(
+            validate_attachments(&[bad]).unwrap_err(),
+            "Invalid screenshot data"
+        );
+        // One bad file among good ones rejects the whole set.
+        assert!(validate_attachments(&[input("a.png", &png()), input("b.png", b"nope")]).is_err());
+    }
+
+    #[test]
+    fn image_types_are_sniffed_by_magic_bytes() {
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+        webp.extend_from_slice(&[0; 4]);
+        let cases: [(&[u8], &str, &str); 5] = [
+            (&[0xFF, 0xD8, 0xFF, 0xE0, 0], "image/jpeg", "jpg"),
+            (&png(), "image/png", "png"),
+            (b"GIF87a....", "image/gif", "gif"),
+            (b"GIF89a....", "image/gif", "gif"),
+            (&webp, "image/webp", "webp"),
+        ];
+        for (bytes, mime, ext) in cases {
+            assert_eq!(sniff_image_type(bytes), Some((mime, ext)));
+        }
+        assert_eq!(sniff_image_type(b"RIFF\0\0\0\0WAVEfmt "), None);
+        assert_eq!(sniff_image_type(&[0xFF, 0xD8]), None);
+        assert_eq!(sniff_image_type(b""), None);
+    }
+
+    #[test]
+    fn attachment_names_are_sanitized_and_extension_forced() {
+        let ok = |raw: &str, ext: &str| sanitize_attachment_name(raw, ext);
+        assert_eq!(ok("../../etc/passwd", "png"), "passwd.png");
+        assert_eq!(ok("..\\..\\win\\evil.exe", "jpg"), "evil.jpg");
+        assert_eq!(ok("shot.jpg", "png"), "shot.png");
+        assert_eq!(ok("my shot (1).png", "png"), "my-shot--1-.png");
+        assert_eq!(ok("a..b...c.gif", "gif"), "a.b.c.gif");
+        assert_eq!(ok("", "webp"), "screenshot.webp");
+        assert_eq!(ok("..", "png"), "screenshot.png");
+        assert_eq!(ok("dir/", "png"), "screenshot.png");
+        let long = ok(&format!("{}.png", "x".repeat(300)), "png");
+        assert_eq!(long.chars().count(), MAX_ATTACHMENT_NAME_CHARS);
+        assert!(long.ends_with(".png"));
+        for hostile in ["../x", "a/b", "\\x", ".hidden", "x\0y"] {
+            let n = ok(hostile, "png");
+            assert!(
+                !n.contains('/') && !n.contains('\\') && !n.contains(".."),
+                "{n}"
+            );
+            assert!(!n.starts_with('.'), "{n}");
+        }
+    }
+
+    #[test]
+    fn new_record_stores_attachments_and_existing_id_ignores_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = create_or_get_record(
+            dir.path(),
+            ID,
+            "first description text",
+            BTreeMap::new(),
+            "t1",
+            &[validated_png("shot.png")],
+        )
+        .unwrap();
+        assert_eq!(
+            first.attachments,
+            vec![StoredAttachment {
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                file: "1-shot.png".into(),
+            }]
+        );
+        let file = report_dir(dir.path(), ID).join("1-shot.png");
+        assert_eq!(std::fs::read(&file).unwrap(), png());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&file), 0o600);
+            assert_eq!(mode(&report_dir(dir.path(), ID)), 0o700);
+        }
+
+        let second = create_or_get_record(
+            dir.path(),
+            ID,
+            "other",
+            BTreeMap::new(),
+            "t2",
+            &[validated_png("a.png"), validated_png("b.png")],
+        )
+        .unwrap();
+        assert_eq!(second.attachments, first.attachments);
+        assert!(!report_dir(dir.path(), ID).join("2-b.png").exists());
+        assert_eq!(
+            load_record(dir.path(), ID).unwrap().unwrap().attachments,
+            first.attachments
+        );
+    }
+
+    #[test]
+    fn records_without_attachments_field_still_load() {
+        let json = format!(
+            r#"{{"id":"{ID}","description":"d","context":{{}},"created_at":"t","status":"filed"}}"#
+        );
+        let record: BugReportRecord = serde_json::from_str(&json).unwrap();
+        assert!(record.attachments.is_empty());
+    }
+
+    #[test]
+    fn body_has_screenshots_token_only_with_attachments() {
+        let ctx = BTreeMap::new();
+        let with = build_issue_body("desc", &ctx, ID, 2);
+        assert!(with.starts_with(&format!("desc\n\n{SCREENSHOTS_TOKEN}\n\n---\n")));
+        assert!(with.contains("| screenshots | 2 |"));
+        let without = build_issue_body("desc", &ctx, ID, 0);
+        assert!(!without.contains(SCREENSHOTS_TOKEN));
+        assert!(!without.contains("screenshots"));
+        assert!(without.starts_with("desc\n\n---\n"));
+    }
+
+    // ---- context / os release ---------------------------------------------
+
+    #[test]
+    fn os_release_pretty_name_parsing() {
+        let debian = "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian\"\n";
+        assert_eq!(
+            parse_os_release_pretty_name(debian).as_deref(),
+            Some("Debian GNU/Linux 12 (bookworm)")
+        );
+        assert_eq!(
+            parse_os_release_pretty_name("ID=x\nPRETTY_NAME='Alpine 3'\n").as_deref(),
+            Some("Alpine 3")
+        );
+        assert_eq!(
+            parse_os_release_pretty_name("PRETTY_NAME=Arch\n").as_deref(),
+            Some("Arch")
+        );
+        assert_eq!(parse_os_release_pretty_name("PRETTY_NAME=\"\"\n"), None);
+        assert_eq!(parse_os_release_pretty_name("NAME=Foo\n"), None);
+        assert_eq!(
+            format_linux_release(Some("Ubuntu 24.04"), Some("6.8.0-1\n")),
+            "Ubuntu 24.04 (kernel 6.8.0-1)"
+        );
+        assert_eq!(format_linux_release(Some("Ubuntu"), None), "Ubuntu");
+        assert_eq!(format_linux_release(None, None), "");
+    }
+
+    #[test]
+    fn expanded_allowlist_passes_through_in_order_and_empty_os_release_is_omitted() {
+        let pairs: Vec<(&str, String)> = CLIENT_CONTEXT_ALLOWLIST
+            .iter()
+            .map(|k| (*k, format!("v-{k}")))
+            .collect();
+        let borrowed: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let ctx = build_context(&client(&borrowed), "1", "p", "", "t");
+        for key in CLIENT_CONTEXT_ALLOWLIST {
+            assert_eq!(ctx.get(key), Some(&format!("v-{key}")), "{key}");
+        }
+        assert!(!ctx.contains_key("osRelease"));
+        let body = build_issue_body("desc", &ctx, ID, 0);
+        let pos = |k: &str| body.find(&format!("| {k} |")).unwrap();
+        assert!(pos("reportedAt") < pos("view"));
+        assert!(pos("view") < pos("deviceType"));
+        assert!(pos("deviceType") < pos("cliVersions"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enqueue_with_attachments_passes_manifest_of_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("data");
+        create_or_get_record(
+            &base,
+            ID,
+            "a long enough description",
+            BTreeMap::new(),
+            "t1",
+            &[validated_png("one.png"), validated_png("two.png")],
+        )
+        .unwrap();
+        let job = "223e4567-e89b-42d3-a456-426614174000";
+        let (config, _) = fake_queue(
+            dir.path(),
+            &format!("echo '{{\"status\":\"queued\",\"id\":\"{job}\"}}'"),
+        );
+        assert_eq!(enqueue_record(&base, ID, &config), Ok(()));
+
+        let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+        let args: Vec<&str> = argv.lines().collect();
+        let flag = args
+            .iter()
+            .position(|a| *a == "--attachments-manifest")
+            .expect("manifest flag passed");
+        let manifest_path = Path::new(args[flag + 1]);
+        assert!(manifest_path.is_absolute());
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "one.png");
+        assert_eq!(entries[1]["name"], "two.png");
+        for entry in &entries {
+            let path = Path::new(entry["path"].as_str().unwrap());
+            assert!(path.is_absolute() && path.exists(), "{path:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enqueue_without_attachments_omits_manifest_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = setup_record(dir.path());
+        let job = "223e4567-e89b-42d3-a456-426614174000";
+        let (config, _) = fake_queue(
+            dir.path(),
+            &format!("echo '{{\"status\":\"queued\",\"id\":\"{job}\"}}'"),
+        );
+        assert_eq!(enqueue_record(&base, ID, &config), Ok(()));
+        let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+        assert!(argv.lines().any(|a| a == "enqueue"));
+        assert!(!argv.contains("--attachments-manifest"));
     }
 }

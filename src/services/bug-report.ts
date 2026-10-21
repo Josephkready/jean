@@ -20,22 +20,8 @@ export interface BugReportStatus {
   issueNumber?: number | null
 }
 
-/** UI/app state only. The server adds version, platform and time itself. */
-export interface BugReportContextInput {
-  view: string
-  projectName?: string | null
-  projectPath?: string | null
-  worktreeName?: string | null
-  worktreeBranch?: string | null
-  sessionId?: string | null
-  backend?: string | null
-  model?: string | null
-  executionMode?: string | null
-  runtime: string
-  viewport: string
-  theme: string
-  clientVersion: string
-}
+/** UI/app, device and software state. The server adds host facts itself. */
+export type BugReportContextInput = Record<string, string | null | undefined>
 
 /** Drop empty values so the issue only lists fields that have data. */
 export function buildBugReportContext(
@@ -78,10 +64,17 @@ export function bugReportStatusMessage(state: BugReportState): string {
   }
 }
 
+export interface BugReportAttachment {
+  name: string
+  /** Base64 image bytes without a `data:` prefix. */
+  data: string
+}
+
 export function submitBugReport(args: {
   id: string
   description: string
   context: Record<string, string>
+  attachments: BugReportAttachment[]
 }): Promise<BugReportStatus> {
   return invoke<BugReportStatus>('submit_bug_report', args)
 }
