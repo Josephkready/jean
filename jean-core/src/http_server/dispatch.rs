@@ -2187,6 +2187,22 @@ pub async fn dispatch_command(
             to_value(result)
         }
 
+        // Bug reports
+        "submit_bug_report" => {
+            let id: String = from_field(&args, "id")?;
+            let description: String = from_field(&args, "description")?;
+            let context: std::collections::HashMap<String, String> =
+                from_field_opt(&args, "context")?.unwrap_or_default();
+            let result =
+                crate::bug_report::submit_bug_report(app.clone(), id, description, context).await?;
+            to_value(result)
+        }
+        "get_bug_report_status" => {
+            let id: String = from_field(&args, "id")?;
+            let result = crate::bug_report::get_bug_report_status(app.clone(), id).await?;
+            to_value(result)
+        }
+
         // =====================================================================
         // Terminal
         // =====================================================================

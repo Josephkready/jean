@@ -11,6 +11,7 @@ import {
 import { useUIStore } from '@/store/ui-store'
 import {
   ArrowUpCircle,
+  Bug,
   Download,
   Github,
   Heart,
@@ -58,6 +59,7 @@ export function TitleBar({
   const toggleFileBrowser = useUIStore(state => state.toggleFileBrowser)
   const zenMode = useUIStore(state => state.zenMode)
   const toggleZenMode = useUIStore(state => state.toggleZenMode)
+  const bugReportOpen = useUIStore(state => state.bugReportOpen)
   const { data: preferences } = usePreferences()
   const isMobile = useIsMobile()
   /** Mobile zen: single header line in the title bar (name + exit). */
@@ -268,6 +270,27 @@ export function TitleBar({
                 <TooltipContent>GitHub</TooltipContent>
               </Tooltip>
             )}
+            {/* Line-art bug icon: the clearest "report a problem" signal. Shown on
+                native, web and mobile so a report can be filed from anywhere. */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={() => useUIStore.getState().setBugReportOpen(true)}
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
+                  title="Report a bug"
+                  aria-label="Report a bug"
+                  aria-haspopup="dialog"
+                  aria-expanded={bugReportOpen}
+                  data-feature="header.bug"
+                  data-testid="report-bug"
+                >
+                  <Bug className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Report a bug</TooltipContent>
+            </Tooltip>
             <MinimizedCliUpdate />
             <CliUpdatesIndicator />
             <ServerUpdateIndicator />
