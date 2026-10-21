@@ -1258,7 +1258,14 @@ export function useMessageHandlers({
       }
 
       // Mark plan approved on original session
-      markPlanApprovedService(worktreeId, worktreePath, sessionId, messageId)
+      markPlanApprovedService(
+        worktreeId,
+        worktreePath,
+        sessionId,
+        messageId
+      ).catch(err => {
+        console.error('[useMessageHandlers] markPlanApproved failed:', err)
+      })
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(sessionId),
         old => {
@@ -1344,7 +1351,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       // Optimistically update TanStack Query cache so UI shows correct backend/model
       // immediately. Without this, session?.backend (from query cache) defaults to 'claude'
@@ -1558,7 +1564,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       // Optimistically update TanStack Query cache so UI shows correct backend/model immediately.
       queryClient.setQueryData<Session>(
@@ -1722,7 +1727,14 @@ export function useMessageHandlers({
       }
 
       // Mark plan approved on original session
-      markPlanApprovedService(worktreeId, worktreePath, sessionId, messageId)
+      markPlanApprovedService(
+        worktreeId,
+        worktreePath,
+        sessionId,
+        messageId
+      ).catch(err => {
+        console.error('[useMessageHandlers] markPlanApproved failed:', err)
+      })
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(sessionId),
         old => {
@@ -1887,7 +1899,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(newSession.id),
@@ -2173,7 +2184,6 @@ export function useMessageHandlers({
       store.setExecutingMode(newSession.id, mode)
       if (resolvedBackend) {
         store.setSelectedBackend(newSession.id, resolvedBackend)
-        store.setSelectedBackend(newSession.id, resolvedBackend as CliBackend)
       }
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(newSession.id),
