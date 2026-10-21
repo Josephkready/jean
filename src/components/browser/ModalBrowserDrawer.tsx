@@ -82,11 +82,15 @@ export const ModalBrowserDrawer = memo(function ModalBrowserDrawer({
   )
 
   const resizeHandleClass = cn(
-    'absolute z-10 hover:bg-primary/30',
-    dockMode === 'left' && 'right-0 top-0 bottom-0 w-1 cursor-ew-resize',
-    dockMode === 'right' && 'left-0 top-0 bottom-0 w-1 cursor-ew-resize',
-    dockMode === 'bottom' && 'left-0 right-0 top-0 h-1 cursor-ns-resize',
-    isFloating && 'left-0 top-0 bottom-0 w-1 cursor-ew-resize'
+    'absolute z-10 after:absolute after:bg-transparent after:transition-colors after:duration-150 hover:after:bg-foreground/25 hover:after:delay-75 active:after:bg-foreground/40',
+    dockMode === 'left' &&
+      'right-0 top-0 bottom-0 w-1.5 cursor-ew-resize after:inset-y-0 after:right-0 after:w-px',
+    dockMode === 'right' &&
+      'left-0 top-0 bottom-0 w-1.5 cursor-ew-resize after:inset-y-0 after:left-0 after:w-px',
+    dockMode === 'bottom' &&
+      'left-0 right-0 top-0 h-1.5 cursor-ns-resize after:inset-x-0 after:top-0 after:h-px',
+    isFloating &&
+      'left-0 top-0 bottom-0 w-1.5 cursor-ew-resize after:inset-y-0 after:left-0 after:w-px'
   )
 
   // Only render when this instance's dockMode matches the active mode AND

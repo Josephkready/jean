@@ -52,7 +52,6 @@ export function WorktreeContextMenu({
   const {
     showDeleteConfirm,
     setShowDeleteConfirm,
-    deleteSkipTeardown,
     isBase,
     runScripts,
     preferences,
@@ -62,7 +61,6 @@ export function WorktreeContextMenu({
     handleOpenInTerminal,
     handleOpenInEditor,
     handleArchiveOrClose,
-    openDeleteConfirm,
     handleDelete,
   } = actions
 
@@ -138,16 +136,10 @@ export function WorktreeContextMenu({
         </ContextMenuItem>
 
         {!isBase && (
-          <>
-            <ContextMenuItem onClick={() => openDeleteConfirm(false)}>
-              <Trash2 className="mr-2 h-4 w-4 text-destructive" />
-              Delete Worktree
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => openDeleteConfirm(true)}>
-              <Trash2 className="mr-2 h-4 w-4 text-destructive" />
-              Delete Without Teardown
-            </ContextMenuItem>
-          </>
+          <ContextMenuItem onClick={() => setShowDeleteConfirm(true)}>
+            <Trash2 className="mr-2 h-4 w-4 text-destructive" />
+            Delete Worktree
+          </ContextMenuItem>
         )}
       </ContextMenuContent>
 
@@ -163,23 +155,24 @@ export function WorktreeContextMenu({
           }}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>
-              {deleteSkipTeardown
-                ? 'Delete Without Teardown'
-                : 'Delete Worktree'}
-            </AlertDialogTitle>
+            <AlertDialogTitle>Delete Worktree</AlertDialogTitle>
             <AlertDialogDescription>
               This will permanently delete the worktree, its branch, and all
               associated sessions. This action cannot be undone.
-              {deleteSkipTeardown &&
-                ' The teardown script will not run, so resources it manages may need manual cleanup.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              onClick={() => handleDelete(true)}
+              variant="outline"
+              title="Delete without running the teardown script. Resources it manages may need manual cleanup."
+            >
+              Delete Without Teardown
+            </AlertDialogAction>
+            <AlertDialogAction
               autoFocus
-              onClick={handleDelete}
+              onClick={() => handleDelete()}
               variant="destructive"
             >
               Delete
