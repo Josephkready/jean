@@ -63,6 +63,8 @@ export function useDragAndDropImages(
 
     const handleBrowserDrop = (event: DragEvent) => {
       if (!hasFiles(event)) return
+      // A drop over the bug report dialog is not meant for the chat.
+      if (useUIStore.getState().bugReportOpen) return
       event.preventDefault()
       setIsDragging(false)
 

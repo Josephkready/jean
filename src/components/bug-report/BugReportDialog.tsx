@@ -134,6 +134,9 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
   screenshotsRef.current = screenshots
 
   const queryClient = useQueryClient()
+  // Device facts and cached CLI versions are captured once when the dialog opens.
+  const [deviceSnapshot] = useState(captureDeviceSnapshot)
+  const [cliVersions] = useState(() => cachedCliVersions(queryClient))
   const activeWorktreeId = useChatStore(state => state.activeWorktreeId)
   const selectedProjectId = useProjectsStore(state => state.selectedProjectId)
   const { data: projects } = useProjects()
@@ -179,13 +182,13 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
       model: sessionId ? chat.selectedModels[sessionId] : undefined,
       executionMode: sessionId ? chat.executionModes[sessionId] : undefined,
       runtime: isNativeApp() ? 'native' : isMobile ? 'web-mobile' : 'web',
-      ...captureDeviceSnapshot(),
+      ...deviceSnapshot,
       theme,
       clientVersion: CLIENT_BUILD_INFO.appVersion,
       webBuildId: CLIENT_BUILD_INFO.webBuildId,
       gitSha: CLIENT_BUILD_INFO.gitSha,
       tauriVersion,
-      cliVersions: cachedCliVersions(queryClient),
+      cliVersions,
     })
   }
   const details = collectContext()
@@ -285,19 +288,29 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (!reportId || reportFinal) return
     const startedAt = Date.now()
+    let inFlight = false
+    let cancelled = false
     const timer = window.setInterval(async () => {
+      if (inFlight || cancelled) return
       if (Date.now() - startedAt > POLL_LIMIT_MS) {
         window.clearInterval(timer)
         setPollTimedOut(true)
         return
       }
+      inFlight = true
       try {
-        setReport(await getBugReportStatus(reportId))
+        const next = await getBugReportStatus(reportId)
+        if (!cancelled) setReport(next)
       } catch {
         // A failed status check never means the saved report was lost.
+      } finally {
+        inFlight = false
       }
     }, POLL_INTERVAL_MS)
-    return () => window.clearInterval(timer)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
   }, [reportId, reportFinal])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
