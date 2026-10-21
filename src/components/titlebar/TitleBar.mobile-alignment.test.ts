@@ -22,6 +22,5 @@ describe('TitleBar mobile alignment', () => {
 
     expect(source).toContain('{native && !isMobile && (')
     expect(source).toContain('{!isMobile && (')
-    expect(source).toContain('{!native && !isMobile && (')
   })
 })

@@ -2,6 +2,7 @@ import { useCallback, type RefObject } from 'react'
 import type { QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { invoke, listen } from '@/lib/transport'
+import { focusChatInputAfterRun } from '@/lib/restore-keyboard-focus'
 import {
   chatQueryKeys,
   markPlanApproved as markPlanApprovedService,
@@ -514,7 +515,7 @@ export function useMessageHandlers({
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -798,7 +799,7 @@ export function useMessageHandlers({
             },
             {
               onSettled: () => {
-                inputRef.current?.focus()
+                focusChatInputAfterRun(inputRef.current)
               },
             }
           )
@@ -970,7 +971,7 @@ export function useMessageHandlers({
             },
             {
               onSettled: () => {
-                inputRef.current?.focus()
+                focusChatInputAfterRun(inputRef.current)
               },
             }
           )
@@ -1084,7 +1085,7 @@ export function useMessageHandlers({
       },
       {
         onSettled: () => {
-          inputRef.current?.focus()
+          focusChatInputAfterRun(inputRef.current)
         },
       }
     )
@@ -1184,7 +1185,7 @@ export function useMessageHandlers({
       },
       {
         onSettled: () => {
-          inputRef.current?.focus()
+          focusChatInputAfterRun(inputRef.current)
         },
       }
     )
@@ -2501,7 +2502,7 @@ export function useMessageHandlers({
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -2701,7 +2702,7 @@ export function useMessageHandlers({
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -3333,7 +3334,7 @@ Please apply this fix to the file.`
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
@@ -3474,7 +3475,7 @@ Please apply all these fixes to the respective files.`
         },
         {
           onSettled: () => {
-            inputRef.current?.focus()
+            focusChatInputAfterRun(inputRef.current)
           },
         }
       )
