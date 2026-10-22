@@ -776,7 +776,35 @@ export class WsTransport {
 
   onEstablishedDisconnect(callback: () => void): () => void {
     this._establishedDisconnectListeners.add(callback)
+    // The socket may have dropped before this listener registered (it opens in
+    // parallel with preload). Recover now instead of staying disconnected.
+    if (this.isStuckAfterDisconnect()) callback()
     return () => this._establishedDisconnectListeners.delete(callback)
+  }
+
+  /** An established web-access socket closed and nothing reconnected. Only a
+   *  page reload (the established-disconnect listener) recovers this state. */
+  private isStuckAfterDisconnect(): boolean {
+    return (
+      !this.config &&
+      !isNativeApp() &&
+      this._hasConnectedOnce &&
+      !this._connected &&
+      !this.ws
+    )
+  }
+
+  private notifyEstablishedDisconnect(): void {
+    for (const callback of this._establishedDisconnectListeners) {
+      try {
+        callback()
+      } catch (error) {
+        console.error(
+          '[WsTransport] Established disconnect listener failed:',
+          error
+        )
+      }
+    }
   }
 
   /** Get current connection snapshot for useSyncExternalStore. */
@@ -970,18 +998,7 @@ export class WsTransport {
     this.ws.onclose = () => {
       const wasConnected = this._connected
 
-      if (wasConnected) {
-        for (const callback of this._establishedDisconnectListeners) {
-          try {
-            callback()
-          } catch (error) {
-            console.error(
-              '[WsTransport] Established disconnect listener failed:',
-              error
-            )
-          }
-        }
-      }
+      if (wasConnected) this.notifyEstablishedDisconnect()
 
       this.clearConnectWatchdog()
       this.stopLivenessTimer()
@@ -1333,6 +1350,13 @@ export class WsTransport {
       return
     }
 
+    // The reload after an established disconnect can be lost while the page
+    // is frozen in the background. Run the recovery again on wake.
+    if (this.isStuckAfterDisconnect()) {
+      console.warn('[WsTransport] Disconnected after wake, recovering')
+      this.notifyEstablishedDisconnect()
+      return
+    }
     // Before the first successful connection, retry immediately on wake.
     if (this._hasConnectedOnce) return
     if (this.connectRetryTimer) {
