@@ -46,6 +46,7 @@ const { mockInvoke, mockInstalledBackends, mockBackendAuthStatuses } =
         antigravity: true,
         muse: true,
       } as Record<string, boolean | undefined>,
+      refetchAuth: vi.fn(),
       isLoading: false,
     },
   }))
@@ -231,6 +232,11 @@ function resetInstalledBackendsMock() {
     antigravity: true,
     muse: true,
   }
+  mockBackendAuthStatuses.refetchAuth
+    .mockReset()
+    .mockImplementation(
+      async (backend: string) => mockBackendAuthStatuses.authByBackend[backend]
+    )
   mockBackendAuthStatuses.isLoading = false
 }
 
@@ -381,6 +387,29 @@ describe('useMessageSending Codex /goal', () => {
       'codex'
     )
     expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+
+  it('sends when cached auth is stale but a fresh probe is authenticated', async () => {
+    mockInstalledBackends.installedBackends = ['claude', 'codex']
+    mockBackendAuthStatuses.authByBackend = {
+      ...mockBackendAuthStatuses.authByBackend,
+      claude: false,
+    }
+    mockBackendAuthStatuses.refetchAuth.mockResolvedValueOnce(true)
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: 'hello',
+      selectedBackend: 'claude',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(mockBackendAuthStatuses.refetchAuth).toHaveBeenCalledWith('claude')
+    expect(handleCliAuthError).not.toHaveBeenCalled()
+    expect(sendMessage.mutate).toHaveBeenCalled()
   })
 
   it('starts goals in build mode by default', async () => {

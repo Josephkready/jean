@@ -3445,9 +3445,15 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 'ring-2 ring-primary ring-inset bg-primary/5'
                             )}
                             style={
-                              isMobile
-                                ? { paddingBottom: 'var(--safe-area-bottom)' }
-                                : undefined
+                              !isMobile
+                                ? undefined
+                                : pillComposer
+                                  ? // Keep the pill one line tall: clear the home indicator outside it
+                                    {
+                                      marginBottom:
+                                        'max(var(--safe-area-bottom, 0px), 1rem)',
+                                    }
+                                  : { paddingBottom: 'var(--safe-area-bottom)' }
                             }
                           >
                             {/* Pending file preview (@ mentions) */}

@@ -130,7 +130,11 @@ export function useMessageSending({
   // Installed backends for availability; auth map for login gate at send time.
   const { installedBackends, isLoading: backendsLoading } =
     useInstalledBackends()
-  const { authByBackend, isLoading: authLoading } = useBackendAuthStatuses()
+  const {
+    authByBackend,
+    refetchAuth,
+    isLoading: authLoading,
+  } = useBackendAuthStatuses()
 
   // Helper to resolve custom CLI profile name for the active provider.
   // Claude: custom_cli_profiles; Codex: custom_codex_providers (same wire field).
@@ -396,7 +400,9 @@ export function useMessageSending({
         !usingCustomProvider &&
         !backendsLoading &&
         !authLoading &&
-        !isBackendUsable(true, authByBackend[sendBackend])
+        !isBackendUsable(true, authByBackend[sendBackend]) &&
+        // Cached `false` may be stale — re-probe once before blocking.
+        !isBackendUsable(true, await refetchAuth(sendBackend))
       ) {
         handleCliAuthError(`${sendBackend} is not authenticated`, sendBackend)
         return
@@ -715,6 +721,7 @@ export function useMessageSending({
       markAtBottom,
       preferences,
       queryClient,
+      refetchAuth,
       sendMessageNow,
     ]
   )
