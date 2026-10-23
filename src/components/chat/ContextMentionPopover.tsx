@@ -57,6 +57,9 @@ const githubContextQueries = new Set([
   'pr-search',
   'issue-by-number',
   'pr-by-number',
+  'discussions',
+  'discussion-search',
+  'discussion',
   'security-alerts',
   'security-alert',
   'advisories',
@@ -98,6 +101,7 @@ function getPreviewTarget(item: ContextMentionItem): PreviewTarget | null {
 function getLinkRef(item: ContextMentionItem): ContextLinkRef | null {
   if (item.issue) return { type: 'issue', id: item.issue.number }
   if (item.pr) return { type: 'pr', id: item.pr.number }
+  if (item.discussion) return { type: 'discussion', id: item.discussion.number }
   if (item.securityAlert)
     return { type: 'security', id: item.securityAlert.number }
   if (item.advisory) return { type: 'advisory', id: item.advisory.ghsaId }

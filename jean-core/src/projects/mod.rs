@@ -4,6 +4,7 @@ pub mod git;
 pub mod git_log;
 pub mod git_status;
 pub mod github_actions;
+pub mod github_discussions;
 pub mod github_issues;
 pub mod gitlab_issues;
 pub mod linear_issues;
@@ -27,6 +28,7 @@ pub use checkpoints::{
 };
 pub use commands::*;
 pub use github_actions::*;
+pub use github_discussions::*;
 pub use github_issues::*;
 pub use linear_issues::*;
 pub(crate) use names::is_generated_workspace_name;

@@ -1196,6 +1196,7 @@ async fn create_auto_fix_worktree(
         None,
         None,
         None,
+        None,
         Some(false),
         Some("auto_fix".to_string()),
     )

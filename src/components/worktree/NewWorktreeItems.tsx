@@ -80,7 +80,7 @@ export function SessionTabBar({
 }
 
 /** GitHub-style list row wrapper shared by issue and PR rows. */
-const githubRowClass = (
+export const githubRowClass = (
   isSelected: boolean,
   isChecked: boolean,
   busy: boolean

@@ -235,6 +235,49 @@ export interface LoadedAdvisoryContext {
 }
 
 // =============================================================================
+// GitHub Discussion Types
+// =============================================================================
+
+export interface GitHubDiscussion {
+  number: number
+  title: string
+  body: string
+  url: string
+  closed: boolean
+  isAnswered: boolean
+  author: { login: string } | null
+  category: { name: string; emoji: string } | null
+  commentCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** Discussion with full markdown content, including comments */
+export interface GitHubDiscussionDetail extends GitHubDiscussion {
+  content: string
+}
+
+/**
+ * Discussion context to pass when creating a worktree
+ */
+export interface DiscussionContext {
+  number: number
+  title: string
+  content: string
+}
+
+/**
+ * Loaded discussion context info (from backend)
+ */
+export interface LoadedDiscussionContext {
+  number: number
+  title: string
+  commentCount: number
+  repoOwner: string
+  repoName: string
+}
+
+// =============================================================================
 // GitHub Actions Workflow Run Types
 // =============================================================================
 

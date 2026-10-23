@@ -7,6 +7,7 @@ use super::types::{
     PermissionDenial, PermissionDeniedEvent, SubagentUsage, ThinkingLevel, ToolCall, UsageData,
 };
 use crate::http_server::EmitExt;
+use crate::projects::github_discussions::get_discussion_context_paths;
 use crate::projects::github_issues::{
     get_github_contexts_dir, get_preferred_issue_refs, get_preferred_pr_refs,
     get_session_advisory_refs, get_session_security_refs,
@@ -98,6 +99,7 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.\n\
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.\n\
 - If already in a Jean worktree or base/main workspace, continue in the current workspace.\n\
+- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.\n\
 \n\
 ## Jean Run Environment\n\
 - When you need to test a running app (UI, HTTP, browser, smoke, e2e), call Jean MCP `get_run_environments` first (pass this worktreeId when known).\n\
@@ -1160,6 +1162,8 @@ fn build_claude_args(
         }
     }
 
+    all_context_paths.extend(get_discussion_context_paths(app, session_id, worktree_id));
+
     // Check for attached saved context files
     if let Ok(app_data_dir) = app.path().app_data_dir() {
         let saved_contexts_dir = app_data_dir.join("session-context");
@@ -1226,6 +1230,13 @@ fn build_claude_args(
                     s.contains("git-context") && s.contains("-advisory-")
                 })
                 .count();
+            let discussion_count = all_context_paths
+                .iter()
+                .filter(|p| {
+                    let s = p.to_string_lossy();
+                    s.contains("git-context") && s.contains("-discussion-")
+                })
+                .count();
             let linear_count = all_context_paths
                 .iter()
                 .filter(|p| {
@@ -1265,6 +1276,7 @@ fn build_claude_args(
                     || pr_count > 0
                     || security_count > 0
                     || advisory_count > 0
+                    || discussion_count > 0
                     || linear_count > 0
                     || saved_context_count > 0
                 {
@@ -1283,6 +1295,10 @@ fn build_claude_args(
                     if advisory_count > 0 {
                         combined_content
                             .push_str(&format!("- {} Security Advisory(s)\n", advisory_count));
+                    }
+                    if discussion_count > 0 {
+                        combined_content
+                            .push_str(&format!("- {discussion_count} GitHub Discussion(s)\n"));
                     }
                     if linear_count > 0 {
                         combined_content.push_str(&format!("- {} Linear Issue(s)\n", linear_count));

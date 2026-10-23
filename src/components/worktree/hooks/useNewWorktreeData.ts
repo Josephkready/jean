@@ -10,7 +10,11 @@ import {
   useGetGitHubPRByNumber,
   useDependabotAlerts,
   useRepositoryAdvisories,
+  useGitHubDiscussions,
+  useSearchGitHubDiscussions,
+  useGetGitHubDiscussionByNumber,
   filterIssues,
+  filterDiscussions,
   filterPRs,
   filterSecurityAlerts,
   filterAdvisories,
@@ -141,6 +145,48 @@ export function useNewWorktreeData(
       exactPR
     )
   }, [prs, searchQuery, searchedPRs, exactPR, includeClosed])
+
+  // GitHub discussions
+  const discussionState = includeClosed ? 'all' : 'open'
+  const {
+    data: discussions,
+    isLoading: isLoadingDiscussions,
+    isFetching: isRefetchingDiscussions,
+    error: discussionsError,
+    refetch: refetchDiscussions,
+  } = useGitHubDiscussions(selectedProject?.path ?? null, discussionState)
+
+  const { data: searchedDiscussions, isFetching: isSearchingDiscussions } =
+    useSearchGitHubDiscussions(
+      selectedProject?.path ?? null,
+      debouncedSearchQuery
+    )
+  const { data: exactDiscussion } = useGetGitHubDiscussionByNumber(
+    selectedProject?.path ?? null,
+    debouncedSearchQuery
+  )
+
+  const filteredDiscussions = useMemo(() => {
+    if (parseItemNumber(searchQuery) !== null) {
+      return exactDiscussion ? [exactDiscussion] : []
+    }
+    const stateFilteredSearch = includeClosed
+      ? searchedDiscussions
+      : searchedDiscussions?.filter(d => !d.closed)
+    return prependExactMatch(
+      mergeWithSearchResults(
+        filterDiscussions(discussions ?? [], searchQuery),
+        stateFilteredSearch
+      ),
+      exactDiscussion
+    )
+  }, [
+    discussions,
+    searchQuery,
+    searchedDiscussions,
+    exactDiscussion,
+    includeClosed,
+  ])
 
   // Branches
   const {
@@ -276,6 +322,14 @@ export function useNewWorktreeData(
     isSearchingPRs,
     prsError,
     refetchPRs,
+
+    // Discussions
+    filteredDiscussions,
+    isLoadingDiscussions,
+    isRefetchingDiscussions,
+    isSearchingDiscussions,
+    discussionsError,
+    refetchDiscussions,
 
     // Remotes
     remotes,

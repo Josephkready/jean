@@ -1082,6 +1082,10 @@ export const ChatInput = memo(function ChatInput({
         return item.issue ? `#${item.issue.number}` : item.label
       case 'pr':
         return item.pr ? `PR#${item.pr.number}` : item.label.replace(/\s+/g, '')
+      case 'discussion':
+        return item.discussion
+          ? `Discussion#${item.discussion.number}`
+          : item.label.replace(/\s+/g, '')
       case 'security':
         return item.securityAlert
           ? `Security#${item.securityAlert.number}`

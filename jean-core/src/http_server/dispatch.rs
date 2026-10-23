@@ -263,6 +263,7 @@ pub async fn dispatch_command(
             let advisory_context = field_opt(&args, "advisoryContext", "advisory_context")?;
             let linear_context = field_opt(&args, "linearContext", "linear_context")?;
             let sentry_context = field_opt(&args, "sentryContext", "sentry_context")?;
+            let discussion_context = field_opt(&args, "discussionContext", "discussion_context")?;
             let custom_name = field_opt(&args, "customName", "custom_name")?;
             let auto_open_in_jean = field_opt(&args, "autoOpenInJean", "auto_open_in_jean")?;
             let origin = field_opt(&args, "origin", "origin")?;
@@ -276,6 +277,7 @@ pub async fn dispatch_command(
                 advisory_context,
                 linear_context,
                 sentry_context,
+                discussion_context,
                 custom_name,
                 auto_open_in_jean,
                 origin,
@@ -1098,6 +1100,84 @@ pub async fn dispatch_command(
                 ghsa_id,
                 project_path,
                 worktree_id,
+            )
+            .await?;
+            to_value(result)
+        }
+
+        "list_github_discussions" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let state: Option<String> = from_field_opt(&args, "state")?;
+            let result =
+                crate::projects::list_github_discussions(app.clone(), project_path, state).await?;
+            to_value(result)
+        }
+        "search_github_discussions" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let query: String = from_field(&args, "query")?;
+            let result =
+                crate::projects::search_github_discussions(app.clone(), project_path, query)
+                    .await?;
+            to_value(result)
+        }
+        "get_github_discussion" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let result = crate::projects::get_github_discussion(
+                app.clone(),
+                project_path,
+                discussion_number,
+            )
+            .await?;
+            to_value(result)
+        }
+        "load_discussion_context" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let result = crate::projects::load_discussion_context(
+                app.clone(),
+                session_id,
+                discussion_number,
+                project_path,
+            )
+            .await?;
+            to_value(result)
+        }
+        "list_loaded_discussion_contexts" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let worktree_id: Option<String> = field_opt(&args, "worktreeId", "worktree_id")?;
+            let result = crate::projects::list_loaded_discussion_contexts(
+                app.clone(),
+                session_id,
+                worktree_id,
+            )
+            .await?;
+            to_value(result)
+        }
+        "remove_discussion_context" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            crate::projects::remove_discussion_context(
+                app.clone(),
+                session_id,
+                discussion_number,
+                project_path,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["contexts"]);
+            Ok(Value::Null)
+        }
+        "get_discussion_context_content" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let result = crate::projects::get_discussion_context_content(
+                app.clone(),
+                session_id,
+                discussion_number,
+                project_path,
             )
             .await?;
             to_value(result)

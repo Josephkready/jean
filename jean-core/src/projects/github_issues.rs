@@ -14,7 +14,7 @@ fn is_gitlab_project(project_path: &str) -> bool {
     resolve_git_provider(project_path).0 == GitProvider::Gitlab
 }
 
-fn gh_command(gh: &Path, project_path: &str) -> Command {
+pub(super) fn gh_command(gh: &Path, project_path: &str) -> Command {
     crate::platform::resolved_cli_command(gh, Some(Path::new(project_path)))
 }
 
@@ -184,7 +184,7 @@ fn is_unsupported_github_repo_error(stderr: &str) -> bool {
         || lower.contains("not a git repository")
 }
 
-fn is_gh_cli_auth_error(stderr: &str) -> bool {
+pub(super) fn is_gh_cli_auth_error(stderr: &str) -> bool {
     if is_unsupported_github_repo_error(stderr) {
         return false;
     }
@@ -597,6 +597,8 @@ pub struct ContextReferences {
     pub linear: std::collections::HashMap<String, ContextRef>,
     #[serde(default)]
     pub sentry: std::collections::HashMap<String, ContextRef>,
+    #[serde(default)]
+    pub discussions: std::collections::HashMap<String, ContextRef>,
 }
 
 /// Get the directory for shared GitHub contexts
@@ -649,6 +651,7 @@ pub struct ContextLinkUsage {
     pub security: std::collections::HashMap<u32, Vec<String>>,
     pub advisories: std::collections::HashMap<String, Vec<String>>,
     pub linear: std::collections::HashMap<String, Vec<String>>,
+    pub discussions: std::collections::HashMap<u32, Vec<String>>,
 }
 
 fn collect_numbered_refs(
@@ -689,6 +692,7 @@ fn collect_context_link_usage(
         usage.prs = collect_numbered_refs(&refs.prs, &prefix);
         usage.security = collect_numbered_refs(&refs.security, &prefix);
         usage.advisories = collect_named_refs(&refs.advisories, &format!("{repo_key}::"));
+        usage.discussions = collect_numbered_refs(&refs.discussions, &prefix);
     }
     if let Some(project_name) = linear_project_name {
         usage.linear = collect_named_refs(&refs.linear, &format!("{project_name}-"));
@@ -1119,10 +1123,14 @@ pub fn get_session_context_content(
         }
     }
 
+    let discussion_keys =
+        super::github_discussions::get_combined_discussion_refs(app, session_id, Some(worktree_id));
+
     if issue_keys.is_empty()
         && pr_keys.is_empty()
         && security_keys.is_empty()
         && advisory_keys.is_empty()
+        && discussion_keys.is_empty()
     {
         return Ok(String::new());
     }
@@ -1174,15 +1182,37 @@ pub fn get_session_context_content(
         }
     }
 
+    for key in &discussion_keys {
+        if let Some((discussion_repo_key, number)) = key.rsplit_once('-') {
+            if discussion_repo_key != repo_key {
+                continue;
+            }
+            let file = contexts_dir.join(format!("{repo_key}-discussion-{number}.md"));
+            if let Ok(content) = std::fs::read_to_string(&file) {
+                parts.push(format!("### Discussion #{number}\n\n{content}"));
+            }
+        }
+    }
+
     Ok(parts.join("\n\n"))
 }
 
 /// Remove all references for a session
-/// Returns (orphaned_issue_keys, orphaned_pr_keys, orphaned_security_keys, orphaned_advisory_keys)
+/// Returns orphaned keys: (issues, prs, security, advisories, discussions)
+#[allow(clippy::type_complexity)]
 pub fn remove_all_session_references(
     app: &tauri::AppHandle,
     session_id: &str,
-) -> Result<(Vec<String>, Vec<String>, Vec<String>, Vec<String>), String> {
+) -> Result<
+    (
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+    ),
+    String,
+> {
     let mut refs = load_context_references(app)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1193,6 +1223,7 @@ pub fn remove_all_session_references(
     let mut orphaned_prs = Vec::new();
     let mut orphaned_security = Vec::new();
     let mut orphaned_advisories = Vec::new();
+    let mut orphaned_discussions = Vec::new();
 
     for (key, entry) in refs.issues.iter_mut() {
         entry.sessions.retain(|s| s != session_id);
@@ -1226,18 +1257,27 @@ pub fn remove_all_session_references(
         }
     }
 
+    for (key, entry) in refs.discussions.iter_mut() {
+        entry.sessions.retain(|s| s != session_id);
+        if entry.sessions.is_empty() && entry.orphaned_at.is_none() {
+            entry.orphaned_at = Some(now);
+            orphaned_discussions.push(key.clone());
+        }
+    }
+
     save_context_references(app, &refs)?;
     Ok((
         orphaned_issues,
         orphaned_prs,
         orphaned_security,
         orphaned_advisories,
+        orphaned_discussions,
     ))
 }
 
 /// Parse a context key into (repo_owner, repo_name, number)
 /// Key format: "{owner}-{repo}-{number}"
-fn parse_context_key(key: &str) -> Option<(String, String, u32)> {
+pub(super) fn parse_context_key(key: &str) -> Option<(String, String, u32)> {
     // Split from the right to get the number first
     let (repo_key, number_str) = key.rsplit_once('-')?;
     let number = number_str.parse::<u32>().ok()?;
@@ -1394,6 +1434,32 @@ pub fn cleanup_orphaned_contexts(
         refs.advisories.remove(key);
     }
 
+    let discussions_to_remove: Vec<String> = refs
+        .discussions
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .orphaned_at
+                .is_some_and(|orphaned_at| orphaned_at + retention_secs < now)
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    for key in &discussions_to_remove {
+        if let Some((repo_key, number)) = key.rsplit_once('-') {
+            let filename = format!("{repo_key}-discussion-{number}.md");
+            let file_path = contexts_dir.join(&filename);
+            if file_path.exists() {
+                if let Err(e) = std::fs::remove_file(&file_path) {
+                    log::warn!("Failed to remove orphaned discussion context {filename}: {e}");
+                } else {
+                    deleted_count += 1;
+                }
+            }
+        }
+        refs.discussions.remove(key);
+    }
+
     save_context_references(app, &refs)?;
     Ok(deleted_count)
 }
@@ -1534,16 +1600,21 @@ pub fn cleanup_issue_contexts_for_session(
 ) -> Result<(), String> {
     log::trace!("Cleaning up contexts for session {session_id}");
 
-    // Remove all references for this session (handles issues, PRs, security alerts, and advisories)
-    let (orphaned_issues, orphaned_prs, orphaned_security, orphaned_advisories) =
-        remove_all_session_references(app, session_id)?;
+    let (
+        orphaned_issues,
+        orphaned_prs,
+        orphaned_security,
+        orphaned_advisories,
+        orphaned_discussions,
+    ) = remove_all_session_references(app, session_id)?;
 
     log::trace!(
-        "Marked {} issues, {} PRs, {} security alerts, and {} advisories as orphaned for session {session_id}",
+        "Marked {} issues, {} PRs, {} security alerts, {} advisories, and {} discussions as orphaned for session {session_id}",
         orphaned_issues.len(),
         orphaned_prs.len(),
         orphaned_security.len(),
-        orphaned_advisories.len()
+        orphaned_advisories.len(),
+        orphaned_discussions.len()
     );
 
     Ok(())
@@ -3724,6 +3795,10 @@ mod tests {
             .insert("owner-repo::GHSA-aaaa-bbbb-cccc".into(), entry(&["s4"]));
         refs.linear.insert("Jean-ENG-42".into(), entry(&["s5"]));
         refs.linear.insert("Other-ENG-1".into(), entry(&["s6"]));
+        refs.discussions
+            .insert("owner-repo-99".into(), entry(&["s7"]));
+        refs.discussions
+            .insert("other-repo-98".into(), entry(&["s8"]));
 
         let usage = collect_context_link_usage(&refs, Some("owner-repo"), Some("Jean"));
 
@@ -3736,6 +3811,8 @@ mod tests {
         );
         assert_eq!(usage.linear.len(), 1);
         assert_eq!(usage.linear["ENG-42"], vec!["s5".to_string()]);
+        assert_eq!(usage.discussions.len(), 1);
+        assert_eq!(usage.discussions[&99], vec!["s7".to_string()]);
     }
 
     #[test]

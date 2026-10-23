@@ -14,6 +14,9 @@ import type {
   LoadedSecurityAlertContext,
   RepositoryAdvisory,
   LoadedAdvisoryContext,
+  GitHubDiscussion,
+  GitHubDiscussionDetail,
+  LoadedDiscussionContext,
   AttachedSavedContext,
   WorkflowRunsResult,
 } from '@/types/github'
@@ -152,6 +155,30 @@ export const githubQueryKeys = {
       : ([
           ...githubQueryKeys.all,
           'loaded-advisory-contexts',
+          sessionId,
+        ] as const),
+  discussions: (projectPath: string, state: string) =>
+    [...githubQueryKeys.all, 'discussions', projectPath, state] as const,
+  discussionSearch: (projectPath: string, query: string) =>
+    [...githubQueryKeys.all, 'discussion-search', projectPath, query] as const,
+  discussion: (projectPath: string, discussionNumber: number) =>
+    [
+      ...githubQueryKeys.all,
+      'discussion',
+      projectPath,
+      discussionNumber,
+    ] as const,
+  loadedDiscussionContexts: (sessionId: string, worktreeId?: string | null) =>
+    worktreeId
+      ? ([
+          ...githubQueryKeys.all,
+          'loaded-discussion-contexts',
+          sessionId,
+          worktreeId,
+        ] as const)
+      : ([
+          ...githubQueryKeys.all,
+          'loaded-discussion-contexts',
           sessionId,
         ] as const),
 }
@@ -868,6 +895,219 @@ export function useGetGitHubPRByNumber(
     gcTime: 1000 * 60 * 5,
     retry: 0,
   })
+}
+
+// =============================================================================
+// GitHub Discussion Hooks and Functions
+// =============================================================================
+
+/**
+ * Hook to list GitHub discussions for a project.
+ * Returns an empty list when discussions are disabled for the repository.
+ */
+export function useGitHubDiscussions(
+  projectPath: string | null,
+  state: 'open' | 'closed' | 'all' = 'open',
+  options?: { enabled?: boolean; staleTime?: number }
+) {
+  return useQuery({
+    queryKey: githubQueryKeys.discussions(projectPath ?? '', state),
+    queryFn: async (): Promise<GitHubDiscussion[]> => {
+      if (!isTauri() || !projectPath) return []
+
+      try {
+        logger.debug('Fetching GitHub discussions', { projectPath, state })
+        const discussions = await invoke<GitHubDiscussion[]>(
+          'list_github_discussions',
+          { projectPath, state }
+        )
+        logger.info('GitHub discussions loaded', { count: discussions.length })
+        return discussions
+      } catch (error) {
+        logger.error('Failed to load GitHub discussions', {
+          error,
+          projectPath,
+        })
+        throw error
+      }
+    },
+    enabled: (options?.enabled ?? true) && !!projectPath,
+    staleTime: options?.staleTime ?? 1000 * 60 * 2,
+    gcTime: 1000 * 60 * 10,
+    retry: 1,
+  })
+}
+
+/**
+ * Hook to search GitHub discussions remotely
+ *
+ * @param query - Search query (should be debounced by caller)
+ */
+export function useSearchGitHubDiscussions(
+  projectPath: string | null,
+  query: string
+) {
+  return useQuery({
+    queryKey: githubQueryKeys.discussionSearch(projectPath ?? '', query),
+    queryFn: async (): Promise<GitHubDiscussion[]> => {
+      if (!isTauri() || !projectPath || !query) return []
+
+      try {
+        return await invoke<GitHubDiscussion[]>('search_github_discussions', {
+          projectPath,
+          query,
+        })
+      } catch (error) {
+        logger.error('Failed to search GitHub discussions', {
+          error,
+          projectPath,
+          query,
+        })
+        throw error
+      }
+    },
+    enabled: !!projectPath && query.length >= 2,
+    staleTime: 1000 * 30,
+    gcTime: 1000 * 60 * 5,
+    retry: 0,
+  })
+}
+
+/**
+ * Hook to fetch a single GitHub discussion by exact number ("123" or "#123").
+ */
+export function useGetGitHubDiscussionByNumber(
+  projectPath: string | null,
+  query: string
+) {
+  const itemNumber = parseItemNumber(query)
+  return useQuery({
+    queryKey: githubQueryKeys.discussion(projectPath ?? '', itemNumber ?? 0),
+    queryFn: async (): Promise<GitHubDiscussionDetail | null> => {
+      if (!isTauri() || !projectPath || !itemNumber) return null
+      try {
+        return await getGitHubDiscussion(projectPath, itemNumber)
+      } catch {
+        return null
+      }
+    },
+    enabled: !!projectPath && itemNumber !== null,
+    staleTime: 1000 * 30,
+    gcTime: 1000 * 60 * 5,
+    retry: 0,
+  })
+}
+
+/**
+ * Fetch a discussion with its full markdown content (including comments)
+ */
+export async function getGitHubDiscussion(
+  projectPath: string,
+  discussionNumber: number
+): Promise<GitHubDiscussionDetail> {
+  return invoke<GitHubDiscussionDetail>('get_github_discussion', {
+    projectPath,
+    discussionNumber,
+  })
+}
+
+/**
+ * Hook to list loaded discussion contexts for a session
+ */
+export function useLoadedDiscussionContexts(
+  sessionId: string | null,
+  worktreeId?: string | null
+) {
+  return useQuery({
+    queryKey: githubQueryKeys.loadedDiscussionContexts(
+      sessionId ?? '',
+      worktreeId
+    ),
+    queryFn: async (): Promise<LoadedDiscussionContext[]> => {
+      if (!isTauri() || !sessionId) return []
+
+      try {
+        return await invoke<LoadedDiscussionContext[]>(
+          'list_loaded_discussion_contexts',
+          { sessionId, worktreeId: worktreeId ?? undefined }
+        )
+      } catch (error) {
+        logger.debug('Failed to load discussion contexts', {
+          error,
+          sessionId,
+        })
+        return []
+      }
+    },
+    enabled: !!sessionId,
+    staleTime: 1000 * 60,
+    gcTime: 1000 * 60 * 5,
+  })
+}
+
+/**
+ * Load discussion context for a session (fetch from GitHub and save)
+ */
+export async function loadDiscussionContext(
+  sessionId: string,
+  discussionNumber: number,
+  projectPath: string
+): Promise<LoadedDiscussionContext> {
+  return invoke<LoadedDiscussionContext>('load_discussion_context', {
+    sessionId,
+    discussionNumber,
+    projectPath,
+  })
+}
+
+/**
+ * Remove a loaded discussion context from a session
+ */
+export async function removeDiscussionContext(
+  sessionId: string,
+  discussionNumber: number,
+  projectPath: string
+): Promise<void> {
+  return invoke('remove_discussion_context', {
+    sessionId,
+    discussionNumber,
+    projectPath,
+  })
+}
+
+/**
+ * Get the content of a loaded discussion context file
+ */
+export async function getDiscussionContextContent(
+  sessionId: string,
+  discussionNumber: number,
+  projectPath: string
+): Promise<string> {
+  return invoke<string>('get_discussion_context_content', {
+    sessionId,
+    discussionNumber,
+    projectPath,
+  })
+}
+
+/**
+ * Filter discussions by number, title, body, or category name
+ */
+export function filterDiscussions(
+  discussions: GitHubDiscussion[],
+  query: string
+): GitHubDiscussion[] {
+  const lowerQuery = query.trim().toLowerCase()
+  if (!lowerQuery) return discussions
+
+  const numberQuery = lowerQuery.replace(/^#/, '')
+  return discussions.filter(
+    discussion =>
+      discussion.number.toString().includes(numberQuery) ||
+      discussion.title.toLowerCase().includes(lowerQuery) ||
+      discussion.body.toLowerCase().includes(lowerQuery) ||
+      (discussion.category?.name.toLowerCase().includes(lowerQuery) ?? false)
+  )
 }
 
 // =============================================================================

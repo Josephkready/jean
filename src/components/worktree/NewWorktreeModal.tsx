@@ -9,6 +9,7 @@ import {
   Shield,
   GitBranch,
   Sentry,
+  MessagesSquare,
 } from '@/components/icons/reicon'
 import { LinearIcon } from '@/components/icons/LinearIcon'
 import type { LucideIcon } from '@/components/icons/reicon'
@@ -47,6 +48,7 @@ import { SecurityAlertsTab } from './SecurityAlertsTab'
 import { BranchesTab } from './BranchesTab'
 import { LinearIssuesTab } from './LinearIssuesTab'
 import { SentryIssuesTab } from './SentryIssuesTab'
+import { GitHubDiscussionsTab } from './GitHubDiscussionsTab'
 import { IssuePreviewModal } from './IssuePreviewModal'
 
 export type TabId =
@@ -57,6 +59,7 @@ export type TabId =
   | 'branches'
   | 'linear'
   | 'sentry'
+  | 'discussions'
 
 export interface Tab {
   id: TabId
@@ -74,6 +77,7 @@ export const TABS: Tab[] = [
   { id: 'branches', label: 'Branches', key: '5', icon: GitBranch },
   { id: 'linear', label: 'Linear', key: '6', icon: LinearIcon },
   { id: 'sentry', label: 'Sentry', key: '7', icon: Sentry },
+  { id: 'discussions', label: 'Discussions', key: '8', icon: MessagesSquare },
 ]
 
 export function NewWorktreeModal() {
@@ -138,13 +142,15 @@ function NewWorktreeModalContent() {
   // for this so a GitLab project never flashes the GitHub sign-in prompt.
   const providerResolved = !isProviderLoading
   const labels = providerLabels(provider)
-  const triggerLogin =
-    provider === 'gitlab' ? triggerGlabLogin : triggerGhLogin
+  const triggerLogin = provider === 'gitlab' ? triggerGlabLogin : triggerGhLogin
   const isCliInstalled = provider === 'gitlab' ? isGlabInstalled : isGhInstalled
-  // Security (Dependabot/advisories) is GitHub-only; hide it for GitLab.
-  const securityTabEnabled = provider !== 'gitlab'
+  // Security (Dependabot/advisories) and Discussions are GitHub-only; hide
+  // them for GitLab.
+  const githubOnlyTabsEnabled = provider !== 'gitlab'
   const displayTabs = TABS.filter(
-    tab => tab.id !== 'security' || securityTabEnabled
+    tab =>
+      (tab.id !== 'security' && tab.id !== 'discussions') ||
+      githubOnlyTabsEnabled
   ).map(tab =>
     tab.id === 'prs' ? { ...tab, label: labels.pullRequestsShort } : tab
   )
@@ -214,7 +220,7 @@ function NewWorktreeModalContent() {
   const { handleKeyDown } = useNewWorktreeKeyboard({
     activeTab,
     setActiveTab: handleTabChange,
-    securityTabEnabled,
+    githubOnlyTabsEnabled,
     filteredIssues: data.filteredIssues,
     filteredPRs: data.filteredPRs,
     filteredSecurityAlerts: data.filteredSecurityAlerts,
@@ -249,6 +255,8 @@ function NewWorktreeModalContent() {
     handleSelectSentryIssue: handlers.handleSelectSentryIssue,
     handleSelectSentryIssueAndInvestigate:
       handlers.handleSelectSentryIssueAndInvestigate,
+    filteredDiscussions: data.filteredDiscussions,
+    handleSelectDiscussion: handlers.handleSelectDiscussion,
   })
 
   // Reset to a safe tab when the current one is hidden (e.g. Security on GitLab).
@@ -325,7 +333,8 @@ function NewWorktreeModalContent() {
         activeTab === 'security' ||
         activeTab === 'branches' ||
         activeTab === 'linear' ||
-        activeTab === 'sentry') &&
+        activeTab === 'sentry' ||
+        activeTab === 'discussions') &&
       newWorktreeModalOpen
     ) {
       const timer = setTimeout(() => {
@@ -610,6 +619,29 @@ function NewWorktreeModalContent() {
                 creatingFromId={handlers.creatingFromSentryId}
                 isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
+              />
+            )}
+
+            {activeTab === 'discussions' && (
+              <GitHubDiscussionsTab
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                includeClosed={includeClosed}
+                setIncludeClosed={setIncludeClosed}
+                discussions={data.filteredDiscussions}
+                isLoading={data.isLoadingDiscussions}
+                isRefetching={data.isRefetchingDiscussions}
+                isSearching={data.isSearchingDiscussions}
+                error={data.discussionsError}
+                onRefresh={() => data.refetchDiscussions()}
+                selectedIndex={selectedItemIndex}
+                setSelectedIndex={setSelectedItemIndex}
+                onSelectDiscussion={handlers.handleSelectDiscussion}
+                creatingFromNumber={handlers.creatingFromNumber}
+                searchInputRef={searchInputRef}
+                onLogin={triggerGhLogin}
+                isGhInstalled={isGhInstalled}
+                getContextMatches={getContextMatches}
               />
             )}
 

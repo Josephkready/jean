@@ -57,7 +57,7 @@ import { browserBackend } from '@/hooks/useBrowserPane'
 import { useBrowserStore } from '@/store/browser-store'
 
 import type { AppPreferences } from '@/types/preferences'
-import type { AdvisoryContext } from '@/types/github'
+import type { AdvisoryContext, DiscussionContext } from '@/types/github'
 import type { ProviderConfig } from '@/types/provider'
 import { hasBackend, hasBackendTransport, isNativeApp } from '@/lib/environment'
 import { gitProviderQueryKeys } from '@/services/git-provider'
@@ -907,6 +907,7 @@ export function useCreateWorktree() {
       advisoryContext,
       linearContext,
       sentryContext,
+      discussionContext,
       customName,
       origin,
       background: _background,
@@ -977,6 +978,8 @@ export function useCreateWorktree() {
         permalink: string
         content: string
       }
+      /** GitHub discussion context to attach to the new worktree */
+      discussionContext?: DiscussionContext
       /** Custom worktree name (used when retrying after path conflict) */
       customName?: string
       /** Origin/category for the worktree */
@@ -1008,6 +1011,7 @@ export function useCreateWorktree() {
         advisoryContext,
         linearContext,
         sentryContext,
+        discussionContext,
         customName,
         origin,
         autoOpenInJean: !_background,

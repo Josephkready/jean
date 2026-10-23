@@ -17,6 +17,7 @@ import {
   Github,
   GitMerge,
   GitPullRequest,
+  MessagesSquare,
   GitPullRequestArrow,
   Globe,
   Paperclip,
@@ -67,6 +68,7 @@ import type {
   LoadedPullRequestContext,
   LoadedSecurityAlertContext,
   LoadedAdvisoryContext,
+  LoadedDiscussionContext,
   AttachedSavedContext,
 } from '@/types/github'
 import type { LoadedLinearIssueContext } from '@/types/linear'
@@ -159,6 +161,7 @@ interface MobileSettingsMenuProps {
 
   loadedIssueContexts: LoadedIssueContext[]
   loadedPRContexts: LoadedPullRequestContext[]
+  loadedDiscussionContexts: LoadedDiscussionContext[]
   loadedSecurityContexts: LoadedSecurityAlertContext[]
   loadedAdvisoryContexts: LoadedAdvisoryContext[]
   loadedLinearContexts: LoadedLinearIssueContext[]
@@ -167,6 +170,7 @@ interface MobileSettingsMenuProps {
 
   handleViewIssue: (ctx: LoadedIssueContext) => void
   handleViewPR: (ctx: LoadedPullRequestContext) => void
+  handleViewDiscussion: (ctx: LoadedDiscussionContext) => void
   handleViewSecurityAlert: (ctx: LoadedSecurityAlertContext) => void
   handleViewAdvisory: (ctx: LoadedAdvisoryContext) => void
   handleViewLinear: (ctx: LoadedLinearIssueContext) => void
@@ -216,6 +220,7 @@ export function MobileSettingsMenu({
   openReasoningSheetSignal = 0,
   loadedIssueContexts,
   loadedPRContexts,
+  loadedDiscussionContexts,
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
@@ -223,6 +228,7 @@ export function MobileSettingsMenu({
   attachedSavedContexts,
   handleViewIssue,
   handleViewPR,
+  handleViewDiscussion,
   handleViewSecurityAlert,
   handleViewAdvisory,
   handleViewLinear,
@@ -549,6 +555,7 @@ export function MobileSettingsMenu({
   const hasContexts =
     loadedIssueContexts.length > 0 ||
     loadedPRContexts.length > 0 ||
+    loadedDiscussionContexts.length > 0 ||
     loadedSecurityContexts.length > 0 ||
     loadedAdvisoryContexts.length > 0 ||
     loadedLinearContexts.length > 0 ||
@@ -1059,10 +1066,49 @@ export function MobileSettingsMenu({
                   ))}
                 </>
               )}
-              {loadedSecurityContexts.length > 0 && (
+              {loadedDiscussionContexts.length > 0 && (
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0) && <DropdownMenuSeparator />}
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    Discussions
+                  </DropdownMenuLabel>
+                  {loadedDiscussionContexts.map(ctx => (
+                    <DropdownMenuItem
+                      key={ctx.number}
+                      onClick={() => {
+                        setMenuOpen(false)
+                        handleViewDiscussion(ctx)
+                      }}
+                    >
+                      <MessagesSquare className="h-4 w-4 text-success" />
+                      <span className="truncate">
+                        #{ctx.number} {ctx.title}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Open external link"
+                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
+                        onClick={e => {
+                          e.stopPropagation()
+                          openExternal(
+                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/discussions/${ctx.number}`
+                          )
+                        }}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                      </button>
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              )}
+              {loadedSecurityContexts.length > 0 && (
+                <>
+                  {(loadedIssueContexts.length > 0 ||
+                    loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0) && (
+                    <DropdownMenuSeparator />
+                  )}
                   <DropdownMenuLabel className="text-xs text-muted-foreground">
                     Security Alerts
                   </DropdownMenuLabel>
@@ -1099,6 +1145,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0) && (
                     <DropdownMenuSeparator />
                   )}
@@ -1138,6 +1185,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0) && (
                     <DropdownMenuSeparator />
@@ -1178,6 +1226,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
                     loadedLinearContexts.length > 0) && (
@@ -1219,6 +1268,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
                     loadedLinearContexts.length > 0 ||

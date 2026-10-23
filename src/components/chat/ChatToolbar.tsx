@@ -117,6 +117,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   favoritePackageScripts,
   loadedIssueContexts,
   loadedPRContexts,
+  loadedDiscussionContexts,
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
@@ -288,6 +289,7 @@ export const ChatToolbar = memo(function ChatToolbar({
     setViewingContext,
     handleViewIssue,
     handleViewPR,
+    handleViewDiscussion,
     handleViewSavedContext,
     handleViewSecurityAlert,
     handleViewAdvisory,
@@ -562,6 +564,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               openReasoningSheetSignal={openReasoningSheetSignal}
               loadedIssueContexts={loadedIssueContexts}
               loadedPRContexts={loadedPRContexts}
+              loadedDiscussionContexts={loadedDiscussionContexts}
               loadedSecurityContexts={loadedSecurityContexts}
               loadedAdvisoryContexts={loadedAdvisoryContexts}
               loadedLinearContexts={loadedLinearContexts}
@@ -569,6 +572,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               attachedSavedContexts={attachedSavedContexts}
               handleViewIssue={handleViewIssue}
               handleViewPR={handleViewPR}
+              handleViewDiscussion={handleViewDiscussion}
               handleViewSecurityAlert={handleViewSecurityAlert}
               handleViewAdvisory={handleViewAdvisory}
               handleViewLinear={handleViewLinear}
@@ -650,6 +654,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               mcpStatuses={mcpStatuses}
               loadedIssueContexts={loadedIssueContexts}
               loadedPRContexts={loadedPRContexts}
+              loadedDiscussionContexts={loadedDiscussionContexts}
               loadedSecurityContexts={loadedSecurityContexts}
               loadedAdvisoryContexts={loadedAdvisoryContexts}
               loadedLinearContexts={loadedLinearContexts}
@@ -677,6 +682,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               handleEffortLevelChange={handleEffortLevelChange}
               handleViewIssue={handleViewIssue}
               handleViewPR={handleViewPR}
+              handleViewDiscussion={handleViewDiscussion}
               handleViewSecurityAlert={handleViewSecurityAlert}
               handleViewAdvisory={handleViewAdvisory}
               handleViewLinear={handleViewLinear}

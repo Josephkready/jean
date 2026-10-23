@@ -928,8 +928,9 @@ fn resolve_http_server_bind_host(prefs: &AppPreferences) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_global_system_prompt, default_model, default_parallel_execution_prompt,
-        effective_global_system_prompt, is_legacy_global_system_prompt_with_subagent_strategy,
+        default_global_system_prompt, default_global_system_prompt_without_branch_rule,
+        default_model, default_parallel_execution_prompt, effective_global_system_prompt,
+        is_legacy_global_system_prompt_with_subagent_strategy,
         legacy_parallel_execution_prompt_before_subagent_strategy, parse_cli_args_from,
         resolve_headless_bind_host, resolve_headless_token_required, resolve_http_server_bind_host,
         resolve_stored_parallel_execution_prompt, server_preferences_value,
@@ -993,6 +994,14 @@ mod tests {
     }
 
     #[test]
+    fn default_global_system_prompt_forbids_branch_changes() {
+        let prompt = default_global_system_prompt();
+        assert!(prompt.contains("Do NOT change the branch of the current worktree"));
+        assert!(!default_global_system_prompt_without_branch_rule()
+            .contains("Do NOT change the branch of the current worktree"));
+    }
+
+    #[test]
     fn default_global_system_prompt_prefers_interactive_plan_questions() {
         let prompt = default_global_system_prompt();
 
@@ -1041,7 +1050,7 @@ mod tests {
     }
 
     fn previous_global_system_prompt() -> String {
-        let bumped = default_global_system_prompt()
+        let bumped = default_global_system_prompt_without_branch_rule()
             .replace(
                 "### 6. Autonomous Bug Fixing",
                 "### 7. Autonomous Bug Fixing",
@@ -2494,6 +2503,7 @@ fn default_global_system_prompt() -> String {
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.
 - If already in a Jean worktree or base/main workspace, continue in the current workspace.
+- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.
 
 ## Jean Run Environment
 - When you need to test a running app (UI, HTTP, browser, smoke, e2e), call Jean MCP `get_run_environments` first (pass this worktreeId when known).
@@ -2548,7 +2558,15 @@ pub(crate) fn is_legacy_global_system_prompt_with_subagent_strategy(prompt: &str
             "### 4. Self-Improvement Loop",
             "### 3. Self-Improvement Loop",
         );
-    renumbered.trim() == default_global_system_prompt().trim()
+    renumbered.trim() == default_global_system_prompt_without_branch_rule().trim()
+}
+
+/// The branch rule was added after the sub-agent section moved out, so legacy
+/// stored prompts never contain it.
+const BRANCH_RULE_LINE: &str = "- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.\n";
+
+fn default_global_system_prompt_without_branch_rule() -> String {
+    default_global_system_prompt().replacen(BRANCH_RULE_LINE, "", 1)
 }
 
 /// Stored `None`/empty/legacy-default text uses the current global prompt.

@@ -69,6 +69,7 @@ import type { Worktree } from '@/types/projects'
 import type {
   AttachedSavedContext,
   LoadedAdvisoryContext,
+  LoadedDiscussionContext,
   LoadedIssueContext,
   LoadedPullRequestContext,
   LoadedSecurityAlertContext,
@@ -80,6 +81,7 @@ import {
   useLoadedPRContexts,
   useLoadedSecurityContexts,
   useLoadedAdvisoryContexts,
+  useLoadedDiscussionContexts,
   useAttachedSavedContexts,
 } from '@/services/github'
 import { useLoadedLinearIssueContexts } from '@/services/linear'
@@ -314,6 +316,7 @@ const EMPTY_ISSUE_CONTEXTS: LoadedIssueContext[] = []
 const EMPTY_PR_CONTEXTS: LoadedPullRequestContext[] = []
 const EMPTY_SECURITY_CONTEXTS: LoadedSecurityAlertContext[] = []
 const EMPTY_ADVISORY_CONTEXTS: LoadedAdvisoryContext[] = []
+const EMPTY_DISCUSSION_CONTEXTS: LoadedDiscussionContext[] = []
 const EMPTY_LINEAR_CONTEXTS: LoadedLinearIssueContext[] = []
 const EMPTY_SENTRY_CONTEXTS: SentryIssueContext[] = []
 const EMPTY_SAVED_CONTEXTS: AttachedSavedContext[] = []
@@ -823,6 +826,12 @@ const ChatWindowContent = memo(function ChatWindowContent({
 
   // Loaded PR contexts for indicator and investigate PR functionality
   const { data: loadedPRContexts } = useLoadedPRContexts(
+    activeSessionId ?? null,
+    activeWorktreeId
+  )
+
+  // Loaded discussion contexts for indicator
+  const { data: loadedDiscussionContexts } = useLoadedDiscussionContexts(
     activeSessionId ?? null,
     activeWorktreeId
   )
@@ -3706,6 +3715,10 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                     }
                                     loadedPRContexts={
                                       loadedPRContexts ?? EMPTY_PR_CONTEXTS
+                                    }
+                                    loadedDiscussionContexts={
+                                      loadedDiscussionContexts ??
+                                      EMPTY_DISCUSSION_CONTEXTS
                                     }
                                     loadedSecurityContexts={
                                       loadedSecurityContexts ??

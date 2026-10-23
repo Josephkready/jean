@@ -4,13 +4,14 @@ import { toast } from 'sonner'
 import { useUIStore, type InvestigationOverride } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useChatStore } from '@/store/chat-store'
-import { githubQueryKeys } from '@/services/github'
+import { getGitHubDiscussion, githubQueryKeys } from '@/services/github'
 import { projectsQueryKeys } from '@/services/projects'
 import type {
   GitHubIssue,
   GitHubPullRequest,
   DependabotAlert,
   RepositoryAdvisory,
+  GitHubDiscussion,
   IssueContext,
   PullRequestContext,
   SecurityAlertContext,
@@ -128,6 +129,12 @@ export function useNewWorktreeHandlers(
           })
           queryClient.invalidateQueries({
             queryKey: githubQueryKeys.advisories(projectPath, 'all'),
+          })
+          queryClient.invalidateQueries({
+            queryKey: githubQueryKeys.discussions(projectPath, 'open'),
+          })
+          queryClient.invalidateQueries({
+            queryKey: githubQueryKeys.discussions(projectPath, 'all'),
           })
         }
         if (selectedProjectId) {
@@ -1452,6 +1459,56 @@ export function useNewWorktreeHandlers(
   )
 
   // =========================================================================
+  // Discussion handler (context only, no investigate)
+  // =========================================================================
+
+  const handleSelectDiscussion = useCallback(
+    async (discussion: GitHubDiscussion, background = false) => {
+      const projectPath = selectedProject?.path
+      if (!selectedProjectId || !projectPath) {
+        toast.error('No project selected')
+        return
+      }
+
+      if (
+        openExistingMatch(
+          { type: 'discussion', id: discussion.number },
+          `Discussion #${discussion.number}`
+        )
+      )
+        return
+
+      setCreatingFromNumber(discussion.number)
+      try {
+        const detail = await getGitHubDiscussion(projectPath, discussion.number)
+        if (background)
+          useUIStore.getState().incrementPendingBackgroundCreations()
+        await createWorktree.mutateAsync({
+          projectId: selectedProjectId,
+          discussionContext: {
+            number: detail.number,
+            title: detail.title,
+            content: detail.content,
+          },
+          background,
+        })
+        if (background) setCreatingFromNumber(null)
+        else handleOpenChange(false)
+      } catch (error) {
+        toast.error(`Failed to create worktree from discussion: ${error}`)
+        setCreatingFromNumber(null)
+      }
+    },
+    [
+      selectedProjectId,
+      selectedProject,
+      createWorktree,
+      handleOpenChange,
+      openExistingMatch,
+    ]
+  )
+
+  // =========================================================================
   // Stack handler: create a new worktree branched off a PR head
   // =========================================================================
 
@@ -1512,5 +1569,6 @@ export function useNewWorktreeHandlers(
     handleSelectSentryIssue,
     handleSelectSentryIssueAndInvestigate,
     handleBulkInvestigateSentryIssues,
+    handleSelectDiscussion,
   }
 }

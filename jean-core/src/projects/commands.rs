@@ -18,6 +18,9 @@ use rand::Rng;
 
 use super::git;
 use super::git::get_repo_identifier;
+use super::github_discussions::{
+    add_discussion_reference, generate_branch_name_from_discussion, DiscussionContext,
+};
 use super::github_issues::{
     add_advisory_reference, add_issue_reference, add_pr_reference, add_security_reference,
     format_advisory_context_markdown, format_issue_context_markdown, format_pr_context_markdown,
@@ -1753,6 +1756,7 @@ pub async fn create_worktree(
     advisory_context: Option<AdvisoryContext>,
     linear_context: Option<LinearIssueContext>,
     sentry_context: Option<SentryIssueContext>,
+    discussion_context: Option<DiscussionContext>,
     custom_name: Option<String>,
     auto_open_in_jean: Option<bool>,
     origin: Option<String>,
@@ -1893,6 +1897,20 @@ pub async fn create_worktree(
         } else {
             sentry_branch
         }
+    } else if let Some(ref ctx) = discussion_context {
+        let discussion_branch = generate_branch_name_from_discussion(ctx.number, &ctx.title);
+        if data.worktree_name_exists(&project_id, &discussion_branch) {
+            let mut counter = 2;
+            loop {
+                let candidate = format!("{discussion_branch}-{counter}");
+                if !data.worktree_name_exists(&project_id, &candidate) {
+                    break candidate;
+                }
+                counter += 1;
+            }
+        } else {
+            discussion_branch
+        }
     } else if let Some(ref ctx) = issue_context {
         let issue_branch = generate_branch_name_from_issue(ctx.number, &ctx.title);
         // Check if this branch name already exists, if so, add a suffix
@@ -2017,6 +2035,7 @@ pub async fn create_worktree(
     let advisory_context_clone = advisory_context.clone();
     let linear_context_clone = linear_context.clone();
     let sentry_context_clone = sentry_context.clone();
+    let discussion_context_clone = discussion_context.clone();
     let worktree_origin_clone = worktree_origin.clone();
 
     // Spawn background thread for git operations
@@ -2587,6 +2606,39 @@ pub async fn create_worktree(
                             log::warn!("Background: Failed to add Sentry reference: {e}");
                         }
                     }
+                }
+            }
+
+            // Write discussion context file if provided (to shared git-context directory)
+            if let Some(ctx) = &discussion_context_clone {
+                log::trace!(
+                    "Background: Writing discussion context file for discussion #{}",
+                    ctx.number
+                );
+                match (
+                    get_repo_identifier(&project_path),
+                    get_github_contexts_dir(&app_clone),
+                ) {
+                    (Ok(repo_id), Ok(contexts_dir)) => {
+                        let repo_key = repo_id.to_key();
+                        let context_file =
+                            contexts_dir.join(format!("{repo_key}-discussion-{}.md", ctx.number));
+                        if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
+                            log::warn!("Background: Failed to create git-context directory: {e}");
+                        } else if let Err(e) = std::fs::write(&context_file, &ctx.content) {
+                            log::warn!("Background: Failed to write discussion context file: {e}");
+                        } else if let Err(e) = add_discussion_reference(
+                            &app_clone,
+                            &repo_key,
+                            ctx.number,
+                            &worktree_id_clone,
+                        ) {
+                            log::warn!("Background: Failed to add discussion reference: {e}");
+                        }
+                    }
+                    _ => log::warn!(
+                        "Background: Could not resolve repo or context dir for discussion context"
+                    ),
                 }
             }
 

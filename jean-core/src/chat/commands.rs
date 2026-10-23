@@ -64,7 +64,8 @@ const CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT: &str = "\
 
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.
-- If already in a Jean worktree or base/main workspace, continue in the current workspace.";
+- If already in a Jean worktree or base/main workspace, continue in the current workspace.
+- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.";
 const CODEX_DEFAULT_PLAN_MODE_PROMPT: &str = "\
 ## Plan Mode
 
@@ -4294,6 +4295,14 @@ pub async fn send_chat_message(
                         }
                     }
 
+                    all_context_paths.extend(
+                        crate::projects::github_discussions::get_discussion_context_paths(
+                            &thread_app,
+                            &thread_session_id,
+                            &thread_worktree_id,
+                        ),
+                    );
+
                     // Saved context files
                     if let Ok(app_data_dir) = thread_app.path().app_data_dir() {
                         let saved_contexts_dir = app_data_dir.join("session-context");
@@ -4674,6 +4683,17 @@ pub async fn send_chat_message(
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    for path in crate::projects::github_discussions::get_discussion_context_paths(
+                        &thread_app,
+                        &thread_session_id,
+                        &thread_worktree_id,
+                    ) {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            context_content.push_str(&content);
+                            context_content.push_str("\n\n---\n\n");
                         }
                     }
 
