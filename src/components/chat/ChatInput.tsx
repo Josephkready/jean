@@ -1270,26 +1270,25 @@ export const ChatInput = memo(function ChatInput({
         return
       }
 
-      // One background session per item. Sequential, so concurrent
-      // create_session calls do not race on the worktree's session index.
+      // One background session per item, started in parallel. The backend
+      // serializes session index writes per worktree.
       const toastId = toast.loading(
         `Starting ${items.length} investigations in new sessions...`
       )
+      const results = await Promise.allSettled(
+        items.map(item => investigate([item], false))
+      )
       let succeeded = 0
-      for (const item of items) {
-        try {
-          await investigate([item], false)
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
           succeeded += 1
-        } catch (error) {
-          logger.error('Context investigation failed', { item: item.id, error })
+        } else {
+          logger.error('Context investigation failed', {
+            item: items[index]?.id,
+            error: result.reason,
+          })
         }
-      }
-      // Starting an investigation selects its session; stay where the user was
-      if (activeSessionId) {
-        useChatStore
-          .getState()
-          .setActiveSession(activeWorktreeId, activeSessionId)
-      }
+      })
       reportBulkInvestigateResults(
         toastId,
         succeeded,

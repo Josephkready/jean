@@ -16,6 +16,7 @@ export interface InvestigationOverride {
   prompt?: string
   promptTemplate?: string
   issueContext?: IssueContext
+  /** true: select and open the session. false: run it in the background. */
   openSession?: boolean
 }
 
