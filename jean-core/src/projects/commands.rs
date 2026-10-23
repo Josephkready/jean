@@ -9573,7 +9573,7 @@ fn generate_commit_message(
         reasoning_effort,
     )?;
 
-    match validate_commit_message(&response.message, prompt, prompt) {
+    let result = match validate_commit_message(&response.message, prompt, prompt) {
         Ok(()) => Ok(response),
         Err(first_reason) => {
             log::warn!(
@@ -9604,7 +9604,27 @@ fn generate_commit_message(
                 }
             }
         }
-    }
+    };
+    result.map(|response| CommitMessageResponse {
+        message: strip_co_authored_by_trailers(&response.message),
+    })
+}
+
+/// Jean commits never carry `Co-Authored-By:` trailers, even when the model
+/// copies them from recent commits or a backend default.
+fn strip_co_authored_by_trailers(message: &str) -> String {
+    message
+        .lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("co-authored-by:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
 }
 
 /// Choose a usable commit message when validation failed but we still want to
@@ -16211,6 +16231,19 @@ Body
 
         let custom = add_commit_prompt_rule("Custom prompt", "New rule");
         assert_eq!(custom, "Custom prompt\n\nAdditional rule:\n- New rule");
+    }
+
+    #[test]
+    fn strip_co_authored_by_trailers_removes_only_trailer_lines() {
+        let message = "feat(chat): add steering\n\nKeep body line.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nco-authored-by: Bot <bot@example.com>\n";
+        assert_eq!(
+            strip_co_authored_by_trailers(message),
+            "feat(chat): add steering\n\nKeep body line."
+        );
+        assert_eq!(
+            strip_co_authored_by_trailers("fix: keep me"),
+            "fix: keep me"
+        );
     }
 
     #[test]
