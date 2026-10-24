@@ -928,9 +928,10 @@ fn resolve_http_server_bind_host(prefs: &AppPreferences) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_global_system_prompt, default_global_system_prompt_without_branch_rule,
-        default_model, default_parallel_execution_prompt, effective_global_system_prompt,
-        is_legacy_global_system_prompt_with_subagent_strategy,
+        default_global_system_prompt, default_global_system_prompt_with_legacy_ui_verification,
+        default_global_system_prompt_without_branch_rule, default_model,
+        default_parallel_execution_prompt, effective_global_system_prompt,
+        is_legacy_default_global_system_prompt,
         legacy_parallel_execution_prompt_before_subagent_strategy, parse_cli_args_from,
         resolve_headless_bind_host, resolve_headless_token_required, resolve_http_server_bind_host,
         resolve_stored_parallel_execution_prompt, server_preferences_value,
@@ -981,7 +982,8 @@ mod tests {
 
         let off = crate::apply_agent_browser_preference(prompt.clone(), Some(&prefs));
         assert!(!off.to_ascii_lowercase().contains("agent browser"));
-        assert!(off.contains("Verify UI changes in the running app instead."));
+        assert!(off.contains("ALWAYS use a browser when the user asks for it"));
+        assert!(off.contains("Not tested in browser"));
         assert!(
             !crate::apply_agent_browser_preference(prompt.clone(), None).contains("Agent Browser")
         );
@@ -1115,20 +1117,35 @@ mod tests {
     }
 
     #[test]
+    fn default_prompt_before_browser_rule_change_migrates() {
+        let legacy = default_global_system_prompt_with_legacy_ui_verification();
+        assert!(legacy.contains("Verify UI changes in the running app instead."));
+        assert!(!legacy.contains("Not tested in browser"));
+        assert!(legacy.contains("### 5. Demand Elegance (Balanced)"));
+        assert!(is_legacy_default_global_system_prompt(&legacy));
+        assert_eq!(
+            effective_global_system_prompt(Some(&legacy)),
+            default_global_system_prompt()
+        );
+
+        let custom = format!("{legacy}\nExtra user rule.");
+        assert!(!is_legacy_default_global_system_prompt(&custom));
+        assert!(!is_legacy_default_global_system_prompt(
+            &default_global_system_prompt()
+        ));
+    }
+
+    #[test]
     fn legacy_default_global_prompt_migrates_and_custom_text_is_kept() {
         let legacy = previous_global_system_prompt();
-        assert!(is_legacy_global_system_prompt_with_subagent_strategy(
-            &legacy
-        ));
+        assert!(is_legacy_default_global_system_prompt(&legacy));
         assert_eq!(
             effective_global_system_prompt(Some(&legacy)),
             default_global_system_prompt()
         );
 
         let custom = format!("{legacy}\n\nExtra user rule: keep my wording.");
-        assert!(!is_legacy_global_system_prompt_with_subagent_strategy(
-            &custom
-        ));
+        assert!(!is_legacy_default_global_system_prompt(&custom));
         assert_eq!(effective_global_system_prompt(Some(&custom)), custom.trim());
         assert_eq!(
             effective_global_system_prompt(Some("  My global prompt.  ")),
@@ -2463,8 +2480,12 @@ fn default_global_system_prompt() -> String {
 - Skip tests for docs, copy, comments, styling-only, and prompt/config text changes; say that you skipped them.
 - Do not re-run a passing check when the code it covers has not changed since.
 - Write new tests only for behavior that can break silently: business logic, parsing/serialization, state transitions, persistence, and a regression test for each fixed bug.
-- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called. Verify UI changes in the running app instead.
-- If a UI check needs a browser and no other browser tool is available, use the Agent Browser.
+- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called.
+- ALWAYS use a browser when the user asks for it, or when the task is visual: copy or match a style from a reference, compare with another page or screenshot, or fix a layout or visual bug.
+- Also use a browser when the change has runtime UI behavior that typecheck, lint, or tests cannot prove: new or changed user flows, or state/interaction logic.
+- In all other cases, do NOT open a browser. Examples: small copy/text edits, small class or prop tweaks that you did not have to match to a reference, refactors with no behavior change, backend-only changes. For these, a typecheck or the narrowest test is enough. Say "Not tested in browser" in the recap.
+- Before you open a browser on your own decision (not a user request), state in one line why a cheaper check is not enough.
+- If a UI check needs a browser and no other browser tool is available, use the Agent Browser. Check only the changed area, not the full app.
 
 ### 5. Demand Elegance (Balanced)
 - For non-trivial changes: pause and ask "is there a more elegant way?"
@@ -2525,11 +2546,42 @@ const LEGACY_SUBAGENT_STRATEGY_SECTION: &str = "\
 
 ";
 
-/// True only when `prompt` is the previous built-in global prompt, whose
-/// sub-agent section now lives in the parallel-execution prompt. Any other
-/// text, including a customized prompt that still mentions sub-agents, is kept.
-pub(crate) fn is_legacy_global_system_prompt_with_subagent_strategy(prompt: &str) -> bool {
+/// UI verification rules before they said when to skip the browser.
+const LEGACY_UI_VERIFICATION_RULES: &str = "\
+- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called. Verify UI changes in the running app instead.
+- If a UI check needs a browser and no other browser tool is available, use the Agent Browser.
+";
+
+const UI_VERIFICATION_RULES_START: &str = "- Do NOT write tests that only check DOM markup";
+const UI_VERIFICATION_RULES_END: &str =
+    "use the Agent Browser. Check only the changed area, not the full app.\n";
+
+/// The current default global prompt with the legacy UI verification rules.
+fn default_global_system_prompt_with_legacy_ui_verification() -> String {
+    let prompt = default_global_system_prompt();
+    let start = prompt
+        .find(UI_VERIFICATION_RULES_START)
+        .expect("default prompt has UI verification rules");
+    let end = prompt
+        .find(UI_VERIFICATION_RULES_END)
+        .expect("default prompt has Agent Browser rule")
+        + UI_VERIFICATION_RULES_END.len();
+    format!(
+        "{}{LEGACY_UI_VERIFICATION_RULES}{}",
+        &prompt[..start],
+        &prompt[end..]
+    )
+}
+
+/// True only when `prompt` is a previous built-in global prompt: the one
+/// before the browser rules changed, or the older one whose sub-agent section
+/// now lives in the parallel-execution prompt. Any other text, including a
+/// customized prompt, is kept.
+pub(crate) fn is_legacy_default_global_system_prompt(prompt: &str) -> bool {
     let normalized = prompt.replace("\r\n", "\n");
+    if normalized.trim() == default_global_system_prompt_with_legacy_ui_verification().trim() {
+        return true;
+    }
     let Some(start) = normalized.find(LEGACY_SUBAGENT_STRATEGY_SECTION) else {
         return false;
     };
@@ -2566,16 +2618,14 @@ pub(crate) fn is_legacy_global_system_prompt_with_subagent_strategy(prompt: &str
 const BRANCH_RULE_LINE: &str = "- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.\n";
 
 fn default_global_system_prompt_without_branch_rule() -> String {
-    default_global_system_prompt().replacen(BRANCH_RULE_LINE, "", 1)
+    default_global_system_prompt_with_legacy_ui_verification().replacen(BRANCH_RULE_LINE, "", 1)
 }
 
 /// Stored `None`/empty/legacy-default text uses the current global prompt.
 /// Any other stored text is returned unchanged.
 pub(crate) fn effective_global_system_prompt(stored: Option<&str>) -> String {
     match stored.map(str::trim).filter(|prompt| !prompt.is_empty()) {
-        Some(prompt) if !is_legacy_global_system_prompt_with_subagent_strategy(prompt) => {
-            prompt.to_string()
-        }
+        Some(prompt) if !is_legacy_default_global_system_prompt(prompt) => prompt.to_string(),
         _ => default_global_system_prompt(),
     }
 }
@@ -3074,7 +3124,7 @@ impl MagicPrompts {
         if self
             .global_system_prompt
             .as_deref()
-            .is_some_and(is_legacy_global_system_prompt_with_subagent_strategy)
+            .is_some_and(is_legacy_default_global_system_prompt)
         {
             self.global_system_prompt = None;
             changed = true;

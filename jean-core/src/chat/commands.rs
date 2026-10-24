@@ -182,7 +182,7 @@ fn is_codex_default_global_system_prompt(prompt: &str) -> bool {
     }
 
     trimmed == crate::default_global_system_prompt().trim()
-        || crate::is_legacy_global_system_prompt_with_subagent_strategy(trimmed)
+        || crate::is_legacy_default_global_system_prompt(trimmed)
         || trimmed == CODEX_DEFAULT_PLAN_MODE_PROMPT.trim()
         || trimmed == CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT.trim()
         || (trimmed.contains("### 1. Plan Mode Default")
