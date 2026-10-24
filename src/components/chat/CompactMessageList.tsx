@@ -55,8 +55,13 @@ import {
 } from './tool-call-utils'
 import { MessageTiming } from './MessageTiming'
 import { getAssistantDurationMs } from './time-utils'
+import { AgentApprovalInline } from '@/components/agents/AgentActivity'
 import { AgentMessageLinkRow } from '@/components/agents/AgentMessageLink'
-import { assistantReplyItems } from '@/components/agents/agent-messages'
+import { AgentQuestionCard } from '@/components/agents/AgentQuestionCard'
+import {
+  assistantReplyItems,
+  nextUserAnswers,
+} from '@/components/agents/agent-messages'
 import {
   TOOL_CALL_ROW_CLASS,
   TOOL_CALL_DETAIL_PILL_CLASS,
@@ -128,6 +133,8 @@ interface CompactMessageListProps {
   onShowHiddenPrompts?: () => void
   /** Show only assistant prose: no tool activity rows or edited files */
   hideToolActivity?: boolean
+  /** Sends a user message to this session (answers to `ask_user` questions) */
+  onSendAnswer?: (text: string) => void
 }
 
 type RenderItem =
@@ -756,6 +763,7 @@ export const CompactMessageList = memo(
         hiddenPromptCount = 0,
         onShowHiddenPrompts,
         hideToolActivity = false,
+        onSendAnswer,
       },
       ref
     ) {
@@ -799,6 +807,11 @@ export const CompactMessageList = memo(
         }
         return map
       }, [messages])
+
+      const userAnswers = useMemo(
+        () => (hideToolActivity ? nextUserAnswers(messages) : []),
+        [hideToolActivity, messages]
+      )
 
       const hasFollowUpFor = useCallback(
         (globalIndex: number) => hasFollowUpMap.get(globalIndex) ?? false,
@@ -1282,7 +1295,7 @@ export const CompactMessageList = memo(
             }
 
             if (hideToolActivity) {
-              // Messages to other agents or sessions: one line each
+              // Messages to other agents or sessions, approvals, and questions: one row each
               const replyItems = assistantReplyItems(item.messages)
               if (replyItems.length === 0) return null
               return (
@@ -1296,6 +1309,25 @@ export const CompactMessageList = memo(
                           index === 0 ? item.key : `${item.key}:group${index}`
                         }
                         sessionId={sessionId}
+                      />
+                    ) : reply.type === 'question' ? (
+                      <AgentQuestionCard
+                        key={reply.toolId}
+                        question={reply.question}
+                        answer={
+                          userAnswers[
+                            item.messages[item.messages.length - 1]
+                              ?.globalIndex ?? -1
+                          ]
+                        }
+                        disabled={isSending}
+                        onSend={onSendAnswer}
+                      />
+                    ) : reply.type === 'approval' ? (
+                      <AgentApprovalInline
+                        key={reply.toolId}
+                        approvalId={reply.approvalId}
+                        worktreeId={worktreeId}
                       />
                     ) : (
                       <AgentMessageLinkRow

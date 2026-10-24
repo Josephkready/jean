@@ -294,7 +294,20 @@ task created after the send (`findRequestTask` in `agent-messages.ts`).
 agent session are stored in `approvals` and not run. When the user approves,
 `jean_mcp_core::run_approved_tool` runs the same call, and the result goes to
 the agent as an event. The gate is in `call_tool`, so it works for every
-backend and does not depend on the prompt.
+backend and does not depend on the prompt. The agent chat shows each request
+at the tool call that made it (`agentApprovalId` in `agent-messages.ts`,
+`AgentApprovalInline`) as an `AgentQuestionCard` with Approve and Deny as the
+options. The text uses worktree and agent names (`describeApproval`), not IDs
+or raw arguments.
+
+**Questions:** `ask_user` (agent chat sessions only; task sessions get an
+error that points to `notify_user`) takes `question`, 2 to 8 `options`, and
+`multiple`. The tool only validates and returns `shown`. The agent chat renders
+the call input as `AgentQuestionCard`: one answer sends on click, multiple
+answers send with a Send button (one `- option` line each). The answer is a
+normal user message, so it works on every backend. The card is read-only once
+the user writes a message after it (`nextUserAnswers`, automatic updates do not
+count).
 
 **Agent-to-agent:** `message_agent` adds a `message` event (no target, so it
 runs as a task of the target agent) with `reply_to_agent` and

@@ -2880,6 +2880,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                   <CompactMessageList
                                     ref={virtualizedListRef}
                                     hideToolActivity={Boolean(workingLabel)}
+                                    onSendAnswer={sendMagicPrompt}
                                     messages={compactMessages}
                                     scrollContainerRef={scrollViewportRef}
                                     totalMessages={compactMessages.length}

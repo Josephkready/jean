@@ -7,6 +7,7 @@ import {
 } from '@/components/chat/tool-call-utils'
 import {
   isAgentUpdateMessage,
+  isChatContinuedMessage,
   stripAllMarkers,
 } from '@/components/chat/message-content-utils'
 
@@ -26,6 +27,15 @@ export type AgentMessageLink =
 export type ReplyItem =
   | { type: 'text'; texts: string[] }
   | { type: 'link'; link: AgentMessageLink; sentAt: number }
+  | { type: 'approval'; toolId: string; approvalId: number }
+  | { type: 'question'; toolId: string; question: AgentQuestion }
+
+/** A decision the agent asked for with `ask_user`. */
+export interface AgentQuestion {
+  question: string
+  options: string[]
+  multiple: boolean
+}
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value ? value : undefined
@@ -73,9 +83,84 @@ export function agentMessageLink(tool: ToolCall): AgentMessageLink | null {
   }
 }
 
+const APPROVAL_REQUIRED_RE = /\\?"approvalRequired\\?"\s*:\s*true/
+const APPROVAL_ID_RE = /\\?"approvalId\\?"\s*:\s*(\d+)/
+
+/** Approval request ID when a gated tool call was stored for the user (`approvalRequired` result). */
+export function agentApprovalId(tool: ToolCall): number | null {
+  // Backends wrap MCP results differently (raw, content blocks, escaped JSON)
+  const output = tool.output
+  if (
+    tool.is_error ||
+    !output ||
+    !extractJeanMcpBareToolName(tool.name) ||
+    !APPROVAL_REQUIRED_RE.test(output)
+  )
+    return null
+  const id = APPROVAL_ID_RE.exec(output)?.[1]
+  return id ? Number(id) : null
+}
+
+/** Question of an `ask_user` call (see `question_from_args` in jean-core). */
+export function agentQuestion(tool: ToolCall): AgentQuestion | null {
+  if (tool.is_error || extractJeanMcpBareToolName(tool.name) !== 'ask_user')
+    return null
+  const input = (tool.input ?? {}) as Record<string, unknown>
+  const question = str(input.question)
+  const options = Array.isArray(input.options)
+    ? input.options.filter((o): o is string => typeof o === 'string' && !!o)
+    : []
+  if (!question || options.length < 2) return null
+  return { question, options, multiple: input.multiple === true }
+}
+
+/** User message that answers a question: the option, or one line per option. */
+export function questionAnswerText(
+  question: AgentQuestion,
+  selected: string[]
+): string {
+  const chosen = question.options.filter(o => selected.includes(o))
+  return question.multiple
+    ? chosen.map(o => `- ${o}`).join('\n')
+    : (chosen[0] ?? '')
+}
+
+/** Options that an answer message picked. Typed answers pick none. */
+export function selectedOptions(
+  question: AgentQuestion,
+  answer: string
+): string[] {
+  const text = answer.trim()
+  const lines = text.split('\n').map(line => line.replace(/^- /, '').trim())
+  return question.options.filter(o => o === text || lines.includes(o))
+}
+
+/**
+ * For each message index, the next message the user wrote (not an automatic
+ * update), or undefined when the user has not written since.
+ */
+export function nextUserAnswers(
+  messages: ChatMessage[]
+): (string | undefined)[] {
+  const answers: (string | undefined)[] = []
+  let next: string | undefined
+  for (let i = messages.length - 1; i >= 0; i--) {
+    answers[i] = next
+    const message = messages[i]
+    if (
+      message?.role === 'user' &&
+      !isAgentUpdateMessage(message.content) &&
+      !isChatContinuedMessage(message.content)
+    )
+      next = stripAllMarkers(message.content)
+  }
+  return answers
+}
+
 /**
  * Reply text of assistant messages, with one link per message sent to an
- * agent or session, in order. Text between links stays in one group.
+ * agent or session and one row per approval request, in order. Text between
+ * links stays in one group.
  */
 export function assistantReplyItems(
   group: { message: ChatMessage }[]
@@ -91,8 +176,19 @@ export function assistantReplyItems(
     if (message.role !== 'assistant') continue
     const tools = message.tool_calls ?? []
     const pushLink = (tool: ToolCall | undefined) => {
-      const link = tool && agentMessageLink(tool)
-      if (link) items.push({ type: 'link', link, sentAt: message.timestamp })
+      if (!tool) return
+      const link = agentMessageLink(tool)
+      if (link) {
+        items.push({ type: 'link', link, sentAt: message.timestamp })
+        return
+      }
+      const approvalId = agentApprovalId(tool)
+      if (approvalId !== null) {
+        items.push({ type: 'approval', toolId: tool.id, approvalId })
+        return
+      }
+      const question = agentQuestion(tool)
+      if (question) items.push({ type: 'question', toolId: tool.id, question })
     }
     const blocks = message.content_blocks ?? []
     if (blocks.length === 0) {

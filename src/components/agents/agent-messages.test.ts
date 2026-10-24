@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest'
 import type { AgentTask } from '@/services/agents'
 import type { ChatMessage } from '@/types/chat'
 import {
+  agentApprovalId,
   agentMessageLink,
+  agentQuestion,
   assistantReplyItems,
+  nextUserAnswers,
+  questionAnswerText,
+  selectedOptions,
   conversationEntries,
   findRequestTask,
   parseAgentRequest,
@@ -119,6 +124,129 @@ describe('assistantReplyItems', () => {
       },
       { type: 'text', texts: ['Done.'] },
     ])
+  })
+})
+
+describe('agentApprovalId', () => {
+  const tool = (output: string, is_error = false) => ({
+    id: 't1',
+    name: 'mcp__jean__push_worktree',
+    input: {},
+    output,
+    is_error,
+  })
+
+  it('reads the approval gate result in raw and wrapped forms', () => {
+    // Same shape as `approval_gate` in jean-core
+    const gate = JSON.stringify({
+      approvalRequired: true,
+      approvalId: 7,
+      status: 'waiting_for_user',
+    })
+    expect(agentApprovalId(tool(gate))).toBe(7)
+    expect(
+      agentApprovalId(tool(JSON.stringify([{ type: 'text', text: gate }])))
+    ).toBe(7)
+  })
+
+  it('ignores normal results, other tools, save failures and errors', () => {
+    expect(agentApprovalId(tool('{"pushed":true}'))).toBeNull()
+    expect(
+      agentApprovalId({
+        ...tool('{"approvalRequired":true,"approvalId":7}'),
+        name: 'Read',
+      })
+    ).toBeNull()
+    expect(
+      agentApprovalId(tool('{"approvalRequired":true,"status":"error"}'))
+    ).toBeNull()
+    expect(
+      agentApprovalId(tool('{"approvalRequired":true,"approvalId":7}', true))
+    ).toBeNull()
+  })
+
+  it('becomes a reply item in tool order', () => {
+    const message = assistant({
+      content_blocks: [
+        { type: 'text', text: 'Pushing.' },
+        { type: 'tool_use', tool_call_id: 'push' },
+      ],
+      tool_calls: [
+        {
+          id: 'push',
+          name: 'mcp__jean__push_worktree',
+          input: {},
+          output: '{"approvalRequired":true,"approvalId":3}',
+        },
+      ],
+    })
+    expect(assistantReplyItems([{ message }])).toEqual([
+      { type: 'text', texts: ['Pushing.'] },
+      { type: 'approval', toolId: 'push', approvalId: 3 },
+    ])
+  })
+})
+
+describe('ask_user questions', () => {
+  const askTool = (input: Record<string, unknown>) => ({
+    id: 'q1',
+    name: 'mcp__jean__ask_user',
+    input,
+    output: '{"status":"shown"}',
+  })
+  const single = { question: 'Which?', options: ['A', 'B'], multiple: false }
+  const multi = { ...single, multiple: true }
+
+  it('reads the question from the tool input', () => {
+    expect(
+      agentQuestion(askTool({ question: 'Which?', options: ['A', 'B'] }))
+    ).toEqual(single)
+    expect(
+      agentQuestion(askTool({ question: 'Which?', options: ['A'] }))
+    ).toBeNull()
+    expect(
+      agentQuestion({
+        ...askTool({ question: 'Which?', options: ['A', 'B'] }),
+        is_error: true,
+      })
+    ).toBeNull()
+  })
+
+  it('becomes a reply item', () => {
+    const tool = askTool({
+      question: 'Which?',
+      options: ['A', 'B'],
+      multiple: true,
+    })
+    const message = assistant({
+      content_blocks: [{ type: 'tool_use', tool_call_id: 'q1' }],
+      tool_calls: [tool],
+    })
+    expect(assistantReplyItems([{ message }])).toEqual([
+      { type: 'question', toolId: 'q1', question: multi },
+    ])
+  })
+
+  it('round-trips answers to selected options', () => {
+    expect(questionAnswerText(single, ['B'])).toBe('B')
+    // Option order, not click order
+    const text = questionAnswerText(multi, ['B', 'A'])
+    expect(text).toBe('- A\n- B')
+    expect(selectedOptions(multi, text)).toEqual(['A', 'B'])
+    expect(selectedOptions(single, 'B')).toEqual(['B'])
+    expect(selectedOptions(single, 'Neither, use C')).toEqual([])
+  })
+
+  it('answers with the next message the user wrote, not updates', () => {
+    expect(
+      nextUserAnswers([
+        assistant({ id: 'a1' }),
+        user('[Jean agent update] Automatic message\n\nx', 'u1'),
+        assistant({ id: 'a2' }),
+        user('B', 'u2'),
+        assistant({ id: 'a3' }),
+      ])
+    ).toEqual(['B', 'B', 'B', undefined, undefined])
   })
 })
 
