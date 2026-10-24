@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { parseServerResourceKey } from '@/lib/server-resource'
-import { useWorktree } from '@/services/projects'
+import { useProjects, useWorktree } from '@/services/projects'
 import {
   useAgentDetails,
   useAgentsList,
@@ -53,7 +53,7 @@ export function formatRelative(unixSeconds: number, now = Date.now()): string {
 /** One line that says what an approval will do, with names, not IDs. */
 export function describeApproval(
   approval: AgentApproval,
-  worktreeName?: string
+  targetName?: string
 ): string {
   const args = approval.args ?? {}
   const text = (key: string) =>
@@ -74,7 +74,7 @@ export function describeApproval(
   }
   // A deleted worktree has no name to look up: fall back to its folder name
   const target =
-    worktreeName ?? text('worktreePath').split(/[\\/]/).filter(Boolean).pop()
+    targetName ?? text('worktreePath').split(/[\\/]/).filter(Boolean).pop()
   const labels: Record<string, [string, string]> = {
     delete_worktree: ['Delete worktree', 'Delete a worktree'],
     permanently_delete_worktree: [
@@ -90,6 +90,7 @@ export function describeApproval(
       'Create a pull request for',
       'Create a pull request for a worktree',
     ],
+    remove_project: ['Remove project', 'Remove a project'],
   }
   const label = labels[approval.tool]
   if (!label) return approval.tool.replace(/_/g, ' ')
@@ -115,22 +116,28 @@ function useDecide(approval: AgentApproval) {
   return { run, isPending: decide.isPending }
 }
 
-function useWorktreeName(approval: AgentApproval): string | undefined {
+/** Name of the worktree or project an approval acts on, if it still exists. */
+function useTargetName(approval: AgentApproval): string | undefined {
   const { data: worktree } = useWorktree(
     (approval.args?.worktreeId as string | undefined) ?? null
   )
-  return worktree?.name
+  const { data: projects = [] } = useProjects()
+  const projectId = approval.args?.projectId as string | undefined
+  return (
+    worktree?.name ??
+    (projectId ? projects.find(p => p.id === projectId)?.name : undefined)
+  )
 }
 
 function ApprovalRow({ approval }: { approval: AgentApproval }) {
   const decide = useDecide(approval)
-  const worktreeName = useWorktreeName(approval)
+  const targetName = useTargetName(approval)
   const run = decide.run
   return (
     <li className="flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center">
       <div className="min-w-0 flex-1">
         <p className="text-sm text-foreground">
-          {describeApproval(approval, worktreeName)}
+          {describeApproval(approval, targetName)}
         </p>
         {approval.status !== 'pending' && (
           <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -194,12 +201,12 @@ export function AgentApprovalInline({
 
 function ApprovalQuestion({ approval }: { approval: AgentApproval }) {
   const decide = useDecide(approval)
-  const worktreeName = useWorktreeName(approval)
+  const targetName = useTargetName(approval)
   const pending = approval.status === 'pending'
   return (
     <AgentQuestionCard
       question={{
-        question: `${describeApproval(approval, worktreeName)}?`,
+        question: `${describeApproval(approval, targetName)}?`,
         options: [APPROVE, DENY],
         multiple: false,
       }}

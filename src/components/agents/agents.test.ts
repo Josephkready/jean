@@ -157,6 +157,19 @@ describe('describeApproval', () => {
       })
     ).toBe('Push worktree fix-login')
     expect(
+      describeApproval(
+        { ...approval, tool: 'remove_project', args: { projectId: 'p-1' } },
+        'my-app'
+      )
+    ).toBe('Remove project my-app')
+    expect(
+      describeApproval({
+        ...approval,
+        tool: 'remove_project',
+        args: { projectId: 'p-1' },
+      })
+    ).toBe('Remove a project')
+    expect(
       describeApproval({ ...approval, tool: 'custom_tool', args: {} })
     ).toBe('custom tool')
   })
