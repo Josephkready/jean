@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { invoke } from '@/lib/transport'
 import { logger } from '@/lib/logger'
 import type {
@@ -15,6 +15,7 @@ import type {
   RepositoryAdvisory,
   LoadedAdvisoryContext,
   GitHubDiscussion,
+  GitHubDiscussionPage,
   GitHubDiscussionDetail,
   LoadedDiscussionContext,
   AttachedSavedContext,
@@ -910,19 +911,29 @@ export function useGitHubDiscussions(
   state: 'open' | 'closed' | 'all' = 'open',
   options?: { enabled?: boolean; staleTime?: number }
 ) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: githubQueryKeys.discussions(projectPath ?? '', state),
-    queryFn: async (): Promise<GitHubDiscussion[]> => {
-      if (!isTauri() || !projectPath) return []
+    queryFn: async ({ pageParam }): Promise<GitHubDiscussionPage> => {
+      if (!isTauri() || !projectPath) {
+        return {
+          discussions: [],
+          totalCount: 0,
+          endCursor: null,
+          hasNextPage: false,
+        }
+      }
 
       try {
         logger.debug('Fetching GitHub discussions', { projectPath, state })
-        const discussions = await invoke<GitHubDiscussion[]>(
+        const page = await invoke<GitHubDiscussionPage>(
           'list_github_discussions',
-          { projectPath, state }
+          { projectPath, state, after: pageParam }
         )
-        logger.info('GitHub discussions loaded', { count: discussions.length })
-        return discussions
+        logger.info('GitHub discussions loaded', {
+          count: page.discussions.length,
+          totalCount: page.totalCount,
+        })
+        return page
       } catch (error) {
         logger.error('Failed to load GitHub discussions', {
           error,
@@ -931,6 +942,10 @@ export function useGitHubDiscussions(
         throw error
       }
     },
+    initialPageParam: null as string | null,
+    getNextPageParam: lastPage =>
+      lastPage.hasNextPage ? lastPage.endCursor : undefined,
+    select: data => data.pages.flatMap(page => page.discussions),
     enabled: (options?.enabled ?? true) && !!projectPath,
     staleTime: options?.staleTime ?? 1000 * 60 * 2,
     gcTime: 1000 * 60 * 10,

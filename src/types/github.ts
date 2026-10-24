@@ -253,6 +253,14 @@ export interface GitHubDiscussion {
 }
 
 /** Discussion with full markdown content, including comments */
+/** One page of discussions; `endCursor` fetches the next page */
+export interface GitHubDiscussionPage {
+  discussions: GitHubDiscussion[]
+  totalCount: number
+  endCursor: string | null
+  hasNextPage: boolean
+}
+
 export interface GitHubDiscussionDetail extends GitHubDiscussion {
   content: string
 }

@@ -154,6 +154,9 @@ export function useNewWorktreeData(
     isFetching: isRefetchingDiscussions,
     error: discussionsError,
     refetch: refetchDiscussions,
+    hasNextPage: hasMoreDiscussions,
+    fetchNextPage: fetchMoreDiscussions,
+    isFetchingNextPage: isLoadingMoreDiscussions,
   } = useGitHubDiscussions(selectedProject?.path ?? null, discussionState)
 
   const { data: searchedDiscussions, isFetching: isSearchingDiscussions } =
@@ -330,6 +333,9 @@ export function useNewWorktreeData(
     isSearchingDiscussions,
     discussionsError,
     refetchDiscussions,
+    hasMoreDiscussions,
+    fetchMoreDiscussions,
+    isLoadingMoreDiscussions,
 
     // Remotes
     remotes,

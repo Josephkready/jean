@@ -1108,8 +1108,10 @@ pub async fn dispatch_command(
         "list_github_discussions" => {
             let project_path: String = field(&args, "projectPath", "project_path")?;
             let state: Option<String> = from_field_opt(&args, "state")?;
+            let after: Option<String> = from_field_opt(&args, "after")?;
             let result =
-                crate::projects::list_github_discussions(app.clone(), project_path, state).await?;
+                crate::projects::list_github_discussions(app.clone(), project_path, state, after)
+                    .await?;
             to_value(result)
         }
         "search_github_discussions" => {

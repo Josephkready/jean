@@ -634,6 +634,9 @@ function NewWorktreeModalContent() {
                 isSearching={data.isSearchingDiscussions}
                 error={data.discussionsError}
                 onRefresh={() => data.refetchDiscussions()}
+                hasMore={!searchQuery.trim() && data.hasMoreDiscussions}
+                isLoadingMore={data.isLoadingMoreDiscussions}
+                onLoadMore={() => void data.fetchMoreDiscussions()}
                 selectedIndex={selectedItemIndex}
                 setSelectedIndex={setSelectedItemIndex}
                 onSelectDiscussion={handlers.handleSelectDiscussion}

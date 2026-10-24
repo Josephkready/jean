@@ -172,6 +172,7 @@ export function useContextMentionData({
   includeClosed,
   issueLimit = 8,
   prLimit = 8,
+  discussionLimit = 8,
 }: {
   open: boolean
   projectPath: string | null
@@ -180,7 +181,13 @@ export function useContextMentionData({
   includeClosed: boolean
   issueLimit?: number
   prLimit?: number
-}): { groups: ContextMentionGroup[]; isFetching: boolean } {
+  discussionLimit?: number
+}): {
+  groups: ContextMentionGroup[]
+  isFetching: boolean
+  /** Fetch the next GitHub page when `limit` passes the loaded discussions */
+  loadMoreDiscussions: (limit: number) => void
+} {
   const enabledProjectPath = open ? projectPath : null
   const enabledProjectId = open ? projectId : null
   const activeQuery = open ? query : ''
@@ -204,8 +211,14 @@ export function useContextMentionData({
     prState,
     { enabled: open, ownerId: enabledProjectId ?? undefined }
   )
-  const { data: discussions = [], isFetching: isFetchingDiscussions } =
-    useGitHubDiscussions(enabledProjectPath, discussionState, { enabled: open })
+  const {
+    data: discussions = [],
+    isFetching: isFetchingDiscussions,
+    hasNextPage: hasMoreDiscussionPages,
+    fetchNextPage: fetchNextDiscussionPage,
+  } = useGitHubDiscussions(enabledProjectPath, discussionState, {
+    enabled: open,
+  })
   const { data: alerts = [], isFetching: isFetchingAlerts } =
     useDependabotAlerts(enabledProjectPath, securityState, { enabled: open })
   const { data: advisories = [], isFetching: isFetchingAdvisories } =
@@ -345,7 +358,12 @@ export function useContextMentionData({
       {
         id: 'discussion',
         heading: 'GitHub Discussions',
-        items: filteredDiscussions.slice(0, 8).map(discussionToItem),
+        items: filteredDiscussions
+          .slice(0, discussionLimit)
+          .map(discussionToItem),
+        hasMore:
+          filteredDiscussions.length > discussionLimit ||
+          (!q && hasMoreDiscussionPages),
       },
       {
         id: 'security',
@@ -373,7 +391,9 @@ export function useContextMentionData({
     activeQuery,
     advisories,
     alerts,
+    discussionLimit,
     discussions,
+    hasMoreDiscussionPages,
     exactAdvisory,
     exactDiscussion,
     exactIssue,
@@ -396,8 +416,15 @@ export function useContextMentionData({
     searchedPRs,
   ])
 
+  const loadMoreDiscussions = (limit: number) => {
+    if (limit > discussions.length && hasMoreDiscussionPages) {
+      void fetchNextDiscussionPage()
+    }
+  }
+
   return {
     groups,
+    loadMoreDiscussions,
     isFetching:
       isFetchingIssues ||
       isFetchingPRs ||

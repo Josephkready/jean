@@ -31,6 +31,9 @@ interface GitHubDiscussionsTabProps {
   isSearching: boolean
   error: Error | null
   onRefresh: () => void
+  hasMore: boolean
+  isLoadingMore: boolean
+  onLoadMore: () => void
   selectedIndex: number
   setSelectedIndex: (index: number) => void
   onSelectDiscussion: (
@@ -55,6 +58,9 @@ export function GitHubDiscussionsTab({
   isSearching,
   error,
   onRefresh,
+  hasMore,
+  isLoadingMore,
+  onLoadMore,
   selectedIndex,
   setSelectedIndex,
   onSelectDiscussion,
@@ -166,6 +172,19 @@ export function GitHubDiscussionsTab({
                 />
               )
             })}
+            {hasMore && (
+              <button
+                type="button"
+                onClick={onLoadMore}
+                disabled={isLoadingMore}
+                className="flex w-full items-center justify-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+              >
+                {isLoadingMore && (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                )}
+                Load more discussions
+              </button>
+            )}
           </div>
         )}
       </ScrollArea>

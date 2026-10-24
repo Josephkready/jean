@@ -40,6 +40,16 @@ pub struct GitHubDiscussion {
     pub updated_at: String,
 }
 
+/// One page of discussions; pass `end_cursor` back as `after` for the next page
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubDiscussionPage {
+    pub discussions: Vec<GitHubDiscussion>,
+    pub total_count: u32,
+    pub end_cursor: Option<String>,
+    pub has_next_page: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubDiscussionDetail {
@@ -166,22 +176,41 @@ fn graphql_data(stdout: &str) -> Result<serde_json::Value, String> {
     }
 }
 
-fn parse_discussion_list_response(stdout: &str) -> Result<Vec<GitHubDiscussion>, String> {
+fn parse_discussion_list_response(stdout: &str) -> Result<GitHubDiscussionPage, String> {
     let data = graphql_data(stdout)?;
     let repository = data
         .get("repository")
         .filter(|repo| !repo.is_null())
         .ok_or_else(|| "Repository not found".to_string())?;
     if repository.get("hasDiscussionsEnabled") == Some(&serde_json::Value::Bool(false)) {
-        return Ok(Vec::new());
+        return Ok(GitHubDiscussionPage::default());
     }
-    let nodes = repository
-        .pointer("/discussions/nodes")
+    let connection = repository
+        .get("discussions")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let nodes = connection
+        .get("nodes")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
     let raw: Vec<RawDiscussion> =
         serde_json::from_value(nodes).map_err(|e| format!("Failed to parse discussions: {e}"))?;
-    Ok(raw.iter().map(RawDiscussion::summary).collect())
+    let page_info = connection.get("pageInfo");
+    Ok(GitHubDiscussionPage {
+        discussions: raw.iter().map(RawDiscussion::summary).collect(),
+        total_count: connection
+            .get("totalCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default() as u32,
+        end_cursor: page_info
+            .and_then(|info| info.get("endCursor"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        has_next_page: page_info
+            .and_then(|info| info.get("hasNextPage"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
 }
 
 fn parse_discussion_search_response(stdout: &str) -> Result<Vec<GitHubDiscussion>, String> {
@@ -327,6 +356,8 @@ fn run_gh_graphql(
     Ok(stdout)
 }
 
+const DISCUSSION_PAGE_SIZE: u32 = 50;
+
 fn list_query(state: Option<&str>) -> Result<String, String> {
     let states = match state.unwrap_or("open") {
         "open" => "states: [OPEN], ",
@@ -335,7 +366,7 @@ fn list_query(state: Option<&str>) -> Result<String, String> {
         other => return Err(format!("Invalid discussion state: {other}")),
     };
     Ok(format!(
-        "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ hasDiscussionsEnabled discussions(first: 100, {states}orderBy: {{field: UPDATED_AT, direction: DESC}}) {{ nodes {{ {DISCUSSION_FIELDS} comments {{ totalCount }} }} }} }} }}"
+        "query($owner: String!, $name: String!, $after: String) {{ repository(owner: $owner, name: $name) {{ hasDiscussionsEnabled discussions(first: {DISCUSSION_PAGE_SIZE}, after: $after, {states}orderBy: {{field: UPDATED_AT, direction: DESC}}) {{ totalCount pageInfo {{ endCursor hasNextPage }} nodes {{ {DISCUSSION_FIELDS} comments {{ totalCount }} }} }} }} }}"
     ))
 }
 
@@ -351,22 +382,25 @@ fn detail_query() -> String {
     )
 }
 
-/// List discussions, most recently updated first. state: "open" | "closed" | "all".
-/// Returns an empty list when the repository has discussions disabled.
+/// List one page of discussions, most recently updated first.
+/// state: "open" | "closed" | "all". `after` is the previous page's end cursor.
+/// Returns an empty page when the repository has discussions disabled.
 pub async fn list_github_discussions(
     app: AppHandle,
     project_path: String,
     state: Option<String>,
-) -> Result<Vec<GitHubDiscussion>, String> {
+    after: Option<String>,
+) -> Result<GitHubDiscussionPage, String> {
     let repo_id = get_repo_identifier(&project_path)?;
     let query = list_query(state.as_deref())?;
-    let stdout = run_gh_graphql(
-        &app,
-        &project_path,
-        &query,
-        &[("owner", &repo_id.owner), ("name", &repo_id.repo)],
-        &[],
-    )?;
+    let mut string_vars = vec![
+        ("owner", repo_id.owner.as_str()),
+        ("name", repo_id.repo.as_str()),
+    ];
+    if let Some(after) = after.as_deref() {
+        string_vars.push(("after", after));
+    }
+    let stdout = run_gh_graphql(&app, &project_path, &query, &string_vars, &[])?;
     parse_discussion_list_response(&stdout)
 }
 
@@ -621,7 +655,7 @@ mod tests {
 
     #[test]
     fn list_parses_nodes_with_null_is_answered_and_missing_author_category() {
-        let stdout = r#"{"data":{"repository":{"hasDiscussionsEnabled":true,"discussions":{"nodes":[
+        let stdout = r#"{"data":{"repository":{"hasDiscussionsEnabled":true,"discussions":{"totalCount":120,"pageInfo":{"endCursor":"Y3Vyc29yOjUw","hasNextPage":true},"nodes":[
             {"number":7,"title":"Q","body":"b","url":"https://github.com/o/r/discussions/7","closed":false,"isAnswered":true,
              "createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z","author":{"login":"alice"},
              "category":{"name":"Q&A","emoji":":pray:"},"comments":{"totalCount":4}},
@@ -629,10 +663,13 @@ mod tests {
              "createdAt":"2026-01-03T00:00:00Z","updatedAt":"2026-01-04T00:00:00Z","author":null,"category":null,"comments":{"totalCount":0}}
         ]}}}}"#;
 
-        let discussions = parse_discussion_list_response(stdout).unwrap();
+        let page = parse_discussion_list_response(stdout).unwrap();
 
+        assert_eq!(page.total_count, 120);
+        assert_eq!(page.end_cursor.as_deref(), Some("Y3Vyc29yOjUw"));
+        assert!(page.has_next_page);
         assert_eq!(
-            discussions,
+            page.discussions,
             vec![
                 GitHubDiscussion {
                     number: 7,
@@ -673,7 +710,10 @@ mod tests {
     fn list_returns_empty_when_discussions_disabled() {
         let stdout =
             r#"{"data":{"repository":{"hasDiscussionsEnabled":false,"discussions":{"nodes":[]}}}}"#;
-        assert_eq!(parse_discussion_list_response(stdout).unwrap(), vec![]);
+        assert_eq!(
+            parse_discussion_list_response(stdout).unwrap(),
+            GitHubDiscussionPage::default()
+        );
     }
 
     #[test]
