@@ -461,6 +461,59 @@ describe('CompactMessageList', () => {
     ).toBeTruthy()
   })
 
+  it('shows an inline numbered question with the recap', () => {
+    const onSendAnswer = vi.fn()
+    const text =
+      'Which mode do you want?\n\nReply with a number:\n\n1. Grid\n2. List\n\n## Recap\n\nWaiting for your choice.'
+    const messages = [
+      message('user-1', 'user', 100, 'add modes'),
+      message('assistant-1', 'assistant', 104, text, {
+        tool_calls: [{ id: 'tool-1', name: 'Read', input: { path: 'a.ts' } }],
+        content_blocks: [
+          { type: 'tool_use', tool_call_id: 'tool-1' },
+          { type: 'text', text },
+        ],
+      }),
+    ]
+    const { rerender } = renderCompact(messages, { onSendAnswer })
+
+    const recap = screen.getByText('Waiting for your choice.')
+    const question = screen.getByText('Which mode do you want?')
+    expect(
+      recap.compareDocumentPosition(question) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'List' }))
+    expect(onSendAnswer).toHaveBeenCalledWith('2. List')
+
+    const answered = [...messages, message('user-2', 'user', 110, '2. List')]
+    rerender(
+      <CompactMessageList
+        messages={answered}
+        scrollContainerRef={createRef<HTMLDivElement>()}
+        totalMessages={answered.length}
+        lastPlanMessageIndex={-1}
+        sessionId="session-1"
+        worktreePath="/tmp/worktree"
+        approveShortcut="Cmd+Enter"
+        isSending={false}
+        onPlanApproval={vi.fn()}
+        onQuestionAnswer={noopQuestionAnswer}
+        onQuestionSkip={vi.fn()}
+        onFileClick={vi.fn()}
+        onFixFinding={noopFixFinding}
+        onFixAllFindings={noopFixAllFindings}
+        isQuestionAnswered={vi.fn(() => false)}
+        getSubmittedAnswers={vi.fn(() => undefined)}
+        areQuestionsSkipped={vi.fn(() => false)}
+        isFindingFixed={vi.fn(() => false)}
+        onSendAnswer={onSendAnswer}
+      />
+    )
+    expect(
+      screen.queryByRole('button', { name: 'Grid' })
+    ).not.toBeInTheDocument()
+  })
+
   it('shows edited files after surfaced latest text when recap is absent', () => {
     renderCompact([
       message('user-1', 'user', 100, 'make the change'),

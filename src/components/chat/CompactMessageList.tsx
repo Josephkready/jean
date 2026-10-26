@@ -59,8 +59,13 @@ import { AgentApprovalInline } from '@/components/agents/AgentActivity'
 import { AgentMessageLinkRow } from '@/components/agents/AgentMessageLink'
 import { AgentQuestionCard } from '@/components/agents/AgentQuestionCard'
 import {
+  inlineQuestionAnswer,
+  parseInlineNumberedQuestion,
+} from './inline-question-utils'
+import {
   assistantReplyItems,
   nextUserAnswers,
+  type AgentQuestion,
 } from '@/components/agents/agent-messages'
 import {
   TOOL_CALL_ROW_CLASS,
@@ -144,6 +149,8 @@ type RenderItem =
       messages: { message: ChatMessage; globalIndex: number }[]
       key: string
       latestText: string | null
+      /** Numbered question that the latest text asks ("reply with a number") */
+      inlineQuestion: AgentQuestion | null
     }
   | { kind: 'question'; message: ChatMessage; globalIndex: number }
   | {
@@ -258,9 +265,7 @@ function isPureTextAssistantMessage(message: ChatMessage): boolean {
 
 /**
  * Returns the latest assistant prose text in a compact group as plain text.
- * Walks newest → oldest and returns the first non-empty result. If the latest
- * message contains a `## Recap` section, only that section is returned so the
- * compact view surfaces the wrap-up instead of replaying the whole turn.
+ * Walks newest → oldest and returns the first non-empty result.
  */
 function findLatestAssistantText(
   group: { message: ChatMessage }[]
@@ -295,10 +300,7 @@ function findLatestAssistantText(
         : message.content?.trim()
     if (!text) continue
 
-    const combined = text
-    if (!combined.trim()) continue
-    const recap = extractRecapSection(combined)
-    if (recap) return recap
+    if (!text.trim()) continue
     return text
   }
   return null
@@ -858,11 +860,14 @@ export const CompactMessageList = memo(
             buffer.length === 1
               ? `compact-${first.message.id}`
               : `compact-${first.message.id}-${last.message.id}`
+          const text = findLatestAssistantText(buffer)
           items.push({
             kind: 'compact',
             messages: buffer,
             key: compactKey,
-            latestText: findLatestAssistantText(buffer),
+            // A `## Recap` section replaces the whole turn in the compact view
+            latestText: text && (extractRecapSection(text) ?? text),
+            inlineQuestion: text ? parseInlineNumberedQuestion(text) : null,
           })
           buffer = []
         }
@@ -1009,7 +1014,6 @@ export const CompactMessageList = memo(
             bubble={extra.bubble}
             hideSettingsBadges={hideToolActivity}
             durationMs={extra.durationMs}
-            onSendAnswer={onSendAnswer}
           />
         ),
         [
@@ -1043,7 +1047,6 @@ export const CompactMessageList = memo(
           onCopyToInput,
           hideApproveButtons,
           hideToolActivity,
-          onSendAnswer,
         ]
       )
 
@@ -1359,6 +1362,7 @@ export const CompactMessageList = memo(
               Boolean(item.latestText) &&
               !(latestTextIsRecap && latestRunHasPlan)
             const surfaceRecap = latestTextIsRecap && showLatestText
+            const inlineQuestion = item.inlineQuestion
             const surfacedLatestToolCalls =
               isLatestCompact && (showLatestText || hasCancelledMessage)
                 ? latestCompactToolCalls
@@ -1386,6 +1390,18 @@ export const CompactMessageList = memo(
                       >
                         {item.latestText ?? ''}
                       </Markdown>
+                    )}
+                    {showLatestText && inlineQuestion && onSendAnswer && (
+                      <AgentQuestionCard
+                        question={inlineQuestion}
+                        answer={undefined}
+                        disabled={isSending}
+                        onSend={option =>
+                          onSendAnswer(
+                            inlineQuestionAnswer(inlineQuestion, option)
+                          )
+                        }
+                      />
                     )}
                     {surfacedLatestToolCalls.length > 0 && (
                       <EditedFilesDisplay

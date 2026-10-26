@@ -167,11 +167,7 @@ fn emit_cache_keys(app: &AppHandle, keys: &[&str]) {
 #[derive(Debug, Clone, PartialEq)]
 enum SessionRole {
     /// Conversation with the user, with the end of the previous chat.
-    /// `recap` follows the user's auto-recap preference.
-    Chat {
-        carry_over: Option<String>,
-        recap: bool,
-    },
+    Chat { carry_over: Option<String> },
     /// Background work (schedule, follow-up, agent request).
     Task,
 }
@@ -280,10 +276,7 @@ pub fn system_prompt_for(app: &AppHandle, worktree_id: &str, hint: Option<&str>)
     let role = if is_task {
         SessionRole::Task
     } else {
-        SessionRole::Chat {
-            carry_over,
-            recap: crate::chat::should_add_recap_instruction(app),
-        }
+        SessionRole::Chat { carry_over }
     };
     let mcp = crate::jean_mcp_config::current_mode().server_name();
     Some(render_system_prompt(
@@ -334,11 +327,9 @@ fn render_system_prompt(
         out.push_str("- Updating another agent or deleting an agent returns `approvalRequired`. You cannot delete yourself without that approval.\n");
     }
     match role {
-        SessionRole::Chat { carry_over, recap } => {
+        SessionRole::Chat { carry_over } => {
             out.push_str("\n## This session: chat with the user\n- The user talks with you here. Background work (schedules, follow-ups of tasks, requests from other agents) runs in separate task sessions. Use `task_list` when the user asks about it.\n- The user sees only your text, not your tool calls. Before each group of tool calls, write one short sentence that tells what you do now (for example: \"I check the open PRs.\"). When a step gives a result, write one short line about it.\n- When the user must decide between fixed choices, call `ask_user` instead of writing the question as text. Give the question and two to eight short options. Set `multiple` to true only when the user can pick more than one. Do not add a \"something else\" option: the user can always type an answer. Then end your turn. The answer arrives as the next user message.\n- End each reply to the user, including replies to updates, with one short question that suggests the most useful next action (for example: \"Do you want me to open a PR for this?\"). When there is more than one good path, ask it with `ask_user` and one to three concrete options. Do not ask when the user only said thanks or ended the conversation.\n");
-            if *recap {
-                out.push_str(AGENT_RECAP_INSTRUCTION);
-            }
+            out.push_str(AGENT_RECAP_INSTRUCTION);
             if let Some(text) = carry_over.as_deref().filter(|t| !t.trim().is_empty()) {
                 out.push_str("\n## End of your previous chat\nThe previous chat was archived because it was long. Its end:\n");
                 out.push_str(text.trim());
@@ -466,7 +457,6 @@ mod tests {
             "jean",
             &SessionRole::Chat {
                 carry_over: Some("User: deploy orbit".into()),
-                recap: true,
             },
         );
         assert!(prompt.contains("chat with the user"));

@@ -70,31 +70,6 @@ Rules:
 - Skip the recap entirely if the turn was a single one-line answer with no tool calls.
 - Do NOT repeat tool inputs, file diffs, or raw command output verbatim. Summarize.";
 
-pub(crate) fn should_add_recap_instruction(app: &tauri::AppHandle) -> bool {
-    should_include_recap_instruction(app, true)
-}
-
-/// Whether this send should append `RECAP_INSTRUCTION`.
-///
-/// `include_recap` is the per-send override. Structured deliverables such as
-/// magic release notes set this to `false` so the recap does not replace the
-/// actual output.
-pub(crate) fn should_include_recap_instruction(
-    app: &tauri::AppHandle,
-    include_recap: bool,
-) -> bool {
-    recap_instruction_enabled(
-        include_recap,
-        crate::load_preferences_sync(app)
-            .map(|preferences| preferences.auto_recaps_enabled)
-            .unwrap_or(true),
-    )
-}
-
-pub(crate) fn recap_instruction_enabled(include_recap: bool, auto_recaps_enabled: bool) -> bool {
-    include_recap && auto_recaps_enabled
-}
-
 /// Injected when the parallel-execution magic prompt is cleared. Omitting the
 /// fan-out prompt is not enough: the model still spawns Task sub-agents unless
 /// it is told not to.
@@ -146,14 +121,6 @@ mod tests {
     fn recap_requests_local_dev_env_tested_line() {
         assert!(RECAP_INSTRUCTION.contains("Tested against local dev env: Yes"));
         assert!(RECAP_INSTRUCTION.contains("Tested against local dev env: No"));
-    }
-
-    #[test]
-    fn recap_instruction_is_skipped_when_send_disables_it() {
-        assert!(!super::recap_instruction_enabled(false, true));
-        assert!(!super::recap_instruction_enabled(false, false));
-        assert!(!super::recap_instruction_enabled(true, false));
-        assert!(super::recap_instruction_enabled(true, true));
     }
 
     #[test]

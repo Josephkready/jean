@@ -52,17 +52,18 @@ export function parseInlineNumberedQuestion(
   if (!found || found.options.length > MAX_OPTIONS) return null
   if (new Set(found.options).size !== found.options.length) return null
 
-  const questionLine = plain(
-    lines
-      .slice(0, found.start)
-      .reverse()
-      .find(line => line.trim()) ?? ''
-  )
+  // The question is the last line before the list, without the cue
+  const question = lines
+    .slice(0, found.start)
+    .reverse()
+    .map(line =>
+      plain(line)
+        .replace(new RegExp(`${REPLY_CUE_RE.source}[^.:?!]*[.:]?`, 'i'), '')
+        .trim()
+    )
+    .find(Boolean)
   return {
-    question:
-      questionLine && !REPLY_CUE_RE.test(questionLine)
-        ? questionLine
-        : 'Choose an option',
+    question: question ?? 'Choose an option',
     options: found.options,
     multiple: false,
   }

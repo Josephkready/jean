@@ -234,8 +234,6 @@ pub struct AppPreferences {
     pub compact_chat_view_enabled: bool, // Collapse intermediate tool calls into single ticker line
     #[serde(default = "default_sidebar_hover_open_enabled")]
     pub sidebar_hover_open_enabled: bool, // Temporarily reveal collapsed sidebar from left edge
-    #[serde(default = "default_auto_recaps_enabled")]
-    pub auto_recaps_enabled: bool, // Ask agents to end multi-step turns with a recap block
     #[serde(default = "default_keep_ai_servers_warm")]
     pub keep_ai_servers_warm: bool, // Keep Codex/OpenCode servers alive briefly after a request
     #[serde(default)]
@@ -697,10 +695,6 @@ fn default_compact_chat_view_enabled() -> bool {
 
 fn default_sidebar_hover_open_enabled() -> bool {
     false // Opt-in for new and existing installs
-}
-
-fn default_auto_recaps_enabled() -> bool {
-    true // Enabled by default
 }
 
 fn default_keep_ai_servers_warm() -> bool {
@@ -3332,7 +3326,6 @@ impl Default for AppPreferences {
             syntax_theme_light: default_syntax_theme_light(),
             compact_chat_view_enabled: default_compact_chat_view_enabled(),
             sidebar_hover_open_enabled: default_sidebar_hover_open_enabled(),
-            auto_recaps_enabled: default_auto_recaps_enabled(),
             keep_ai_servers_warm: default_keep_ai_servers_warm(),
             magic_prompts: MagicPrompts::default(),
             magic_prompt_models: MagicPromptModels::default(),

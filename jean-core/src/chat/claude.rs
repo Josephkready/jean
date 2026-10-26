@@ -1014,7 +1014,7 @@ fn build_claude_args(
 
     // End-of-turn recap instruction (compact view surfaces this block).
     // Magic release notes skip this — the recap would cover the actual notes.
-    if super::should_include_recap_instruction(app, include_recap) {
+    if include_recap {
         system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
     }
 

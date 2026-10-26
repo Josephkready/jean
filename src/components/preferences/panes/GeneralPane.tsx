@@ -4194,20 +4194,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             </InlineField>
 
             <InlineField
-              label="Automatic recaps"
-              description="Ask agents to end multi-step turns with a ## Recap section. Existing recaps remain viewable when this is off."
-            >
-              <Switch
-                checked={preferences?.auto_recaps_enabled ?? true}
-                onCheckedChange={checked => {
-                  patchPreferences.mutate({
-                    auto_recaps_enabled: checked,
-                  })
-                }}
-              />
-            </InlineField>
-
-            <InlineField
               label="Keep AI servers warm"
               description="Keep Codex and OpenCode running for 10 minutes after a request so follow-up prompts start faster"
             >

@@ -238,10 +238,6 @@ describe('magic prompt preference resolvers', () => {
     expect(prompt).toContain('until the latest pushed commit is green')
   })
 
-  it('keeps automatic recaps on by default', () => {
-    expect(defaultPreferences.auto_recaps_enabled).toBe(true)
-  })
-
   it('shows filenames in mention badges and enables chat spellcheck by default', () => {
     expect(defaultPreferences.show_full_file_path).toBe(false)
     expect(defaultPreferences.spellcheck_enabled).toBe(true)

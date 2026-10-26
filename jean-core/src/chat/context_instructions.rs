@@ -142,7 +142,7 @@ fn build_system_prompt_parts(
         }
     }
 
-    if super::should_include_recap_instruction(app, include_recap) {
+    if include_recap {
         parts.push(super::RECAP_INSTRUCTION.to_string());
     }
 

@@ -24,7 +24,7 @@ describe('parseInlineNumberedQuestion', () => {
     ].join('\n')
 
     expect(parseInlineNumberedQuestion(text)).toEqual({
-      question: 'Choose an option',
+      question: 'Which mode do you want?',
       options: [
         'Select + Hand buttons (my recommendation)',
         'Strict Excalidraw modes',
@@ -52,6 +52,16 @@ describe('parseInlineNumberedQuestion', () => {
       options: ['Open a PR', 'Keep working'],
       multiple: false,
     })
+  })
+
+  it('keeps a question that shares its line with the cue', () => {
+    expect(
+      parseInlineNumberedQuestion('Which one? Reply with a number:\n1. A\n2. B')
+        ?.question
+    ).toBe('Which one?')
+    expect(
+      parseInlineNumberedQuestion('Reply with a number:\n1. A\n2. B')?.question
+    ).toBe('Choose an option')
   })
 
   it('returns null without the cue or without a valid list', () => {
