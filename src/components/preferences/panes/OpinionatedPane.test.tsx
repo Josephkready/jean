@@ -2,6 +2,8 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { render, screen, waitFor, within } from '@/test/test-utils'
 import { invoke } from '@/lib/transport'
+import { openExternal } from '@/lib/platform'
+import { useUIStore } from '@/store/ui-store'
 import { OpinionatedPane } from './OpinionatedPane'
 
 vi.mock('@/lib/transport', () => ({
@@ -22,6 +24,7 @@ vi.mock('sonner', () => ({
 
 describe('OpinionatedPane', () => {
   beforeEach(() => {
+    useUIStore.getState().closeCliLoginModal()
     vi.clearAllMocks()
     vi.mocked(invoke).mockImplementation(async command => {
       if (command === 'check_opinionated_plugin_status') {
@@ -216,5 +219,159 @@ describe('OpinionatedPane', () => {
     expect(
       screen.getByText(/requires glibc 2\.39 or newer/)
     ).toBeInTheDocument()
+  })
+
+  it('describes CLIProxyAPI as an external localhost proxy and can start it', async () => {
+    const user = userEvent.setup()
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      const pluginName = (args as { pluginName?: string })?.pluginName
+      if (command === 'check_opinionated_plugin_status') {
+        if (pluginName === 'cliproxyapi') {
+          return {
+            installed: true,
+            version: 'v8.0.43',
+            install_supported: true,
+            running: false,
+            endpoint: 'http://127.0.0.1:8317',
+            management_url: 'http://127.0.0.1:8317/management.html',
+            lan_exposed: false,
+            auth_file_count: 0,
+          }
+        }
+        return { installed: false, version: null, install_supported: true }
+      }
+      if (command === 'start_opinionated_plugin') {
+        return 'CLIProxyAPI is running at http://127.0.0.1:8317'
+      }
+      if (command === 'prepare_cliproxyapi_account_login') {
+        const provider = (args as { provider?: string })?.provider
+        return {
+          provider,
+          binary: '/home/ada/.jean/opinionated/cliproxyapi/cli-proxy-api',
+          args: [
+            '--config',
+            '/home/ada/.jean/opinionated/cliproxyapi/config.yaml',
+            provider === 'codex' ? '-codex-login' : '-claude-login',
+          ],
+          started_proxy: true,
+          message:
+            'CLIProxyAPI was stopped, so Jean started it. Jean does not keep a copy.',
+        }
+      }
+      throw new Error(`Unexpected command ${command}`)
+    })
+
+    render(<OpinionatedPane />)
+
+    const label = await screen.findByText('CLIProxyAPI')
+    const card = label.closest('.rounded-md')?.parentElement
+    if (!card) throw new Error('Expected CLIProxyAPI card')
+
+    expect(within(card as HTMLElement).getByText('Stopped')).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText('Local proxy (localhost)')
+    ).toBeInTheDocument()
+
+    await user.click(label)
+
+    expect(
+      within(card as HTMLElement).getByText(
+        /pooling and round-robin outside Jean/i
+      )
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText(
+        /does not store extra Claude or Codex/i
+      )
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText(/127\.0\.0\.1:8317\/v1/)
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText(/-claude-login/)
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText(/not in Jean/i)
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText(/0 OAuth files in CLIProxyAPI/)
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText(
+        /Jean does not read or copy those files/
+      )
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByRole('button', { name: 'MIT license' })
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).queryByRole('button', {
+        name: 'EasyCLIProxyAPI',
+      })
+    ).not.toBeInTheDocument()
+
+    await user.click(
+      within(card as HTMLElement).getByRole('button', {
+        name: 'Add Claude account',
+      })
+    )
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('prepare_cliproxyapi_account_login', {
+        provider: 'claude',
+      })
+    })
+    expect(useUIStore.getState().cliLoginModalOpen).toBe(true)
+    expect(useUIStore.getState().cliLoginModalType).toBe('cliproxyapi')
+    expect(useUIStore.getState().cliLoginModalCommand).toBe(
+      '/home/ada/.jean/opinionated/cliproxyapi/cli-proxy-api'
+    )
+    expect(useUIStore.getState().cliLoginModalCommandArgs).toEqual([
+      '--config',
+      '/home/ada/.jean/opinionated/cliproxyapi/config.yaml',
+      '-claude-login',
+    ])
+    useUIStore.getState().closeCliLoginModal()
+
+    await user.click(
+      within(card as HTMLElement).getByRole('button', {
+        name: 'Add Codex account',
+      })
+    )
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('prepare_cliproxyapi_account_login', {
+        provider: 'codex',
+      })
+    })
+    expect(useUIStore.getState().cliLoginModalCommandArgs).toEqual([
+      '--config',
+      '/home/ada/.jean/opinionated/cliproxyapi/config.yaml',
+      '-codex-login',
+    ])
+    useUIStore.getState().closeCliLoginModal()
+
+    await user.click(
+      within(card as HTMLElement).getByRole('button', {
+        name: 'Open management',
+      })
+    )
+    await waitFor(() => {
+      expect(openExternal).toHaveBeenCalledWith(
+        'http://127.0.0.1:8317/management.html'
+      )
+    })
+    expect(invoke).toHaveBeenCalledWith('start_opinionated_plugin', {
+      pluginName: 'cliproxyapi',
+    })
+
+    await user.click(
+      within(card as HTMLElement).getByRole('button', { name: 'Start' })
+    )
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('start_opinionated_plugin', {
+        pluginName: 'cliproxyapi',
+      })
+    })
   })
 })

@@ -1090,8 +1090,8 @@ pub fn execute_codex_via_server(
         existing_thread_id.is_some()
     );
 
-    // Ensure the app-server is running on this session's provider account.
-    codex_server::ensure_running_for_session(app, session_id)?;
+    // Ensure the app-server is running on the CLI's own Codex home.
+    codex_server::ensure_running(app)?;
     // The app-server outlives individual Jean sessions, so its MCP registry may
     // predate changes to ~/.codex/config.toml. Refresh it before starting or
     // resuming a thread so configured servers match a fresh Codex CLI process.
@@ -1570,8 +1570,8 @@ pub fn resume_codex_after_crash(
         "Codex crash recovery: session={session_id}, thread={thread_id}, had_active_turn={had_active_turn}"
     );
 
-    // 1. Ensure the app-server is running on this session's provider account.
-    codex_server::ensure_running_for_session(app, session_id)?;
+    // 1. Ensure the app-server is running on the CLI's own Codex home.
+    codex_server::ensure_running(app)?;
 
     // Register a SessionContext BEFORE calling thread/resume. The server may
     // start emitting notifications for the resumed thread immediately after
@@ -5324,6 +5324,9 @@ pub fn execute_one_shot_codex(
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    for (key, value) in crate::opinionated::cliproxyapi::codex_process_env() {
+        cmd.env(key, value);
+    }
 
     // Run in a new process group so a timeout kill can take down the whole tree.
     // Codex spawns MCP server children (e.g. chrome-devtools-mcp) that survive a

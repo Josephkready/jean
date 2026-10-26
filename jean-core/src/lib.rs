@@ -70,7 +70,6 @@ mod pi_cli;
 mod platform;
 mod prerequisites;
 mod projects;
-mod provider_accounts;
 mod server_update;
 mod terminal;
 mod ui_client_state;
@@ -327,12 +326,6 @@ pub struct AppPreferences {
     pub custom_codex_providers: Vec<CodexProviderProfile>, // Codex custom model_provider profiles
     #[serde(default)]
     pub default_codex_provider: Option<String>, // Default Codex provider profile name (None = built-in)
-    /// Named Claude/Codex logins. Auth lives in per-account config directories.
-    #[serde(default)]
-    pub provider_accounts: Vec<provider_accounts::ProviderAccount>,
-    /// Default account id for new sessions, keyed by backend ("claude", "codex").
-    #[serde(default)]
-    pub default_provider_accounts: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub custom_pi_providers: Vec<PiProviderProfile>, // PI custom providers (index; disk = models.json)
     #[serde(default)]
@@ -1707,6 +1700,31 @@ mod tests {
 
         let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
         assert!(!prefs.jean_mcp_enabled);
+    }
+
+    #[test]
+    fn app_preferences_ignore_obsolete_provider_account_fields() {
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        let object = prefs_json.as_object_mut().unwrap();
+        object.insert(
+            "provider_accounts".to_string(),
+            json!([{ "id": "acct-1", "backend": "claude", "label": "Work" }]),
+        );
+        object.insert(
+            "default_provider_accounts".to_string(),
+            json!({ "claude": "acct-1", "codex": "acct-2" }),
+        );
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(prefs.jean_mcp_enabled);
+        assert!(prefs.custom_cli_profiles.is_empty());
+        assert!(prefs.custom_codex_providers.is_empty());
+        assert!(prefs.custom_pi_providers.is_empty());
+
+        let saved = serde_json::to_value(&prefs).unwrap();
+        assert!(saved.get("provider_accounts").is_none());
+        assert!(saved.get("default_provider_accounts").is_none());
+        assert_eq!(saved["jean_mcp_enabled"], json!(true));
     }
 
     #[test]
@@ -3361,8 +3379,6 @@ impl Default for AppPreferences {
             default_provider: None,
             custom_codex_providers: Vec::new(),
             default_codex_provider: None,
-            provider_accounts: Vec::new(),
-            default_provider_accounts: std::collections::HashMap::new(),
             custom_pi_providers: Vec::new(),
             favorite_models: Vec::new(),
             favorite_package_scripts: Vec::new(),
@@ -4293,6 +4309,42 @@ async fn delete_cli_profile(name: String) -> Result<(), String> {
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Failed to delete: {e}"))?;
         log::trace!("Deleted CLI profile '{name}' at {}", path.display());
+    }
+    Ok(())
+}
+
+/// Add or refresh the CLIProxyAPI Claude settings file and Codex provider.
+/// Does not switch the user's default provider.
+pub(crate) async fn upsert_cliproxyapi_provider_profiles(
+    app: &AppHandle,
+    client_key: &str,
+) -> Result<(), String> {
+    let mut preferences = load_preferences(app.clone()).await?;
+    opinionated::cliproxyapi::upsert_provider_profiles(
+        &mut preferences.custom_cli_profiles,
+        &mut preferences.custom_codex_providers,
+        client_key,
+    );
+    save_preferences(app.clone(), preferences).await
+}
+
+/// Remove CLIProxyAPI provider profiles and the Claude settings file they use.
+pub(crate) async fn remove_cliproxyapi_provider_profiles(app: &AppHandle) -> Result<(), String> {
+    let mut preferences = load_preferences(app.clone()).await?;
+    let changed = opinionated::cliproxyapi::detach_provider_profiles(
+        &mut preferences.custom_cli_profiles,
+        &mut preferences.custom_codex_providers,
+        &mut preferences.default_provider,
+        &mut preferences.default_codex_provider,
+    );
+    if let Ok(path) = get_cli_profile_path(opinionated::cliproxyapi::PROFILE_NAME) {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("Failed to delete CLIProxyAPI Claude profile: {error}"))?;
+        }
+    }
+    if changed {
+        save_preferences(app.clone(), preferences).await?;
     }
     Ok(())
 }
@@ -5386,6 +5438,8 @@ pub fn initialize_runtime(context: &RuntimeContext) -> Result<(), String> {
         if let Err(error) = opinionated::sync_native_backend_skills_on_startup() {
             log::warn!("Failed to sync native backend skills: {error}");
         }
+        opinionated::cliproxyapi::export_client_key_to_process();
+        opinionated::cliproxyapi::resume_if_enabled();
     });
     Ok(())
 }

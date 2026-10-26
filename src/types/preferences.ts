@@ -1390,10 +1390,6 @@ export interface AppPreferences {
   custom_codex_providers: CodexProviderProfile[]
   /** Default Codex provider profile name (null = Codex default / ChatGPT OpenAI) */
   default_codex_provider: string | null
-  /** Named Claude and Codex logins. Each account has its own CLI config directory. */
-  provider_accounts?: ProviderAccount[]
-  /** Default account id for new sessions, keyed by backend ("claude" | "codex"). */
-  default_provider_accounts?: Record<string, string>
   /** PI custom providers mirrored into ~/.pi/agent/models.json */
   custom_pi_providers: PiProviderProfile[]
   favorite_models: string[] // Favourited model keys ("backend:model") shown at top of picker
@@ -1490,13 +1486,6 @@ export const terminalBackgroundOptions: {
   { value: 'custom', label: 'Custom color' },
 ]
 
-/** A named login for Claude or Codex, stored separately from the CLI's own home. */
-export interface ProviderAccount {
-  id: string
-  backend: string
-  label: string
-}
-
 export interface CustomCliProfile {
   name: string // Display name, e.g. "OpenRouter"
   settings_json: string // JSON string matching Claude CLI settings format (with env block)
@@ -1535,6 +1524,13 @@ export const PREDEFINED_CODEX_PROVIDERS: CodexProviderProfile[] = [
     env_key: 'OPENROUTER_API_KEY',
     wire_api: 'responses',
   },
+  {
+    name: 'CLIProxyAPI',
+    provider_id: 'cliproxyapi',
+    base_url: 'http://127.0.0.1:8317/v1',
+    env_key: 'CLIPROXYAPI_API_KEY',
+    wire_api: 'responses',
+  },
 ]
 
 export const PREDEFINED_PI_PROVIDERS: PiProviderProfile[] = [
@@ -1557,6 +1553,24 @@ export const PREDEFINED_PI_PROVIDERS: PiProviderProfile[] = [
 ]
 
 export const PREDEFINED_CLI_PROFILES: CustomCliProfile[] = [
+  {
+    name: 'CLIProxyAPI',
+    settings_json: JSON.stringify(
+      {
+        env: {
+          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317',
+          ANTHROPIC_AUTH_TOKEN:
+            '<filled when Opinionated CLIProxyAPI is installed>',
+          ANTHROPIC_API_KEY:
+            '<filled when Opinionated CLIProxyAPI is installed>',
+          CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+          API_TIMEOUT_MS: '600000',
+        },
+      },
+      null,
+      2
+    ),
+  },
   {
     name: 'OpenRouter',
     settings_json: JSON.stringify(
@@ -2597,8 +2611,6 @@ export const defaultPreferences: AppPreferences = {
   default_provider: null,
   custom_codex_providers: [],
   default_codex_provider: null,
-  provider_accounts: [],
-  default_provider_accounts: {},
   custom_pi_providers: [],
   favorite_models: [],
   favorite_package_scripts: [],
