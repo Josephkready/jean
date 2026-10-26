@@ -2970,6 +2970,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 ) : (
                                   <VirtualizedMessageList
                                     ref={virtualizedListRef}
+                                    onSendAnswer={sendMagicPrompt}
                                     messages={messages}
                                     scrollContainerRef={scrollViewportRef}
                                     totalMessages={messages.length}

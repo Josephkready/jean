@@ -1009,6 +1009,7 @@ export const CompactMessageList = memo(
             bubble={extra.bubble}
             hideSettingsBadges={hideToolActivity}
             durationMs={extra.durationMs}
+            onSendAnswer={onSendAnswer}
           />
         ),
         [
@@ -1042,6 +1043,7 @@ export const CompactMessageList = memo(
           onCopyToInput,
           hideApproveButtons,
           hideToolActivity,
+          onSendAnswer,
         ]
       )
 

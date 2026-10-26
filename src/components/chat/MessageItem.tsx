@@ -1,10 +1,15 @@
 import { memo, useCallback, useMemo } from 'react'
 import { AgentMessageFromRow } from '@/components/agents/AgentMessageLink'
 import { parseAgentSentMessage } from '@/components/agents/agent-messages'
+import { AgentQuestionCard } from '@/components/agents/AgentQuestionCard'
 import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { PILL_BUBBLE_CLASS, ReplyBubble } from './ReplyBubble'
 import { ChatContinuedNotice } from './ChatContinuedNotice'
+import {
+  inlineQuestionAnswer,
+  parseInlineNumberedQuestion,
+} from './inline-question-utils'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -177,6 +182,8 @@ interface MessageItemProps {
   bubble?: boolean
   /** Agent chat: hide backend, model, mode, and effort under the user prompt and show it as a pill */
   hideSettingsBadges?: boolean
+  /** Sends a user message (answers to inline numbered questions) */
+  onSendAnswer?: (text: string) => void
 }
 
 /**
@@ -221,6 +228,7 @@ export const MessageItem = memo(function MessageItem({
   durationMs,
   bubble = false,
   hideSettingsBadges = false,
+  onSendAnswer,
 }: MessageItemProps) {
   const zenMode = useUIStore(state => state.zenMode)
   // Only show Approve button for the last message with ExitPlanMode
@@ -267,6 +275,14 @@ export const MessageItem = memo(function MessageItem({
             .trim()
         : '',
     [message.role, message.content, message.content_blocks]
+  )
+  // Numbered question asked as text: answerable until the user replies
+  const inlineQuestion = useMemo(
+    () =>
+      isLastMessage && !hasFollowUpMessage && onSendAnswer
+        ? parseInlineNumberedQuestion(assistantResponse)
+        : null,
+    [isLastMessage, hasFollowUpMessage, onSendAnswer, assistantResponse]
   )
   // Show content if it's not empty
   const showContent = displayContent.trim()
@@ -978,6 +994,17 @@ export const MessageItem = memo(function MessageItem({
               />
             )}
         </>
+      )}
+
+      {inlineQuestion && !skipToolCalls && (
+        <AgentQuestionCard
+          question={inlineQuestion}
+          answer={undefined}
+          disabled={isSending}
+          onSend={option =>
+            onSendAnswer?.(inlineQuestionAnswer(inlineQuestion, option))
+          }
+        />
       )}
 
       {/* Show edited files at the bottom of assistant messages */}

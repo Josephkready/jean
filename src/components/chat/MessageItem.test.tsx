@@ -460,6 +460,42 @@ describe('MessageItem', () => {
     expect(screen.getByText('Raptors')).toBeVisible()
   })
 
+  it('renders inline numbered questions as options that send the answer', async () => {
+    const user = userEvent.setup()
+    const onSendAnswer = vi.fn()
+    const message: ChatMessage = {
+      id: 'assistant-question',
+      session_id: 'session-1',
+      role: 'assistant',
+      content:
+        'Which layout?\n\nReply with a number:\n\n1. Grid\n2. List\n\n## Recap\n\n- Waiting for your choice.',
+      timestamp: 1,
+      tool_calls: [],
+    }
+    const { rerender } = render(
+      <MessageItem
+        {...baseProps}
+        message={message}
+        onSendAnswer={onSendAnswer}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(onSendAnswer).toHaveBeenCalledWith('2. List')
+
+    rerender(
+      <MessageItem
+        {...baseProps}
+        message={message}
+        hasFollowUpMessage
+        onSendAnswer={onSendAnswer}
+      />
+    )
+    expect(
+      screen.queryByRole('button', { name: 'List' })
+    ).not.toBeInTheDocument()
+  })
+
   it('renders assistant duration in mm:ss format when minutes are non-zero', () => {
     render(<MessageItem {...baseProps} durationMs={145_000} />)
 
