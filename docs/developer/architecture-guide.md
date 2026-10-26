@@ -405,22 +405,6 @@ Additional systems (no dedicated docs yet):
   through jean-core or MCP. See `docs/developer/ssh-tunnel.md`. Notifications
   such as ntfy are not part of this transport.
 
-  **Start on a host.** New worktree and new session pick a host (Local or a
-  connected remote) without duplicating the project in the sidebar. Projects
-  that share a normalized git remote URL collapse to one row; each host
-  checkout is attached as `hostCheckouts`. `ensure_project_present` on the
-  target Jean reuses a checkout whose remotes match, or clones into
-  `~/jean/checkouts/<name>`. The clone runs with `git clone --progress`.
-  The target Jean emits `project:ensure-progress` on the existing event
-  channel (`emit_all`, so a remote desktop hears it on that host's socket).
-  The dialog shows git's status line. When the line contains a percent, the
-  bar is a weighted overall of counting, receiving objects, and resolving
-  deltas so it does not reset between phases. A line with no percent keeps an
-  indeterminate bar. Env files (`.env`, `.env.local`, and the
-  development/production variants) are copied only after an explicit confirm,
-  one file at a time, with the bar advancing per file. There is no continuous
-  file sync.
-
   When an established WebSocket disconnects, the frontend reloads the page
   instead of repairing stale in-memory state. The normal
   HTTP bootstrap then restores current persisted state, while backend-owned
@@ -547,7 +531,7 @@ interaction finishes.
 
 ### Canvas View
 
-**ProjectCanvasView** (`src/components/dashboard/ProjectCanvasView.tsx`) lists the selected project's worktrees. Focusing a worktree — from the canvas row or the sidebar worktree row — opens `WorktreeSessionsBrowser` instead of the horizontal session tab strip. The browser reuses session card status, labels, and `useCanvasKeyboardNav`. A row shows the effective session status and, when live agent activity differs from that status, the agent status as well. Choosing a session opens `SessionChatModal`. Sidebar session rows and other explicit session actions still open that session directly.
+**ProjectCanvasView** (`src/components/dashboard/ProjectCanvasView.tsx`) shows sessions across all worktrees in a project, grouped by worktree with section headers. Sessions are opened via `SessionChatModal` overlay.
 
 Shared infrastructure in `src/components/chat/`:
 
