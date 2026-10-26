@@ -52,6 +52,7 @@ interface IssuePreviewModalProps {
   type: 'issue' | 'pr' | 'security' | 'advisory'
   number: number
   ghsaId?: string
+  repo?: string
 }
 
 function formatDate(dateStr: string): string {
@@ -596,14 +597,20 @@ export function IssuePreviewModal({
   type,
   number,
   ghsaId,
+  repo,
 }: IssuePreviewModalProps) {
   const { data: gitProviderInfo } = useProjectGitProvider(projectPath)
   const forgeLabels = providerLabels(gitProviderInfo?.provider ?? 'github')
   const issueQuery = useGitHubIssue(
     projectPath,
-    type === 'issue' ? number : null
+    type === 'issue' ? number : null,
+    repo
   )
-  const prQuery = useGitHubPR(projectPath, type === 'pr' ? number : null)
+  const prQuery = useGitHubPR(
+    projectPath,
+    type === 'pr' ? number : null,
+    repo
+  )
   const securityQuery = useDependabotAlert(
     projectPath,
     type === 'security' ? number : null
@@ -644,7 +651,8 @@ export function IssuePreviewModal({
           ? (securityQuery.data?.htmlUrl ?? null)
           : (advisoryQuery.data?.htmlUrl ?? null)
 
-  const headerNumberSuffix = type === 'advisory' ? ghsaId : `#${number}`
+  const headerNumberSuffix =
+    type === 'advisory' ? ghsaId : repo ? `${repo}#${number}` : `#${number}`
 
   return (
     <Dialog
