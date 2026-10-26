@@ -65,6 +65,12 @@ export interface PendingTextFileDraft {
   size: number
   /** Optional; omitted when persisting to keep UI state small */
   content?: string
+  /** Set when the chip holds rows picked from a chat table */
+  table_rows?: {
+    table_key: string
+    rows: number[]
+    notes?: Record<number, string>
+  }
 }
 
 export interface PendingFileDraft {

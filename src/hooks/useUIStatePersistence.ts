@@ -69,12 +69,24 @@ function serializePendingTextFiles(
   const out: Record<string, PendingTextFileDraft[]> = {}
   for (const [sessionId, textFiles] of Object.entries(pendingTextFiles)) {
     if (textFiles.length === 0) continue
-    out[sessionId] = textFiles.map(({ id, path, filename, size }) => ({
-      id,
-      path,
-      filename,
-      size,
-    }))
+    out[sessionId] = textFiles.map(
+      ({ id, path, filename, size, tableRows }) => ({
+        id,
+        path,
+        filename,
+        size,
+        ...(tableRows && {
+          table_rows: {
+            table_key: tableRows.tableKey,
+            rows: tableRows.rows,
+            ...(tableRows.notes &&
+              Object.keys(tableRows.notes).length > 0 && {
+                notes: tableRows.notes,
+              }),
+          },
+        }),
+      })
+    )
   }
   return out
 }
@@ -583,6 +595,13 @@ export function useUIStatePersistence() {
             filename: tf.filename,
             size: tf.size ?? 0,
             content,
+            ...(tf.table_rows && {
+              tableRows: {
+                tableKey: tf.table_rows.table_key,
+                rows: tf.table_rows.rows,
+                notes: tf.table_rows.notes ?? {},
+              },
+            }),
           })
           if (!tf.content) {
             needsContentHydration.push({

@@ -3718,6 +3718,18 @@ pub struct PendingTextFileDraft {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Set when the chip holds rows picked from a chat table
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_rows: Option<PendingTableRowsDraft>,
+}
+
+/// Table rows referenced by a pasted-text chip (body row indices + per-row notes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingTableRowsDraft {
+    pub table_key: String,
+    pub rows: Vec<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub notes: std::collections::HashMap<u32, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5797,4 +5809,38 @@ pub async fn run_server() -> Result<(), String> {
     let _ = opencode_server::shutdown_managed_server();
     chat::codex_server::shutdown_server();
     Ok(())
+}
+
+#[cfg(test)]
+mod ui_state_pending_text_tests {
+    use super::UIState;
+
+    #[test]
+    fn pending_text_table_rows_round_trip() {
+        let input = serde_json::json!({
+            "pending_text_files": {
+                "s1": [{
+                    "id": "t1",
+                    "path": "/tmp/pasted-texts/t1.txt",
+                    "filename": "t1.txt",
+                    "size": 10,
+                    "table_rows": {
+                        "table_key": "msg-1:0",
+                        "rows": [0, 2],
+                        "notes": { "2": "check this" }
+                    }
+                }]
+            }
+        });
+        let ui_state: UIState = serde_json::from_value(input).unwrap();
+        let output = serde_json::to_value(&ui_state).unwrap();
+        assert_eq!(
+            output["pending_text_files"]["s1"][0]["table_rows"],
+            serde_json::json!({
+                "table_key": "msg-1:0",
+                "rows": [0, 2],
+                "notes": { "2": "check this" }
+            })
+        );
+    }
 }

@@ -1482,7 +1482,8 @@ export interface PendingTextFile {
   /**
    * Set when this chip holds rows picked from a chat table. `rows` are body
    * row indices in table order; `notes` maps a row index to the user's note
-   * for that row. In-memory only (not restored on restart).
+   * for that row. Persisted with UI state so the chip and table stay linked
+   * after a restart.
    */
   tableRows?: {
     tableKey: string
