@@ -3267,6 +3267,7 @@ export function useUpdateProjectSettings() {
       sentryAuthToken,
       sentryOrganizationSlug,
       sentryProjectSlug,
+      sentryProjects,
       autoFixSettings,
     }: {
       projectId: string
@@ -3283,6 +3284,7 @@ export function useUpdateProjectSettings() {
       sentryAuthToken?: string
       sentryOrganizationSlug?: string
       sentryProjectSlug?: string
+      sentryProjects?: Project['sentry_projects']
       autoFixSettings?: Project['auto_fix_settings']
       linkedProjectIds?: string[]
     }): Promise<Project> => {
@@ -3324,6 +3326,7 @@ export function useUpdateProjectSettings() {
           sentryAuthToken,
           sentryOrganizationSlug,
           sentryProjectSlug,
+          sentryProjects,
           autoFixSettings,
           linkedProjectIds: resourceLinkedProjectIds,
         }

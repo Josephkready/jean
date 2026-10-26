@@ -793,6 +793,7 @@ pub async fn add_project(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -955,6 +956,7 @@ pub async fn init_project(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -1022,6 +1024,7 @@ pub(crate) fn register_cloned_project(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -6297,6 +6300,7 @@ pub async fn update_project_settings(
     sentry_auth_token: Option<String>,
     sentry_organization_slug: Option<String>,
     sentry_project_slug: Option<String>,
+    sentry_projects: Option<Vec<crate::projects::types::SentryProjectLink>>,
     linked_project_ids: Option<Vec<String>>,
     auto_fix_settings: Option<Option<ProjectAutoFixSettings>>,
 ) -> Result<Project, String> {
@@ -6389,16 +6393,20 @@ pub async fn update_project_settings(
         project.sentry_base_url = None;
     }
 
-    if let Some(slug) = sentry_organization_slug {
-        let slug = slug.trim().to_string();
-        project.sentry_organization_slug = if slug.is_empty() { None } else { Some(slug) };
-        project.sentry_base_url = None;
-    }
-
-    if let Some(slug) = sentry_project_slug {
-        let slug = slug.trim().to_string();
-        project.sentry_project_slug = if slug.is_empty() { None } else { Some(slug) };
-        project.sentry_base_url = None;
+    if let Some(links) = sentry_projects {
+        project.set_sentry_project_links(links);
+    } else if sentry_organization_slug.is_some() || sentry_project_slug.is_some() {
+        if let Some(slug) = sentry_organization_slug {
+            let slug = slug.trim().to_string();
+            project.sentry_organization_slug = if slug.is_empty() { None } else { Some(slug) };
+        }
+        if let Some(slug) = sentry_project_slug {
+            let slug = slug.trim().to_string();
+            project.sentry_project_slug = if slug.is_empty() { None } else { Some(slug) };
+        }
+        project.sentry_projects.clear();
+        let legacy = project.effective_sentry_links();
+        project.set_sentry_project_links(legacy);
     }
 
     if let Some(settings) = auto_fix_settings {
@@ -13469,6 +13477,7 @@ pub async fn create_folder(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -16207,6 +16216,7 @@ mod tests {
             sentry_auth_token: None,
             sentry_organization_slug: None,
             sentry_project_slug: None,
+            sentry_projects: Vec::new(),
             sentry_base_url: None,
             linked_project_ids: Vec::new(),
             auto_fix_settings: None,
@@ -16391,6 +16401,7 @@ mod tests {
             sentry_base_url: None,
             sentry_organization_slug: None,
             sentry_project_slug: None,
+            sentry_projects: Vec::new(),
             linked_project_ids: Vec::new(),
             auto_fix_settings: None,
             server: None,
