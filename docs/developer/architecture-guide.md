@@ -142,21 +142,28 @@ is enabled and uses `deniedMcpServers` for known servers that are off. Grok
 disables them through `disabled_mcp_servers`, and Cursor through
 `mcp enable|disable`. Other backends load them automatically.
 
-### Full-screen settings pages
+### Settings surfaces
 
-App and project settings share `src/components/preferences/SettingsPage.tsx`.
-This full-window surface uses a non-modal Radix root and content portal, without
-an overlay, centered-dialog sizing, or a focus trap. Radix still manages initial
-focus, focus restoration, and Escape. Open child selects and popovers consume
-Escape before the page closes; settings search can also consume it to clear the
-query. Native window controls and macOS traffic-light spacing remain available.
+App preferences (`PreferencesDialog`) open through the shared modal `Dialog`.
+The surface is a true modal: backdrop, focus trap, and dismiss via Escape, the
+close button, or a backdrop click. Size it near the viewport — `96vw` by
+`94dvh` — so it fills most of the window with a modest inset. Open child
+selects and popovers consume Escape before the dialog closes; settings search
+can also consume it to clear the query. Do not copy native titlebar insets or
+Linux window controls onto this modal; those belong to the app title bar.
+
+Project settings still use `src/components/preferences/SettingsPage.tsx`. That
+full-window surface uses a non-modal Radix root and content portal, without an
+overlay or focus trap. Radix still manages initial focus, focus restoration, and
+Escape. Native window controls and macOS traffic-light spacing stay on that
+shell because it covers the title bar.
 
 Keep navigation in the left sidebar, Back at its bottom, and pane content in a
 centered, scrollable `max-w-4xl` column. Below the `md` breakpoint, use the pane
 selector and mobile search instead. Use the shared `SettingsSection` for subtle
 background cards in both app and project panes, with section headings above the
 cards. Preserve existing settings target
-ownership and persistence; the page changes presentation only.
+ownership and persistence; the chrome changes presentation only.
 
 Reference: [Radix Dialog](https://www.radix-ui.com/primitives/docs/components/dialog).
 
