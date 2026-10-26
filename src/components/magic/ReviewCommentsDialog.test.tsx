@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { render, screen, waitFor } from '@/test/test-utils'
-import { ReviewCommentsDialog } from './ReviewCommentsDialog'
+import { ReviewCommentsDialog, previewLine } from './ReviewCommentsDialog'
 
 const mocks = vi.hoisted(() => {
   let reviewCommentsModalOpen = true
@@ -394,5 +394,27 @@ describe('ReviewCommentsDialog', () => {
     expect(screen.getByText('Outdated')).toBeInTheDocument()
     // Only open comments stay pre-selected
     expect(screen.getByText('2 of 4 selected')).toBeInTheDocument()
+  })
+})
+
+describe('previewLine', () => {
+  it('skips HTML comments, nested details blocks, and tags in bot comments', () => {
+    const body = [
+      '<!-- coderabbit-ai-generated:v1 -->',
+      '',
+      '<details>',
+      '<summary>Supported by static analysis</summary>',
+      '<details><summary>Inner</summary>script output</details>',
+      'trailing',
+      '</details>',
+      '',
+      '**<picture><img src="x.svg" alt=""></picture> Minor** · **Quick win**',
+    ].join('\n')
+
+    expect(previewLine(body)).toBe('** Minor** · **Quick win**')
+  })
+
+  it('keeps the first line of plain comments', () => {
+    expect(previewLine('\n## Fix the bug\nmore')).toBe('Fix the bug')
   })
 })

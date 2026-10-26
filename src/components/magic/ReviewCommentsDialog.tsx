@@ -119,9 +119,18 @@ function sortByNewestDate<T>(items: T[], getDate: (item: T) => string): T[] {
   )
 }
 
-function previewLine(body: string): string {
+export function previewLine(body: string): string {
+  // Bots (e.g. CodeRabbit) prefix bodies with HTML comments, badges, and
+  // collapsed <details> blocks; skip them so the preview shows readable text.
+  let text = body.replace(/<!--[\s\S]*?-->/g, '')
+  // Remove innermost <details> blocks first so nested blocks are fully removed.
+  const innermostDetails = /<details\b(?:(?!<details\b)[\s\S])*?<\/details>/gi
+  while (innermostDetails.test(text)) {
+    text = text.replace(innermostDetails, '')
+  }
+  text = text.replace(/<[^>]+>/g, '')
   const firstLine =
-    body
+    text
       .split('\n')
       .map(l => l.trim())
       .find(l => l.length > 0) ?? ''
