@@ -58,14 +58,11 @@ import { getAssistantDurationMs } from './time-utils'
 import { AgentApprovalInline } from '@/components/agents/AgentActivity'
 import { AgentMessageLinkRow } from '@/components/agents/AgentMessageLink'
 import { AgentQuestionCard } from '@/components/agents/AgentQuestionCard'
-import {
-  inlineQuestionAnswer,
-  parseInlineNumberedQuestion,
-} from './inline-question-utils'
+import { parseInlineNumberedQuestion } from './inline-question-utils'
+import { InlineQuestionOptions } from './InlineQuestionOptions'
 import {
   assistantReplyItems,
   nextUserAnswers,
-  type AgentQuestion,
 } from '@/components/agents/agent-messages'
 import {
   TOOL_CALL_ROW_CLASS,
@@ -150,7 +147,7 @@ type RenderItem =
       key: string
       latestText: string | null
       /** Numbered question that the latest text asks ("reply with a number") */
-      inlineQuestion: AgentQuestion | null
+      inlineQuestion: { title?: string; options: string[] } | null
     }
   | { kind: 'question'; message: ChatMessage; globalIndex: number }
   | {
@@ -861,13 +858,26 @@ export const CompactMessageList = memo(
               ? `compact-${first.message.id}`
               : `compact-${first.message.id}-${last.message.id}`
           const text = findLatestAssistantText(buffer)
+          // A `## Recap` section replaces the whole turn in the compact view
+          const shown = text && (extractRecapSection(text) ?? text)
+          // Options of a numbered question show as buttons below the text.
+          // The question line stays in the text when the recap has it.
+          const asked = shown ? parseInlineNumberedQuestion(shown) : null
+          const askedBefore =
+            !asked && text && text !== shown
+              ? parseInlineNumberedQuestion(text)
+              : null
           items.push({
             kind: 'compact',
             messages: buffer,
             key: compactKey,
-            // A `## Recap` section replaces the whole turn in the compact view
-            latestText: text && (extractRecapSection(text) ?? text),
-            inlineQuestion: text ? parseInlineNumberedQuestion(text) : null,
+            latestText: asked?.rest ?? shown,
+            inlineQuestion: asked
+              ? { options: asked.options }
+              : askedBefore && {
+                  title: askedBefore.question,
+                  options: askedBefore.options,
+                },
           })
           buffer = []
         }
@@ -1392,15 +1402,11 @@ export const CompactMessageList = memo(
                       </Markdown>
                     )}
                     {showLatestText && inlineQuestion && onSendAnswer && (
-                      <AgentQuestionCard
-                        question={inlineQuestion}
-                        answer={undefined}
+                      <InlineQuestionOptions
+                        title={inlineQuestion.title}
+                        options={inlineQuestion.options}
                         disabled={isSending}
-                        onSend={option =>
-                          onSendAnswer(
-                            inlineQuestionAnswer(inlineQuestion, option)
-                          )
-                        }
+                        onSend={onSendAnswer}
                       />
                     )}
                     {surfacedLatestToolCalls.length > 0 && (

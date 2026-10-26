@@ -68,6 +68,7 @@ Rules:
 - When the turn produced code, config, or behavior changes, include the line `Tested against local dev env: Yes` or `Tested against local dev env: No` (pick one, based on whether you actually verified the change in a running local dev environment). Omit this line on read-only turns.
 - In plan mode, when a plan is ready, you MUST still call the native plan tool (Claude ExitPlanMode, Codex `<proposed_plan>` / plan item, Cursor/OpenCode equivalent) to present it. The recap does NOT replace the plan tool — never end a plan-mode turn with only a `## Recap` block in place of the plan tool call.
 - Skip the recap entirely if the turn was a single one-line answer with no tool calls.
+- If the turn ends with a question for the user, put the question at the end of the recap, in this format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options. Jean shows the options as buttons below the recap. Do not also ask the question outside the recap.
 - Do NOT repeat tool inputs, file diffs, or raw command output verbatim. Summarize.";
 
 /// Injected when the parallel-execution magic prompt is cleared. Omitting the
@@ -115,6 +116,12 @@ mod tests {
         assert!(RECAP_INSTRUCTION.contains("smoke test"));
         assert!(RECAP_INSTRUCTION.contains("manual"));
         assert!(RECAP_INSTRUCTION.contains("if it makes sense"));
+    }
+
+    #[test]
+    fn recap_holds_inline_question() {
+        assert!(RECAP_INSTRUCTION.contains("put the question at the end of the recap"));
+        assert!(RECAP_INSTRUCTION.contains("`Reply with a number:`"));
     }
 
     #[test]

@@ -1,15 +1,12 @@
 import { memo, useCallback, useMemo } from 'react'
 import { AgentMessageFromRow } from '@/components/agents/AgentMessageLink'
 import { parseAgentSentMessage } from '@/components/agents/agent-messages'
-import { AgentQuestionCard } from '@/components/agents/AgentQuestionCard'
 import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { PILL_BUBBLE_CLASS, ReplyBubble } from './ReplyBubble'
 import { ChatContinuedNotice } from './ChatContinuedNotice'
-import {
-  inlineQuestionAnswer,
-  parseInlineNumberedQuestion,
-} from './inline-question-utils'
+import { parseInlineNumberedQuestion } from './inline-question-utils'
+import { InlineQuestionOptions } from './InlineQuestionOptions'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -996,14 +993,11 @@ export const MessageItem = memo(function MessageItem({
         </>
       )}
 
-      {inlineQuestion && !skipToolCalls && (
-        <AgentQuestionCard
-          question={inlineQuestion}
-          answer={undefined}
+      {inlineQuestion && onSendAnswer && !skipToolCalls && (
+        <InlineQuestionOptions
+          options={inlineQuestion.options}
           disabled={isSending}
-          onSend={option =>
-            onSendAnswer?.(inlineQuestionAnswer(inlineQuestion, option))
-          }
+          onSend={onSendAnswer}
         />
       )}
 

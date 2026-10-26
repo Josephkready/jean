@@ -5,8 +5,12 @@ import {
 } from './inline-question-utils'
 
 describe('parseInlineNumberedQuestion', () => {
-  it('reads the numbered options after a reply-with-a-number cue', () => {
+  it('reads a question in the recap and removes the list from the text', () => {
     const text = [
+      '## Recap',
+      '',
+      'Excalidraw has Select and Hand tools.',
+      '',
       'Which mode do you want?',
       '',
       'Reply with a number:',
@@ -16,11 +20,7 @@ describe('parseInlineNumberedQuestion', () => {
       '2. Strict `Excalidraw` modes',
       '3. Do not add modes',
       '',
-      '## Recap',
-      '',
-      '- Waiting for your choice (1, 2 or 3).',
-      '1. Not an option',
-      '2. Also not an option',
+      '- Waiting for your choice.',
     ].join('\n')
 
     expect(parseInlineNumberedQuestion(text)).toEqual({
@@ -30,49 +30,47 @@ describe('parseInlineNumberedQuestion', () => {
         'Strict Excalidraw modes',
         'Do not add modes',
       ],
-      multiple: false,
+      rest: [
+        '## Recap',
+        '',
+        'Excalidraw has Select and Hand tools.',
+        '',
+        'Which mode do you want?',
+        '',
+        '- Waiting for your choice.',
+      ].join('\n'),
     })
   })
 
-  it('uses the last numbered list when the cue follows the list', () => {
-    const text = [
-      'Steps I did:',
-      '1. Read the code',
-      '2. Ran tests',
-      '',
-      'How should I continue?',
-      '1. Open a PR',
-      '2. Keep working',
-      '',
-      'Reply with the number.',
-    ].join('\n')
-
-    expect(parseInlineNumberedQuestion(text)).toEqual({
-      question: 'How should I continue?',
+  it('accepts the cue after the list and on the question line', () => {
+    expect(
+      parseInlineNumberedQuestion(
+        'Steps:\n1. Read\n2. Test\n\nHow next?\n1. Open a PR\n2. Keep working\n\nReply with the number.'
+      )
+    ).toMatchObject({
+      question: 'How next?',
       options: ['Open a PR', 'Keep working'],
-      multiple: false,
     })
-  })
-
-  it('keeps a question that shares its line with the cue', () => {
     expect(
       parseInlineNumberedQuestion('Which one? Reply with a number:\n1. A\n2. B')
-        ?.question
-    ).toBe('Which one?')
-    expect(
-      parseInlineNumberedQuestion('Reply with a number:\n1. A\n2. B')?.question
-    ).toBe('Choose an option')
+    ).toEqual({
+      question: 'Which one?',
+      options: ['A', 'B'],
+      rest: 'Which one?',
+    })
   })
 
-  it('returns null without the cue or without a valid list', () => {
+  it('returns null without a cue next to a valid list', () => {
     expect(
       parseInlineNumberedQuestion('Steps:\n1. Read\n2. Write\n3. Test')
     ).toBeNull()
     expect(
-      parseInlineNumberedQuestion('Reply with a number:\n1. Only one')
+      parseInlineNumberedQuestion(
+        'Reply with a number later.\n\nSteps:\n1. Read\n2. Write'
+      )
     ).toBeNull()
     expect(
-      parseInlineNumberedQuestion('Reply with a number:\n1. A\n3. B')
+      parseInlineNumberedQuestion('Reply with a number:\n1. Only one')
     ).toBeNull()
     expect(
       parseInlineNumberedQuestion('Reply with a number:\n1. A\n2. A')
@@ -82,11 +80,6 @@ describe('parseInlineNumberedQuestion', () => {
 
 describe('inlineQuestionAnswer', () => {
   it('sends the number and the option text', () => {
-    const question = {
-      question: 'Pick',
-      options: ['Alpha', 'Beta'],
-      multiple: false,
-    }
-    expect(inlineQuestionAnswer(question, 'Beta')).toBe('2. Beta')
+    expect(inlineQuestionAnswer(['Alpha', 'Beta'], 1)).toBe('2. Beta')
   })
 })

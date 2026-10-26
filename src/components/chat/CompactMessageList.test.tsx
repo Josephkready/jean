@@ -461,10 +461,10 @@ describe('CompactMessageList', () => {
     ).toBeTruthy()
   })
 
-  it('shows an inline numbered question with the recap', () => {
+  it('shows options of a question in the recap as buttons', () => {
     const onSendAnswer = vi.fn()
     const text =
-      'Which mode do you want?\n\nReply with a number:\n\n1. Grid\n2. List\n\n## Recap\n\nWaiting for your choice.'
+      'I read the code.\n\n## Recap\n\nWhich mode do you want?\n\nReply with a number:\n\n1. Grid\n2. List'
     const messages = [
       message('user-1', 'user', 100, 'add modes'),
       message('assistant-1', 'assistant', 104, text, {
@@ -477,12 +477,14 @@ describe('CompactMessageList', () => {
     ]
     const { rerender } = renderCompact(messages, { onSendAnswer })
 
-    const recap = screen.getByText('Waiting for your choice.')
     const question = screen.getByText('Which mode do you want?')
+    const option = screen.getByRole('button', { name: /^2\.\s?List$/ })
+    expect(screen.queryByText('Reply with a number:')).not.toBeInTheDocument()
     expect(
-      recap.compareDocumentPosition(question) & Node.DOCUMENT_POSITION_FOLLOWING
+      question.compareDocumentPosition(option) &
+        Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'List' }))
+    fireEvent.click(screen.getByRole('button', { name: /^2\.\s?List$/ }))
     expect(onSendAnswer).toHaveBeenCalledWith('2. List')
 
     const answered = [...messages, message('user-2', 'user', 110, '2. List')]
@@ -510,7 +512,7 @@ describe('CompactMessageList', () => {
       />
     )
     expect(
-      screen.queryByRole('button', { name: 'Grid' })
+      screen.queryByRole('button', { name: /^1\.\s?Grid$/ })
     ).not.toBeInTheDocument()
   })
 

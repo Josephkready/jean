@@ -480,7 +480,7 @@ describe('MessageItem', () => {
       />
     )
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('button', { name: /^2\.\s?List$/ }))
     expect(onSendAnswer).toHaveBeenCalledWith('2. List')
 
     rerender(
@@ -492,7 +492,7 @@ describe('MessageItem', () => {
       />
     )
     expect(
-      screen.queryByRole('button', { name: 'List' })
+      screen.queryByRole('button', { name: /^2\.\s?List$/ })
     ).not.toBeInTheDocument()
   })
 
