@@ -3545,20 +3545,34 @@ export function ProjectCanvasView({
                 )}
               </>
             )}
-            {/* OpenInButton always visible on desktop (grid column 3) */}
-            {!isMobile && (
-              <div className="flex items-center gap-2 shrink-0 justify-end col-start-3">
-                <OpenInButton
-                  worktreePath={project.path}
-                  serverId={project.serverId}
-                />
-                <ScriptsButton
-                  projectId={project.id}
-                  worktreePath={project.path}
-                  onRun={handlePackageScript}
-                />
-              </div>
-            )}
+            {/* Grid column 3: open-in/scripts on desktop, new worktree everywhere */}
+            <div className="flex items-center gap-2 shrink-0 justify-end col-start-3">
+              {!isMobile && (
+                <>
+                  <OpenInButton
+                    worktreePath={project.path}
+                    serverId={project.serverId}
+                  />
+                  <ScriptsButton
+                    projectId={project.id}
+                    worktreePath={project.path}
+                    onRun={handlePackageScript}
+                  />
+                </>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  useProjectsStore.getState().selectProject(projectId)
+                  useUIStore.getState().setNewWorktreeModalOpen(true)
+                }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                New worktree
+              </Button>
+            </div>
           </div>
 
           <div className="border-b border-border/30 bg-background/80 px-4 py-2">
