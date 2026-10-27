@@ -33,7 +33,7 @@ export function InlineQuestionOptions({
             type="button"
             disabled={disabled}
             onClick={() => onSend(inlineQuestionAnswer(options, index))}
-            className="flex max-w-full items-start gap-2.5 rounded-md bg-muted/60 px-3 py-2 text-left text-sm text-foreground transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
+            className="flex max-w-full items-start gap-2.5 rounded-md bg-muted/60 px-3 py-2 text-left text-sm text-foreground transition-colors enabled:cursor-pointer enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
           >
             <span className="flex size-5 shrink-0 items-center justify-center rounded bg-background/60 text-xs font-medium tabular-nums text-muted-foreground">
               {index + 1}.
