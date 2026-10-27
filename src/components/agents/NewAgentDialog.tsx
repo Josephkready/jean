@@ -409,14 +409,9 @@ function TemplatePicker({
               ))}
             </ul>
           )}
-          <Textarea
-            readOnly
-            value={selected.rolePrompt}
-            rows={6}
-            aria-label="Role prompt preview"
-          />
           <p className="text-xs text-muted-foreground">
-            Run settings stay on the defaults. Edit the agent after install.
+            Run settings stay on the defaults. To see or edit the role prompt,
+            open the agent and turn on Advanced.
           </p>
         </div>
       )}
