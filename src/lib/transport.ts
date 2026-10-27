@@ -716,6 +716,22 @@ interface WsMessage {
   payload?: unknown
   /** Monotonic sequence number for replay deduplication. */
   seq?: number
+  /** Heartbeat interval announced by the server. Older servers omit it. */
+  interval_ms?: number
+}
+
+interface NetworkInformationLike extends EventTarget {
+  readonly type?: string
+}
+
+/** Inbound timeout for older servers that send a heartbeat every 20s without
+ *  announcing the interval. */
+const LEGACY_INBOUND_TIMEOUT = 50_000
+
+function getNetworkInformation(): NetworkInformationLike | undefined {
+  if (typeof navigator === 'undefined') return undefined
+  return (navigator as Navigator & { connection?: NetworkInformationLike })
+    .connection
 }
 
 export interface WsTransportConfig {
@@ -744,10 +760,16 @@ export class WsTransport {
   private manualReconnectPending = false
   private connectWatchdog: ReturnType<typeof setTimeout> | null = null
   /** Periodic check that we're seeing inbound traffic from the server.
-   *  The server sends app-level heartbeats every 20s because browser JS cannot
-   *  observe protocol ping/pong frames, so a 50s gap means the connection is dead. */
+   *  The server sends app-level heartbeats because browser JS cannot observe
+   *  protocol ping/pong frames, so a gap of a few heartbeats means the
+   *  connection is dead. */
   private livenessTimer: ReturnType<typeof setInterval> | null = null
   private _lastInbound = 0
+  private inboundFrames = 0
+  /** Derived from the server's announced heartbeat interval; older servers
+   *  send no interval and keep the legacy timeout. */
+  private inboundTimeout = LEGACY_INBOUND_TIMEOUT
+  private networkType = getNetworkInformation()?.type
   private queue: { data: string; resolve: () => void }[] = []
   // Buffer for events that arrive before listeners are registered.
   // Covers the ~16ms gap between WS onopen and React effect listener setup.
@@ -779,6 +801,10 @@ export class WsTransport {
       document.addEventListener('visibilitychange', this.handleWake)
       window.addEventListener('online', this.handleWake)
       window.addEventListener('pageshow', this.handleWake)
+      getNetworkInformation()?.addEventListener(
+        'change',
+        this.handleNetworkChange
+      )
     }
   }
 
@@ -1018,6 +1044,7 @@ export class WsTransport {
     this.ws.onopen = () => {
       this.clearConnectWatchdog()
       this._lastInbound = Date.now()
+      this.inboundTimeout = LEGACY_INBOUND_TIMEOUT
       this.startLivenessTimer()
       this._hasConnectedOnce = true
       this.setConnected(true)
@@ -1034,12 +1061,7 @@ export class WsTransport {
 
     this.ws.onmessage = event => {
       this._lastInbound = Date.now()
-      // Fast path: server app-level heartbeat is a fixed string every ~20s.
-      // Skip JSON.parse on the idle hot path (browser cannot observe protocol
-      // ping/pong, so these text frames are the liveness signal).
-      if (event.data === '{"type":"heartbeat"}') {
-        return
-      }
+      this.inboundFrames++
       try {
         const msg: WsMessage = JSON.parse(event.data)
         this.handleMessage(msg)
@@ -1125,12 +1147,17 @@ export class WsTransport {
   private static readonly DEFAULT_TIMEOUT = 60_000
   private static readonly CONNECT_TIMEOUT = 12_000
   private static readonly MAX_QUEUE_SIZE = 500
-  /** If no inbound traffic for this long, assume connection is dead.
-   *  Must exceed the server's app-level heartbeat interval (20s); protocol
-   *  ping/pong alone is not visible to browser JavaScript. */
-  private static readonly INBOUND_TIMEOUT = 50_000
-  private static readonly LIVENESS_CHECK_INTERVAL = 10_000
+  /** No inbound traffic for this many heartbeat intervals means the
+   *  connection is dead; protocol ping/pong is not visible to browser JS. */
+  private static readonly MISSED_HEARTBEATS_BEFORE_DEAD = 3
+  private static readonly LIVENESS_CHECK_INTERVAL = 5_000
   private static readonly WAKE_CHECK_TIMEOUT = 3_000
+  /** After wake, ask the server over HTTP once the socket has been silent
+   *  this long. */
+  private static readonly SILENT_SOCKET_CHECK_AFTER = 500
+  /** A socket silent this long while HTTP answers is dead. Long enough for
+   *  one lost packet on a remote link, shorter than WAKE_CHECK_TIMEOUT. */
+  private static readonly SILENT_SOCKET_AFTER = 1_500
 
   /** Call a backend command over WebSocket. */
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -1259,6 +1286,10 @@ export class WsTransport {
   private handleMessage(msg: WsMessage): void {
     if (msg.type === 'heartbeat') {
       // onmessage already refreshed _lastInbound. No listener dispatch.
+      if (typeof msg.interval_ms === 'number' && msg.interval_ms > 0) {
+        this.inboundTimeout =
+          msg.interval_ms * WsTransport.MISSED_HEARTBEATS_BEFORE_DEAD
+      }
       return
     }
 
@@ -1357,7 +1388,7 @@ export class WsTransport {
     this.stopLivenessTimer()
     this.livenessTimer = setInterval(() => {
       if (this.ws?.readyState !== WebSocket.OPEN) return
-      if (Date.now() - this._lastInbound > WsTransport.INBOUND_TIMEOUT) {
+      if (Date.now() - this._lastInbound > this.inboundTimeout) {
         console.warn(
           '[WsTransport] No inbound traffic, closing stale connection for reload'
         )
@@ -1390,7 +1421,7 @@ export class WsTransport {
       // Socket claims to be open. After a suspend it may be a zombie, but a
       // recent socket may simply have queued frames. Replace one already past
       // the liveness timeout immediately so iOS resume adds no extra delay.
-      if (Date.now() - this._lastInbound > WsTransport.INBOUND_TIMEOUT) {
+      if (Date.now() - this._lastInbound > this.inboundTimeout) {
         console.warn('[WsTransport] Stale socket after resume, reloading app')
         try {
           this.ws?.close()
@@ -1420,6 +1451,16 @@ export class WsTransport {
     this.connect()
   }
 
+  /** A Wi-Fi to cellular switch kills the socket without a close event and
+   *  often without an `online` event. `navigator.connection` reports it
+   *  (Chromium only); bandwidth estimate changes keep the same type. */
+  private handleNetworkChange = (): void => {
+    const type = getNetworkInformation()?.type
+    if (type === this.networkType) return
+    this.networkType = type
+    this.handleWake()
+  }
+
   /** A mobile browser can report OPEN for a socket that died while suspended.
    *  Block stale UI until a request proves this connection can still reply. */
   private checkConnectionAfterWake(): void {
@@ -1427,6 +1468,7 @@ export class WsTransport {
     const socket = this.ws
     if (!socket) return
     this.setCheckingConnection(true)
+    void this.closeIfSocketSilent(socket)
 
     let timeout: ReturnType<typeof setTimeout> | undefined
     void Promise.race([
@@ -1449,6 +1491,32 @@ export class WsTransport {
       .finally(() => {
         if (timeout) clearTimeout(timeout)
       })
+  }
+
+  /** Replace the socket before the wake check times out when the server
+   *  answers HTTP but the socket delivers no frame: the socket died with the
+   *  old network path. */
+  private async closeIfSocketSilent(socket: WebSocket): Promise<void> {
+    const framesBefore = this.inboundFrames
+    const startedAt = Date.now()
+    const isSilent = () =>
+      this.ws === socket && this.inboundFrames === framesBefore
+    const sleep = (ms: number) =>
+      new Promise<void>(resolve => setTimeout(resolve, ms))
+
+    await sleep(WsTransport.SILENT_SOCKET_CHECK_AFTER)
+    if (!isSilent()) return
+    try {
+      const res = await this.fetchBackend(this.backendUrl('healthz'))
+      if (!res.ok) return
+    } catch {
+      return // Server unreachable; the wake check timeout handles this.
+    }
+    const remaining = startedAt + WsTransport.SILENT_SOCKET_AFTER - Date.now()
+    if (remaining > 0) await sleep(remaining)
+    if (!isSilent()) return
+    console.warn('[WsTransport] Socket silent while server answers, reloading')
+    socket.close()
   }
 
   private restartConnectionAttempt(): void {
@@ -1484,6 +1552,10 @@ export class WsTransport {
       document.removeEventListener('visibilitychange', this.handleWake)
       window.removeEventListener('online', this.handleWake)
       window.removeEventListener('pageshow', this.handleWake)
+      getNetworkInformation()?.removeEventListener(
+        'change',
+        this.handleNetworkChange
+      )
     }
     const socket = this.ws
     this.ws = null
