@@ -2885,7 +2885,9 @@ pub fn tail_claude_output(
         if received_claude_output {
             // After receiving output, use shorter timeout for detecting dead process
             if !process_alive && last_output_time.elapsed() > dead_process_timeout {
-                if background_wait.exit_is_normal(saw_final_result) {
+                // Host-backed runs end only at the host exit marker, so a dead
+                // host without one is a cancel even after a background task.
+                if !host_backed && background_wait.exit_is_normal(saw_final_result) {
                     // Normal end of a run that waited for background tasks.
                     log::trace!("Process {pid} exited after background tasks finished");
                     break;
@@ -3228,6 +3230,15 @@ mod tests {
         initial: &str,
         append_later: Option<&'static str>,
     ) -> ClaudeResponse {
+        tail_fixture_with_pid(name, initial, append_later, std::process::id())
+    }
+
+    fn tail_fixture_with_pid(
+        name: &str,
+        initial: &str,
+        append_later: Option<&'static str>,
+        pid: u32,
+    ) -> ClaudeResponse {
         let tmp = tempfile::tempdir().unwrap();
         let app = tauri::AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
         let output = tmp.path().join("run-1.jsonl");
@@ -3236,7 +3247,6 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let session_id = format!("claude-host-tail-{name}");
-        let pid = std::process::id();
         assert!(super::super::registry::register_detached_process(
             session_id.clone(),
             pid
@@ -3311,6 +3321,27 @@ mod tests {
             "\n"
         );
         let response = tail_fixture("noresult", fixture, None);
+        assert!(response.cancelled);
+    }
+
+    #[test]
+    fn dead_host_after_background_task_counts_as_cancelled() {
+        // A host that dies without its exit marker is a cancel, even after a
+        // background task and a first `result` (non-host runs end normally).
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let fixture = concat!(
+            r#"{"type":"jean_claude_host_start"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_agent","is_backgrounded":true}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"started"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1}}"#,
+            "\n"
+        );
+        let response = tail_fixture_with_pid("deadhost", fixture, None, dead_pid);
         assert!(response.cancelled);
     }
 
