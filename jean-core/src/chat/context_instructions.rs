@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::projects::github_discussions::get_discussion_context_paths;
 use crate::projects::github_issues::{
     get_github_contexts_dir, get_preferred_issue_refs, get_preferred_pr_refs,
     get_session_advisory_refs, get_session_security_refs,
@@ -67,25 +68,30 @@ fn build_system_prompt_parts(
         parts.push(format!("Respond to the user in {lang}."));
     }
 
+    let parallel_prompt = prefs.as_ref().and_then(|prefs| {
+        crate::resolve_stored_parallel_execution_prompt(
+            prefs.magic_prompts.parallel_execution.as_deref(),
+        )
+    });
+    // No preferences file: keep the default fan-out prompt, matching chat sends.
+    let parallel_prompt = if prefs.is_none() {
+        Some(crate::default_parallel_execution_prompt())
+    } else {
+        parallel_prompt
+    };
     let global_prompt =
         crate::projects::server_system_prompt(app, worktree_id).unwrap_or_else(|| {
-            prefs
-                .as_ref()
-                .and_then(|prefs| {
-                    trimmed_non_empty(prefs.magic_prompts.global_system_prompt.as_deref())
-                })
-                .unwrap_or_else(crate::default_global_system_prompt)
+            crate::effective_global_system_prompt(
+                prefs
+                    .as_ref()
+                    .and_then(|prefs| prefs.magic_prompts.global_system_prompt.as_deref()),
+            )
         });
-    parts.push(crate::apply_agent_browser_preference(
-        global_prompt,
-        prefs.as_ref(),
-    ));
-
-    let parallel_prompt = prefs
-        .as_ref()
-        .and_then(|prefs| trimmed_non_empty(prefs.magic_prompts.parallel_execution.as_deref()))
-        .unwrap_or_else(crate::default_parallel_execution_prompt);
-    parts.push(parallel_prompt);
+    super::push_subagent_policy_before_global(
+        &mut parts,
+        parallel_prompt.as_deref(),
+        crate::apply_agent_browser_preference(global_prompt, prefs.as_ref()),
+    );
 
     if let Ok(data) = load_projects_data(app) {
         if let Some(worktree) = data.find_worktree(worktree_id) {
@@ -116,14 +122,7 @@ fn build_system_prompt_parts(
         }
     }
 
-    let gh_binary = crate::gh_cli::config::resolve_gh_binary(app);
-    if gh_binary != std::path::PathBuf::from("gh") {
-        parts.push(format!(
-            "When running GitHub CLI commands, use the full path to the embedded binary: {}\n\
-             Do NOT use bare `gh` — always use the full path above.",
-            gh_binary.display()
-        ));
-    }
+    crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, app);
     if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(app) {
         if claude_binary.exists() {
             parts.push(format!(
@@ -143,7 +142,7 @@ fn build_system_prompt_parts(
         }
     }
 
-    if super::should_include_recap_instruction(app, include_recap) {
+    if include_recap {
         parts.push(super::RECAP_INSTRUCTION.to_string());
     }
 
@@ -279,6 +278,8 @@ fn collect_context_paths(
             }
         }
     }
+
+    paths.extend(get_discussion_context_paths(app, session_id, worktree_id));
 
     if let Ok(app_data_dir) = app.path().app_data_dir() {
         let saved_contexts_dir = app_data_dir.join("session-context");

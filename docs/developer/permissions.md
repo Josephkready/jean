@@ -1,6 +1,10 @@
 # Workflow and permission policies
 
-The chat toolbar shows only the permission selector. Selecting a permission leaves any existing Plan mode. Full access is the default for new sessions. Existing preferences are not rewritten.
+Plan mode is a first-class, opt-in workflow on the same execution-mode control as permissions. It is not the default and it is not hidden as a legacy or Beta setting.
+
+New sessions start in the saved permission policy. That default is Full access (`yolo`) unless the user changed it. A saved default of Plan is rewritten to Build on preferences load, so new sessions are never created in Plan. Enter Plan only by choosing it in the composer mode menu, with Shift+Tab while the composer is focused, or with `/plan`. `/plan` with no extra text starts a planning turn; `/plan <task>` plans that task. `/build` with no extra text leaves Plan and restores the permission that was active before planning (Build when none was remembered) without sending a turn. `/build <task>` leaves Plan and implements that task. Approving a plan still switches to the retained permission, or to Full access when the user picks that approval. Rejecting or refining a plan stays in Plan. Switching the mode menu to a permission also leaves Plan.
+
+The composer shows a Plan banner and the mode trigger reads "Plan" while that session is in Plan mode. Missing execution mode on a backend launch implements as Build (Full access on Cursor, which has no Build flag). Explicit Plan still uses each backend's native plan mechanism. Unsupported restricted policies still do not escalate to Full access when switching backends; that fallback remains Plan.
 
 ## Wire compatibility
 
@@ -18,17 +22,17 @@ Keep `selected_execution_mode` and each run's `execution_mode` compatible with p
 
 Old session JSON without `selected_execution_mode` loads as Plan. Session creation captures the current default explicitly. This prevents the new default from escalating old sessions.
 
-Shift+Tab toggles Plan/Build without cycling permissions. Plan approval uses the retained permission choice. The explicit legacy Yolo approval remains a Full access override.
+Shift+Tab toggles Plan and the retained permission while the composer is focused. It does not cycle permissions and it does not fire from the rest of the window. Plan approval uses the retained permission choice. The explicit Full access approval remains a Full access override.
 
 ## Capabilities
 
-| Backend                               | Permission choices                                                 |
-| ------------------------------------- | ------------------------------------------------------------------ |
-| Claude                                | Supervised, Auto-accept edits, Auto, Full access                   |
-| Codex                                 | Supervised, Auto-accept edits, Auto, Full access                   |
-| OpenCode                              | Supervised, Auto-accept edits, Full access                         |
-| Grok, Kimi                            | Supervised, Auto-accept edits, Auto, Full access                   |
-| Cursor, PI, Command Code, Antigravity | Full access; retain existing Legacy Build sessions where supported |
+| Backend                                     | Permission choices                                                 |
+| ------------------------------------------- | ------------------------------------------------------------------ |
+| Claude                                      | Supervised, Auto-accept edits, Auto, Full access                   |
+| Codex                                       | Supervised, Auto-accept edits, Auto, Full access                   |
+| OpenCode                                    | Supervised, Auto-accept edits, Full access                         |
+| Grok, Kimi                                  | Supervised, Auto-accept edits, Auto, Full access                   |
+| Cursor, PI, Command Code, Antigravity, Muse | Full access; retain existing Legacy Build sessions where supported |
 
 Unsupported restricted policies must not become Full access. Backend selection falls back to Plan, and direct IPC/MCP sends reject unsupported policies.
 
@@ -52,12 +56,13 @@ Pending requests live in session metadata, not persisted global UI state. Waitin
 
 ### Other backend audit
 
-| Backend      | Native capability                                                              | Why no new menu choices yet                                                                                                                                                                            |
-| ------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Cursor       | Per-tool Shell/Read/Write/MCP allow/deny rules, sandbox, forced approval flags | Jean uses a streaming CLI without a live approval callback. A sandbox does not mean edit-only approval; adding choices requires scoped runtime rules and a supported response path.                    |
-| PI           | Tool filtering, OS/container isolation, extension hooks                        | PI explicitly does not provide built-in per-tool approval. Project trust is not tool approval. A Jean extension/approval integration is required before advertising these policies.                    |
-| Command Code | Interactive standard, accept-edits, and bypass policies                        | Published 1.74.1 print mode blocks write/shell tools unless permissions are bypassed. Its accept-edits CLI flag alone cannot provide interactive approvals in Jean's print transport.                  |
-| Antigravity  | Allow/deny/ask rules and terminal sandbox                                      | Its documented asks target the editor/TUI; Jean's streaming CLI currently reports denied tools, not a live reply interface. Existing sandbox plus skip-permissions behavior is not edit-only approval. |
+| Backend      | Native capability                                                                                    | Why no new menu choices yet                                                                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cursor       | Per-tool Shell/Read/Write/MCP allow/deny rules, sandbox, forced approval flags                       | Jean uses a streaming CLI without a live approval callback. A sandbox does not mean edit-only approval; adding choices requires scoped runtime rules and a supported response path.                                 |
+| PI           | Tool filtering, OS/container isolation, extension hooks                                              | PI explicitly does not provide built-in per-tool approval. Project trust is not tool approval. A Jean extension/approval integration is required before advertising these policies.                                 |
+| Command Code | Interactive standard, accept-edits, and bypass policies                                              | Published 1.74.1 print mode blocks write/shell tools unless permissions are bypassed. Its accept-edits CLI flag alone cannot provide interactive approvals in Jean's print transport.                               |
+| Antigravity  | Allow/deny/ask rules and terminal sandbox                                                            | Its documented asks target the editor/TUI; Jean's streaming CLI currently reports denied tools, not a live reply interface. Existing sandbox plus skip-permissions behavior is not edit-only approval.              |
+| Muse         | Permission profiles `:read-only`, `:ask-me`, `:auto-review`, `:unrestricted`; MSP `approval/request` | The detached MSP host answers approval requests itself (approve in Build and Yolo, deny in Plan). Forwarding them to Jean's approval card needs a bridge like the ACP one before Supervised or Auto can be offered. |
 
 Do not expose policies for these transports until Jean can enforce the real approval contract. Preserve existing user configurations; do not rewrite global allowlists to simulate a per-session policy.
 

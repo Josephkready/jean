@@ -142,21 +142,28 @@ is enabled and uses `deniedMcpServers` for known servers that are off. Grok
 disables them through `disabled_mcp_servers`, and Cursor through
 `mcp enable|disable`. Other backends load them automatically.
 
-### Full-screen settings pages
+### Settings surfaces
 
-App and project settings share `src/components/preferences/SettingsPage.tsx`.
-This full-window surface uses a non-modal Radix root and content portal, without
-an overlay, centered-dialog sizing, or a focus trap. Radix still manages initial
-focus, focus restoration, and Escape. Open child selects and popovers consume
-Escape before the page closes; settings search can also consume it to clear the
-query. Native window controls and macOS traffic-light spacing remain available.
+App preferences (`PreferencesDialog`) open through the shared modal `Dialog`.
+The surface is a true modal: backdrop, focus trap, and dismiss via Escape, the
+close button, or a backdrop click. Size it near the viewport — `96vw` by
+`94dvh` — so it fills most of the window with a modest inset. Open child
+selects and popovers consume Escape before the dialog closes; settings search
+can also consume it to clear the query. Do not copy native titlebar insets or
+Linux window controls onto this modal; those belong to the app title bar.
+
+Project settings still use `src/components/preferences/SettingsPage.tsx`. That
+full-window surface uses a non-modal Radix root and content portal, without an
+overlay or focus trap. Radix still manages initial focus, focus restoration, and
+Escape. Native window controls and macOS traffic-light spacing stay on that
+shell because it covers the title bar.
 
 Keep navigation in the left sidebar, Back at its bottom, and pane content in a
 centered, scrollable `max-w-4xl` column. Below the `md` breakpoint, use the pane
 selector and mobile search instead. Use the shared `SettingsSection` for subtle
 background cards in both app and project panes, with section headings above the
 cards. Preserve existing settings target
-ownership and persistence; the page changes presentation only.
+ownership and persistence; the chrome changes presentation only.
 
 Reference: [Radix Dialog](https://www.radix-ui.com/primitives/docs/components/dialog).
 
@@ -180,6 +187,13 @@ partitions updates: client keys never cross the backend transport, while server
 keys continue to use backend persistence. New code can use
 `useClientPreferences()` directly.
 
+`browser_default_host` is one of those server settings (Settings → General →
+Browser). New browser tabs and port open buttons use a jean.json `ports[].host`
+when that port sets one, then this hostname, then `localhost`. A client viewing
+a worktree on a remote Jean server reads that server's value. Loopback names
+stay loopback so remote preview forwarding can still apply; any other hostname
+is used as written. Jean MCP stays mandatory and is not part of this setting.
+
 Project and worktree display state uses the same ownership rule through the
 versioned `jean-client-view-state-v1` browser storage record. This includes
 canvas sorting and active filters, tree expansion, dashboard favorites, sidebar
@@ -187,13 +201,23 @@ layout, and browser/terminal layout. Pinned recent sessions and pinned canvas
 label filters are shared through server UI state instead. Resource-keyed values
 must use scoped server resource IDs. `useClientViewStatePersistence()` migrates the legacy
 server UI-state values on first load and then makes the client record
-authoritative. Keep session data, running terminal metadata, drafts, and other
-operational state in the backend persistence paths.
+authoritative.
+
+Navigation state is also per client, but it lives on the server so a desktop
+window, a browser profile, and a remote Jean client each restore their own
+place. The snapshot is `ui-clients/<client-id>.json` and holds the active
+project, worktree, and chat, input drafts, open terminal and browser tabs, and
+the last location. The desktop installation claims the legacy `ui-state.json`
+navigation once at startup; other clients start empty and do not inherit it.
+Projects, worktrees, chat sessions and messages, agent processes, server
+preferences, and providers stay shared. Live terminal processes stay in the
+server registry. `ui-state.json` keeps only the shared pins and pinned canvas
+labels.
 
 Each server owns the pins of its own recent sessions. Pins change only through
-`set_recent_session_pinned` (one ID per call); `save_ui_state` keeps the pins
-that are on disk, so a full save from one client cannot drop another client's
-pin. Native Jean reads each remote server's pins with
+`set_recent_session_pinned` (one ID per call). A full `save_ui_state` writes
+that client's navigation file and does not replace the shared pins. Native Jean
+reads each remote server's pins with
 `get_pinned_recent_session_ids` and merges them with its local pins
 (`src/services/recent-session-pins.ts`). An "Unknown command" answer marks an
 older server; native Jean then keeps that server's pins in its local UI state
@@ -206,6 +230,20 @@ detect concurrent edits. Capabilities provide the server-owned Magic Prompt
 catalog/defaults; the React UI retains bundled fallbacks for older servers.
 Duplicate pairs are rejected while running. Job progress emits
 `review-job:updated`.
+
+### Claude and Codex logins
+
+Claude and Codex sessions use the CLI's own config home (`~/.claude` and
+`~/.codex`). Jean does not store named subscription logins, does not switch
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and does not auto-switch accounts.
+Multi-account pooling belongs in an external CLIProxy sidecar.
+
+Settings → Providers still holds API routing profiles: custom Claude CLI
+profiles (`custom_cli_profiles`), custom Codex model providers
+(`custom_codex_providers`), and PI providers. Those are not subscription
+account vaults. Jean MCP stays enabled on every preference load and save.
+Obsolete `provider_accounts` and `default_provider_accounts` fields in old
+preference files are ignored.
 
 ### Command-Centric Design
 
@@ -223,6 +261,7 @@ This decouples UI triggers from implementations and enables consistent behavior.
 
 Each major system has focused documentation:
 
+- **[Devin Integration](./devin.md)** - Local/cloud ACP sessions, permissions, and MCP
 - **[Command System](./command-system.md)** - Unified action dispatch
 - **[Keyboard Shortcuts](./keyboard-shortcuts.md)** - Native event handling
 - **[Native Menus](./menus.md)** - Cross-platform menu integration
@@ -301,14 +340,44 @@ Additional systems (no dedicated docs yet):
   terminal session from the session-tab context menu; the original chat session
   remains unchanged.
 
-  **Codex terminal attention.** Full-screen Codex terminals receive a
-  session-scoped `notify` override for the official `agent-turn-complete`
-  event. Jean tails that notification file, persists the Codex thread id and
-  terminal activity timestamp, marks the session waiting, invalidates session
-  caches, and emits `terminal:attention`. Submitting terminal input clears the
-  waiting state. The backing Jean `sessionId` must therefore be carried through
+  Native PI terminal sessions receive a generated `--session-id` when created,
+  persist that ID as `pi_session_id`, and reconnect with `pi --session <id>`.
+  The native history picker reads PI JSONL sessions from
+  `~/.pi/agent/sessions/**`, matching them by working directory. In web chat,
+  `pi_agent_owns_policy` makes Jean a transparent PI client: Jean retains RPC
+  transport, persistence, streaming, and attachments while omitting its
+  `--tools` allowlist and appended system prompt so PI keeps ownership of its
+  tools, extensions, and project instructions.
+
+  **Terminal attention.** Full-screen Codex and Claude terminals report their
+  turn lifecycle into a terminal-scoped signal file
+  (`<app_data>/terminal-notifications/{terminal}.jsonl`, one NDJSON line per
+  event — keyed by terminal, not session, because the tailer thread that deletes
+  the file lives and dies with its terminal). Codex gets a `notify` override for
+  the official `agent-turn-complete`
+  event; Claude gets `UserPromptSubmit` / `Stop` / `StopFailure` / `Notification`
+  (`permission_prompt|worker_permission_prompt` — plain-word matchers are exact,
+  not regex) / `SessionEnd` hooks injected as inline `--settings`
+  JSON, so the user's own `~/.claude/settings.json` is never touched. Jean tails
+  the file, persists the Codex thread id and terminal activity timestamp, flips
+  the session between working, waiting, and idle, invalidates session caches,
+  and emits `terminal:working` / `terminal:attention` / `terminal:idle`.
+  Attention also plays the configured waiting sound and fires an OS banner,
+  matching `chat:done`; `terminal:idle` (the CLI is gone) silently clears both
+  flags. The tailer emits one final `terminal:idle` when its terminal
+  disappears, whatever ended the CLI — Codex has no session-end event to report
+  with, and submitting `/exit` itself counts as terminal input, so without it a
+  quit Codex session stays pinned to "in progress". In Codex terminals, Enter
+  clears the waiting state and marks the session working (Codex has no
+  prompt-submit event). Claude terminals ignore Enter, because Enter also
+  confirms dialogs, menus, and local slash commands that start no turn; there a
+  lone Esc or Ctrl-C settles the session to idle, because `Stop` does not fire
+  on an interrupt. The backing Jean `sessionId` must therefore be carried through
   terminal creation, native-session reconnect, frontend terminal persistence,
-  `start_terminal`, and both native/WebSocket transports.
+  `start_terminal`, and both native/WebSocket transports. Terminals opened in an
+  _external_ OS terminal cannot be instrumented and stay idle. Only the CLI
+  Jean itself launches is instrumented; one the user starts _by hand_ in that
+  terminal carries no hook and does not report.
 
   **Web-mode persistence.** In web access (Axum HTTP server + WebSocket),
   panel/side/drawer and modal terminals survive a full browser refresh. Three
@@ -329,6 +398,12 @@ Additional systems (no dedicated docs yet):
   continues to access only its serving Jean instance. New global client state
   must use a composite `(serverId, resourceId)` identity; raw server resource
   IDs are not globally unique.
+
+  **SSH tunnel profiles.** A remote profile is either a direct Web Access URL
+  or a desktop-managed `ssh -N` local forward to a loopback-only jean-server.
+  The supervisor lives in `src-tauri/src/ssh_tunnel/` and is not dispatched
+  through jean-core or MCP. See `docs/developer/ssh-tunnel.md`. Notifications
+  such as ntfy are not part of this transport.
 
   When an established WebSocket disconnects, the frontend reloads the page
   instead of repairing stale in-memory state. The normal
@@ -376,7 +451,7 @@ Additional systems (no dedicated docs yet):
 - **Diagnostics** - CPU/memory monitoring panel (`src-tauri/src/diagnostics/`)
 - **MCP** - Model Context Protocol server integration with per-project overrides (`src/services/mcp.ts`). First-party **Jean MCP** (`jean-core/src/jean_mcp_core.rs`) exposes project/worktree/session tools, usage + session model controls (`get_usage`, `set_session_model`), Run-command / panel-command dev environments (`get_run_environments`: running state, worktree/base session, startup command, ports, URL), plus the ship loop: `create_commit`, `push_worktree`, `detect_open_pr`, `link_worktree_pr`, `unlink_worktree_pr`, `create_pull_request`, `merge_pull_request`, `run_review` (thin wrappers over existing project commands). MCP `create_session` reuses an empty, idle chat session in the worktree before it creates another session; terminal, queued, running, archived, or previously used sessions are never reused. PR tools resolve repository paths from Jean's worktree ID; creation and linking persist the PR number and URL on the worktree.
 - **Model Catalog** - CDN-driven model lists and reasoning capabilities with bundled offline fallback ([model-catalog.md](./model-catalog.md))
-- **CLI Management** - Claude CLI, Codex CLI, Cursor CLI, OpenCode, PI, Command Code, Grok, Kimi Code, and gh CLI installation/versioning (backend-specific modules under `src-tauri/src/`)
+- **CLI Management** - Claude CLI, Codex CLI, Cursor CLI, OpenCode, PI, Command Code, Grok, Kimi Code, Antigravity, Muse, and gh CLI installation/versioning (backend-specific modules under `src-tauri/src/`)
 
 Cursor-specific notes:
 
@@ -438,6 +513,21 @@ MainWindow (Top-level orchestrator)
     ├── ArchivedModal / CloseWorktreeDialog / QuitConfirmationDialog
     └── Toaster (Notifications)
 ```
+
+### Collapsed Sidebar Edge Preview
+
+On desktop pointer devices, `SidebarHoverPreview.tsx` temporarily renders
+`LeftSideBar` above the main content when the pointer rests on the left edge.
+This preview does not update `leftSidebarVisible`, so navigation inside it does
+not pin the sidebar or change persisted UI state. The normal sidebar toggle
+still updates `leftSidebarVisible`, converting the preview into the persistent,
+in-flow sidebar.
+
+The behavior is controlled by the persisted
+`sidebar_hover_open_enabled` preference, which defaults to `false` for both
+new installs and existing preference files that omit the field. Portaled
+sidebar menus and active drag operations hold the preview open until the
+interaction finishes.
 
 ### Canvas View
 
@@ -518,6 +608,7 @@ src-tauri/src/
 ├── chat/                  # Session lifecycle management
 │   ├── commands.rs        # Tauri commands (send message, create session, image processing)
 │   ├── claude.rs          # Claude CLI process spawning and management
+│   ├── claude_host.rs     # Detached Claude host for mid-turn steering (Unix)
 │   ├── pi.rs              # PI RPC host/stream parsing/steering integration
 │   ├── detached.rs        # Detached process recovery (survives app quit via nohup)
 │   ├── registry.rs        # Active session registry
@@ -742,6 +833,25 @@ re-exported as `jean_core::open_url_in_browser`). On Windows it runs `cmd /c sta
 `silent_command()` so the intermediary console never flashes. Do not call raw
 `Command::new("cmd")` with `/c start`.
 
+## Claude CLI mid-turn steering
+
+Claude runs normally use `cat input.jsonl | nohup claude --print --input-format stream-json ... >> run.jsonl`. stdin closes after the first message, so nothing can reach a running turn. When `claude_auto_steer_enabled` is on (default off), on Unix, and the resolved CLI lists `--replay-user-messages` in `--help`, Jean starts a detached **Claude host** instead (`jean-core/src/chat/claude_host.rs`, modeled on the PI RPC host).
+
+- Jean launches itself with `--jean-claude-host` via `spawn_detached_process_with_env` (`set -m; nohup`, own process group). The host owns the `claude` child, writes the initial prompt, keeps stdin open, and appends child stdout/stderr to the run JSONL. The run survives Jean quitting.
+- Socket: `<app_data>/r/c<sid8><run8>.sock`. Request `{"type":"steer","message":...}`; reply `{"ok":true}` or `{"ok":false,"error":...}`. `steer_claude_turn` returns the error and the frontend falls back to the queue.
+- Finish rule (pure `ClaudeHostState`): on `result`, close stdin (CLI exits) unless a steer was written that the CLI has not echoed yet. A safety net closes stdin 30 s after a `result` when a pending steer is never consumed.
+- Echo filter: with `--replay-user-messages` the CLI re-emits each consumed stdin message as `{"type":"user","isReplay":true,...}`. The host drops the first one (the initial prompt) and rewrites each later one as `{"type":"steered_user_message","text":...}`. No parser sees a replayed user line, so the prompt never shows twice. `parse_run_to_message` already maps `steered_user_message` to `ContentBlock::UserInput`.
+- Markers: the host writes `{"type":"jean_claude_host_start"}` first and `{"type":"jean_claude_host_exit","code":N}` last. `tail_claude_output` sees the start marker and then ends only at the exit marker (or on cancel / dead process), not at the first `result`. Usage is summed over all `result` lines. The tailer emits `chat:steered` when it reads `steered_user_message`, so live and history positions match.
+- Recovery and cancel are unchanged: `run.pid` is the host PID, `recover_incomplete_runs` uses liveness + `type:"result"`, and `kill_process_tree` reaps the host process group (host + `claude` + MCP children).
+
+Known limitations:
+
+- A steer only lands at a tool boundary. A long tool call or a subagent Task call delays it. Nothing shows in the UI until the CLI consumes the steer.
+- A steer during a no-tool answer becomes a second turn in the same process (like the queue, but without a new run).
+- Model, execution mode, effort, and thinking cannot change for a steer. They apply from the next normal message.
+- Mid-turn injection is observed CLI behavior (tested with Claude Code 2.1.285+), not a documented contract. This is why the setting is off by default.
+- One extra host process per running Claude session. Windows/WSL, older CLIs, and runs started before the setting was enabled keep the plain pipeline; steering them fails and the prompt is queued.
+
 ## Antigravity CLI backend
 
 Jean integrates Google's native `agy` executable through its documented headless interface. Interactive turns use `agy -p --output-format stream-json`; structured one-shot operations use `--output-format json --json-schema`. Jean maps Plan to `--mode plan`, Build to `--mode accept-edits`, and Yolo to `--mode accept-edits --dangerously-skip-permissions`.
@@ -764,3 +874,31 @@ Current official references:
 - https://antigravity.google/docs/cli/permissions
 - https://antigravity.google/docs/cli/mcp
 - https://antigravity.google/docs/cli/gcli-migration
+
+## Muse Code backend
+
+Jean runs Meta's Muse Code CLI (`muse`) through its MSP server, `muse serve`, which speaks JSON-RPC 2.0 with one JSON message per line on stdio. Each turn runs in a detached host process (`--jean-muse-msp-host`, modeled on the Kimi ACP host). The host starts `muse serve` in the worktree, sends `initialize`, starts or resumes the Muse session, sends `turn/start`, and reads notifications until `turn/completed`. Cancel sends `turn/cancel`.
+
+The Muse session ID from `session/start` is stored in `muse_session_id`. Follow-up turns call `session/resume` with that ID. Jean maps `item/*` notifications to the common chat model: `agentMessage` items become text, `reasoning` items become thinking, and `toolCall` items become tool calls with their `visibleOutput` as the result. Usage comes from `session/tokenUsage` and `turn/completed`.
+
+Execution modes map to Muse permission profiles:
+
+| Jean mode | `permissionProfile` | Extra settings                 |
+| --------- | ------------------- | ------------------------------ |
+| Plan      | `:read-only`        | None                           |
+| Build     | `:ask-me`           | `approvalMode: allowAll`       |
+| Yolo      | `:unrestricted`     | `muse serve --disable-sandbox` |
+
+The host answers MSP `approval/request` itself: it picks the approved choice in Build and Yolo and the denied choice in Plan. `muse serve` runs with `--disable-request-user-input`. Muse has no plan tool, so Plan mode treats the final agent message as the plan, the same way Kimi and Antigravity do. Jean passes its system prompt with `-c run.developer_prompt=...`. Do not use `run.system_prompt`, because it replaces Muse's own prompt. Reasoning effort passes through when it is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
+
+Model values use the `muse/` prefix. `muse/default` omits the model so the server picks its default.
+
+Magic Prompts run `muse exec --json --permission-profile :read-only` and read the final text from the `run.terminal.completed` record. Jean passes `--output-schema`, also wraps the prompt with strict JSON instructions, and extracts the JSON object tolerantly, because `--output-schema` only works with the Meta provider.
+
+Muse MCP servers come from the `mcp_servers` object in `~/.config/muse/settings.json`. `muse serve` loads every enabled server itself, so Jean shows these servers as automatic and does not toggle them per session.
+
+Muse authenticates with `META_API_KEY`, a stored API key, or a stored browser session in `~/.config/muse/auth.json`. The CLI has no auth status command, so Jean checks the environment variable and that file. Sign-in runs `muse login` in Jean's in-app login terminal (`CliLoginModal`), so it also works in Web Access.
+
+Jean's own MCP server is added per session through `session/start` `config.mcpServers` with `mode: "optional"`. `muse serve` refuses that field unless `initialize` requests the `sessionMcp` capability.
+
+To test without a Meta account, start Jean with `JEAN_MUSE_PROVIDER=echo`. The host then runs `muse serve --provider echo`, which replies `echo: <prompt>`. The echo provider never calls tools, so tool calls, approvals, and structured magic-prompt output need a real Meta account to verify.

@@ -134,6 +134,8 @@ interface VirtualizedMessageListProps {
   onLoadOlderRuns?: () => void
   /** Run index of the oldest currently-loaded run (for label display) */
   loadedRunStartIndex?: number
+  /** Sends a user message (answers to inline numbered questions) */
+  onSendAnswer?: (text: string) => void
 }
 
 /**
@@ -182,6 +184,7 @@ export const VirtualizedMessageList = memo(
         isLoadingOlder = false,
         onLoadOlderRuns,
         loadedRunStartIndex = 0,
+        onSendAnswer,
       },
       ref
     ) {
@@ -509,6 +512,7 @@ export const VirtualizedMessageList = memo(
                   onCopyToInput={onCopyToInput}
                   hideApproveButtons={hideApproveButtons}
                   durationMs={durationMs}
+                  onSendAnswer={onSendAnswer}
                 />
               </div>
             )

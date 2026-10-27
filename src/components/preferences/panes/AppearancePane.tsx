@@ -409,7 +409,7 @@ export const AppearancePane: React.FC = () => {
           >
             <Switch
               aria-label="Compact chat view"
-              checked={preferences?.compact_chat_view_enabled ?? false}
+              checked={preferences?.compact_chat_view_enabled ?? true}
               onCheckedChange={checked =>
                 patchPreferences.mutate({
                   compact_chat_view_enabled: checked,
@@ -640,6 +640,29 @@ export const AppearancePane: React.FC = () => {
               disabled={syncZoomLevels}
             />
           </ScalingField>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Sidebar"
+        anchorId="pref-appearance-section-sidebar"
+      >
+        <div className="space-y-4">
+          <InlineField
+            label="Open from screen edge"
+            description="Temporarily reveal the collapsed sidebar when the pointer rests on the left edge. Off by default."
+          >
+            <Switch
+              aria-label="Open sidebar from screen edge"
+              checked={preferences?.sidebar_hover_open_enabled ?? false}
+              onCheckedChange={checked =>
+                patchPreferences.mutate({
+                  sidebar_hover_open_enabled: checked,
+                })
+              }
+              disabled={patchPreferences.isPending}
+            />
+          </InlineField>
         </div>
       </SettingsSection>
     </div>

@@ -32,7 +32,7 @@ import { CLI_DISPLAY_NAMES, resolveCliPathUpdateAction } from '@/lib/cli-update'
 import type { PendingCliUpdate } from '@/store/ui-store'
 import { toast } from 'sonner'
 import { formatShortcutDisplay, DEFAULT_KEYBINDINGS } from '@/types/keybindings'
-import { isNativeApp } from '@/lib/environment'
+import { isNativeApp, updateTargetLabel } from '@/lib/environment'
 import { UnreadBell } from '@/components/unread/UnreadBell'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { applyServerUpdate } from '@/hooks/useServerUpdateCheck'
@@ -46,12 +46,15 @@ interface TitleBarProps {
   className?: string
   title?: string
   hideTitle?: boolean
+  /** Width (px) of the left rail + sidebar; the center group is centered over the remaining content area */
+  contentInset?: number
 }
 
 export function TitleBar({
   className,
   title = 'Jean',
   hideTitle = false,
+  contentInset = 0,
 }: TitleBarProps) {
   const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
   const toggleLeftSidebar = useUIStore(state => state.toggleLeftSidebar)
@@ -132,6 +135,11 @@ export function TitleBar({
                   onClick={toggleLeftSidebar}
                   variant="ghost"
                   size="icon"
+                  aria-label={
+                    leftSidebarVisible
+                      ? 'Hide Left Sidebar'
+                      : 'Show Left Sidebar'
+                  }
                   className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
                 >
                   {leftSidebarVisible ? (
@@ -203,8 +211,13 @@ export function TitleBar({
         </div>
       ) : (
         <div
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[50%] px-2 pt-1"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[50%] px-2 pt-1"
+          style={
+            {
+              left: `calc(50% + ${contentInset / 2}px)`,
+              WebkitAppRegion: 'no-drag',
+            } as React.CSSProperties
+          }
         >
           <div className="flex items-center gap-2">
             <UnreadBell title={title} hideTitle={hideTitle} />
@@ -357,7 +370,7 @@ function CliUpdatesIndicator() {
           openCliLoginModal(update.type, action[0], action[1], 'update')
         } else {
           toast.error(
-            `Can't auto-update ${CLI_DISPLAY_NAMES[update.type]}. Update it manually via your package manager.`
+            `Can't auto-update ${CLI_DISPLAY_NAMES[update.type]} (${updateTargetLabel()}). Update it manually via your package manager.`
           )
           return
         }
@@ -391,7 +404,8 @@ function CliUpdatesIndicator() {
           </PopoverTrigger>
         </TooltipTrigger>
         <TooltipContent side="bottom">
-          {updates.length} CLI update{updates.length > 1 ? 's' : ''} available
+          {updates.length} CLI update{updates.length > 1 ? 's' : ''} available (
+          {updateTargetLabel()})
         </TooltipContent>
       </Tooltip>
       <PopoverContent align="end" className="w-72 p-0">
@@ -406,7 +420,8 @@ function CliUpdatesIndicator() {
                   {CLI_DISPLAY_NAMES[update.type]}
                 </p>
                 <p className="text-[0.625rem] text-muted-foreground">
-                  v{update.currentVersion} → v{update.latestVersion}
+                  {updateTargetLabel()} · v{update.currentVersion} → v
+                  {update.latestVersion}
                 </p>
               </div>
               <div className="flex items-center gap-1 ml-2 shrink-0">
@@ -440,13 +455,16 @@ function ServerUpdateIndicator() {
 
   const handleClick = () => {
     if (!pending.canUpdate) {
-      toast.info(`jean-server ${pending.latestVersion} is available`, {
-        id: 'server-update-available',
-        description:
-          pending.reason ||
-          'This host cannot self-update. Replace the binary or image manually.',
-        duration: 12_000,
-      })
+      toast.info(
+        `jean-server ${pending.latestVersion} is available (${updateTargetLabel()})`,
+        {
+          id: 'server-update-available',
+          description:
+            pending.reason ||
+            'This host cannot self-update. Replace the binary or image manually.',
+          duration: 12_000,
+        }
+      )
       return
     }
     void applyServerUpdate(pending.latestVersion)
@@ -466,8 +484,8 @@ function ServerUpdateIndicator() {
       </TooltipTrigger>
       <TooltipContent side="bottom">
         {pending.canUpdate
-          ? `Update jean-server to v${pending.latestVersion} (currently v${pending.currentVersion})`
-          : `jean-server v${pending.latestVersion} available — ${pending.reason || 'manual update required'}`}
+          ? `Update jean-server on ${updateTargetLabel()} to v${pending.latestVersion} (currently v${pending.currentVersion})`
+          : `jean-server v${pending.latestVersion} available on ${updateTargetLabel()} — ${pending.reason || 'manual update required'}`}
       </TooltipContent>
     </Tooltip>
   )
@@ -512,7 +530,9 @@ function UpdateIndicator() {
           {label}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="bottom">{tooltip}</TooltipContent>
+      <TooltipContent side="bottom">
+        {tooltip} ({updateTargetLabel()})
+      </TooltipContent>
     </Tooltip>
   )
 }

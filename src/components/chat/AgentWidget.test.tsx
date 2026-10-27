@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SubAgent } from '@/types/chat'
 import { AgentWidget } from './AgentWidget'
 
-vi.mock('@/hooks/use-mobile', () => ({ useIsMobile: () => false }))
+let isMobile = false
+vi.mock('@/hooks/use-mobile', () => ({ useIsMobile: () => isMobile }))
 
 function agent(overrides: Partial<SubAgent>): SubAgent {
   return {
@@ -23,6 +24,25 @@ describe('AgentWidget', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    isMobile = false
+  })
+
+  it('shows only the token number and time on mobile', () => {
+    isMobile = true
+    render(
+      <AgentWidget
+        agents={[
+          agent({
+            id: 'mobile-agent',
+            status: 'completed',
+            tokens: 82_500,
+            durationMs: 68_000,
+          }),
+        ]}
+        open
+      />
+    )
+    expect(screen.getByText('82.5k • 1m 8s')).toBeInTheDocument()
   })
 
   it('ticks the elapsed time of a running agent', () => {
@@ -51,6 +71,28 @@ describe('AgentWidget', () => {
     })
 
     expect(screen.getByText('3 tools • 3s')).toBeInTheDocument()
+  })
+
+  it('shows the model next to a named agent', () => {
+    render(
+      <AgentWidget
+        agents={[
+          agent({
+            id: 'named-agent',
+            label: 'reviewer',
+            prompt: 'Investigate the auth bug',
+            model: 'gpt-5.4',
+            status: 'completed',
+          }),
+        ]}
+        open
+      />
+    )
+
+    expect(screen.getByText('reviewer')).toBeInTheDocument()
+    expect(screen.getByText('Investigate the auth bug')).toBeInTheDocument()
+    expect(screen.getByText(/gpt-5\.4/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('in progress')).not.toBeInTheDocument()
   })
 
   it('prefers the CLI-reported duration once done', () => {

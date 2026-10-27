@@ -102,6 +102,11 @@ export interface ProjectServer {
   local?: boolean
 }
 
+export interface SentryProjectLink {
+  organization_slug: string
+  project_slug: string
+}
+
 export interface Project {
   /** Client-only owning server for native multi-server views. */
   serverId?: string
@@ -151,8 +156,10 @@ export interface Project {
   sentry_auth_token?: string | null
   /** Sentry organization slug */
   sentry_organization_slug?: string | null
-  /** Sentry project slug */
+  /** Sentry project slug. Mirrors the first assigned project. */
   sentry_project_slug?: string | null
+  /** Sentry projects whose issues are shown together for this Jean project */
+  sentry_projects?: SentryProjectLink[]
   /** Sentry region API base URL (auto-resolved from the org) */
   sentry_base_url?: string | null
   /** IDs of linked projects for cross-project context sharing */
@@ -200,6 +207,43 @@ export interface BrowseDirectoryResult {
  */
 export function isFolder(project: Project): boolean {
   return project.is_folder === true
+}
+
+/**
+ * A git worktree that exists for a project but is not tracked by Jean.
+ * Command payload (`list_unmanaged_worktrees`), so fields are camelCase.
+ */
+export interface UnmanagedWorktree {
+  path: string
+  /** Branch name. Null for detached and bare checkouts. */
+  branch: string | null
+  /** Full HEAD oid, or empty when git did not print one. */
+  head: string
+  /** First 7 characters of `head`. */
+  headShort: string
+  prunable: boolean
+  locked: boolean
+  detached: boolean
+  bare: boolean
+}
+
+/** Why a path must not be imported. */
+export type BlockedImportKind = 'project' | 'main'
+
+/**
+ * A checkout `import_worktree` rejects.
+ * `project` is the Jean project path. `main` is the repository's primary
+ * working tree when that directory is not the project path.
+ */
+export interface BlockedImportPath {
+  path: string
+  kind: BlockedImportKind
+}
+
+/** `list_unmanaged_worktrees` payload. Older callers may still return an array. */
+export interface UnmanagedWorktreeListing {
+  worktrees: UnmanagedWorktree[]
+  blockedPaths: BlockedImportPath[]
 }
 
 /**

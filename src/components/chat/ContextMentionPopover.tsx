@@ -12,10 +12,10 @@ import {
   ExternalLink,
   Eye,
   Loader2,
-  Plus,
   RefreshCw,
-  Sparkles,
+  Wand2,
 } from '@/components/icons/reicon'
+import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import {
   Tooltip,
@@ -48,6 +48,7 @@ import {
 } from '@/hooks/useContextLinkUsage'
 import {
   type ContextMentionItem,
+  type ContextMentionType,
   useContextMentionData,
 } from './hooks/useContextMentionData'
 
@@ -58,6 +59,9 @@ const githubContextQueries = new Set([
   'pr-search',
   'issue-by-number',
   'pr-by-number',
+  'discussions',
+  'discussion-search',
+  'discussion',
   'security-alerts',
   'security-alert',
   'advisories',
@@ -70,6 +74,23 @@ const linearContextQueries = new Set([
 ])
 
 const DEFAULT_LIST_LIMIT = 8
+type ContextMentionTab = ContextMentionType | 'all'
+
+const tabLabels: Record<ContextMentionTab, string> = {
+  all: 'All',
+  issue: 'Issues',
+  pr: 'PRs',
+  discussion: 'Discussions',
+  security: 'Security',
+  advisory: 'Advisories',
+  linear: 'Linear',
+}
+
+const loadMoreLabels: Partial<Record<ContextMentionType, string>> = {
+  issue: 'issues',
+  pr: 'pull requests',
+  discussion: 'discussions',
+}
 /**
  * "Load more" limits per project, filter, and search. Kept at module level so
  * they survive closing the menu; cleared only by refresh or an app restart.
@@ -99,6 +120,7 @@ function getPreviewTarget(item: ContextMentionItem): PreviewTarget | null {
 function getLinkRef(item: ContextMentionItem): ContextLinkRef | null {
   if (item.issue) return { type: 'issue', id: item.issue.number }
   if (item.pr) return { type: 'pr', id: item.pr.number }
+  if (item.discussion) return { type: 'discussion', id: item.discussion.number }
   if (item.securityAlert)
     return { type: 'security', id: item.securityAlert.number }
   if (item.advisory) return { type: 'advisory', id: item.advisory.ghsaId }
@@ -152,11 +174,12 @@ export function ContextMentionPopover({
   const isMobile = useIsMobile()
   const showKeyboardHints = isNativeApp() && !isMobile
   const actionButtonClass = cn(
-    'flex min-h-8 items-center gap-1 rounded hover:bg-muted',
-    isMobile ? 'min-w-8 justify-center' : 'px-1.5'
+    'inline-flex shrink-0 items-center justify-center self-center rounded text-foreground/80 transition-colors hover:bg-muted hover:text-foreground',
+    isMobile ? 'size-8' : 'size-6'
   )
   const [includeClosed, setIncludeClosed] = useState(false)
   const [menuSearch, setMenuSearch] = useState('')
+  const [activeTab, setActiveTab] = useState<ContextMentionTab>('all')
   const [, setLimitsVersion] = useState(0)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null)
@@ -166,24 +189,26 @@ export function ContextMentionPopover({
     Map<string, ContextMentionItem>
   >(() => new Map())
   const query = menuSearch || searchQuery
-  const limitKey = (group: 'issue' | 'pr') =>
+  const limitKey = (group: ContextMentionType) =>
     `${limitKeyPrefix(projectPath, projectId)}${includeClosed}\0${group}\0${query}`
-  const issueLimit = loadedLimits.get(limitKey('issue')) ?? DEFAULT_LIST_LIMIT
-  const prLimit = loadedLimits.get(limitKey('pr')) ?? DEFAULT_LIST_LIMIT
-  const loadMore = (group: 'issue' | 'pr') => {
-    const limit = group === 'issue' ? issueLimit : prLimit
-    loadedLimits.set(limitKey(group), limit + DEFAULT_LIST_LIMIT)
-    setLimitsVersion(version => version + 1)
-  }
-  const { groups, isFetching } = useContextMentionData({
+  const limitFor = (group: ContextMentionType) =>
+    loadedLimits.get(limitKey(group)) ?? DEFAULT_LIST_LIMIT
+  const { groups, isFetching, loadMoreDiscussions } = useContextMentionData({
     open,
     projectPath,
     projectId,
     query,
     includeClosed,
-    issueLimit,
-    prLimit,
+    issueLimit: limitFor('issue'),
+    prLimit: limitFor('pr'),
+    discussionLimit: limitFor('discussion'),
   })
+  const loadMore = (group: ContextMentionType) => {
+    const limit = limitFor(group) + DEFAULT_LIST_LIMIT
+    loadedLimits.set(limitKey(group), limit)
+    setLimitsVersion(version => version + 1)
+    if (group === 'discussion') loadMoreDiscussions(limit)
+  }
   const { getMatches, currentWorktreeId } = useContextLinkUsage({
     enabled: open,
     projectId,
@@ -193,9 +218,21 @@ export function ContextMentionPopover({
   const listRef = useRef<HTMLDivElement>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
 
+  // Tabs narrow the list to one section. Search always covers every
+  // section: typing switches back to "All".
+  const currentTab = groups.some(group => group.id === activeTab)
+    ? activeTab
+    : 'all'
+  const visibleGroups = useMemo(
+    () =>
+      currentTab === 'all'
+        ? groups
+        : groups.filter(group => group.id === currentTab),
+    [currentTab, groups]
+  )
   const flatItems = useMemo(
-    () => groups.flatMap(group => group.items),
-    [groups]
+    () => visibleGroups.flatMap(group => group.items),
+    [visibleGroups]
   )
 
   const clampedSelectedIndex = Math.min(
@@ -269,6 +306,7 @@ export function ContextMentionPopover({
   useEffect(() => {
     if (!open) return
     resetListPosition()
+    setActiveTab('all')
   }, [open, searchQuery, projectPath, resetListPosition])
 
   useEffect(() => {
@@ -371,18 +409,22 @@ export function ContextMentionPopover({
             Context links
           </span>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              aria-label="Refresh context links"
-              title="Refresh context links"
-              disabled={isRefreshing || (!projectPath && !projectId)}
-              onClick={() => void handleRefresh()}
-              className="flex size-8 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-            >
-              <RefreshCw
-                className={cn('size-4', isRefreshing && 'animate-spin')}
-              />
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Refresh context links"
+                  disabled={isRefreshing || (!projectPath && !projectId)}
+                  onClick={() => void handleRefresh()}
+                  className="flex size-8 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                >
+                  <RefreshCw
+                    className={cn('size-4', isRefreshing && 'animate-spin')}
+                  />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Refresh context links</TooltipContent>
+            </Tooltip>
             <button
               type="button"
               onClick={() => {
@@ -402,12 +444,52 @@ export function ContextMentionPopover({
             </button>
           </div>
         </div>
+        {groups.length > 1 && (
+          <div
+            role="tablist"
+            aria-label="Context link sections"
+            className="flex gap-1 overflow-x-auto border-b px-2 py-1.5"
+          >
+            {(['all', ...groups.map(group => group.id)] as const).map(tab => {
+              const tabGroup =
+                tab === 'all' ? null : groups.find(group => group.id === tab)
+              const isActive = tab === currentTab
+              return (
+                <button
+                  key={tab}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => {
+                    setActiveTab(tab)
+                    resetListPosition()
+                  }}
+                  className={cn(
+                    'flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs transition-colors',
+                    isActive
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                  )}
+                >
+                  {tabLabels[tab]}
+                  {tabGroup && (
+                    <span className="tabular-nums opacity-70">
+                      {tabGroup.items.length}
+                      {tabGroup.hasMore ? '+' : ''}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        )}
         <Command label="Search issues and context links" shouldFilter={false}>
           <CommandInput
-            placeholder="Search issue title or description..."
+            placeholder="Search all sections..."
             value={menuSearch}
             onValueChange={value => {
               setMenuSearch(value)
+              setActiveTab('all')
               resetListPosition()
             }}
             onKeyDown={event => {
@@ -455,7 +537,7 @@ export function ContextMentionPopover({
                 </div>
               </CommandEmpty>
             ) : (
-              groups.map(group => (
+              visibleGroups.map(group => (
                 <CommandGroup key={group.id} heading={group.heading}>
                   {group.items.map(item => {
                     flatIndex += 1
@@ -508,78 +590,13 @@ export function ContextMentionPopover({
                             {item.badge}
                           </span>
                         )}
-                        {(item.type === 'issue' || item.type === 'pr') && (
-                          <span className="flex shrink-0 items-center gap-1 self-center">
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  aria-label={`Add ${item.label} to session context`}
-                                  className={actionButtonClass}
-                                  onClick={event => {
-                                    event.stopPropagation()
-                                    handleSelect(item)
-                                  }}
-                                >
-                                  <Plus className="size-3.5" />
-                                  {!isMobile && <span>Attach</span>}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent className="flex items-center gap-2">
-                                Add {item.label} to session context
-                                {showKeyboardHints && isSelected && (
-                                  <Kbd>Enter</Kbd>
-                                )}
-                              </TooltipContent>
-                            </Tooltip>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  aria-label={
-                                    existing
-                                      ? `Open existing investigation of ${item.label}`
-                                      : `Add ${item.label} and start investigating`
-                                  }
-                                  className={actionButtonClass}
-                                  onClick={event => {
-                                    event.stopPropagation()
-                                    handleSelect(item, true)
-                                  }}
-                                >
-                                  {existing ? (
-                                    <ExternalLink className="size-3.5" />
-                                  ) : (
-                                    <Sparkles className="size-3.5" />
-                                  )}
-                                  {!isMobile && (
-                                    <span>
-                                      {existing ? 'Open' : 'Investigate'}
-                                    </span>
-                                  )}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent className="flex items-center gap-2">
-                                {existing
-                                  ? `Open ${contextLinkMatchLabel(existing, currentWorktreeId)}`
-                                  : `Add ${item.label} and start investigating`}
-                                {showKeyboardHints && isSelected && (
-                                  <Kbd>Shift+Enter</Kbd>
-                                )}
-                              </TooltipContent>
-                            </Tooltip>
-                          </span>
-                        )}
                         {preview && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <button
                                 type="button"
                                 aria-label={`Preview ${item.label}`}
-                                className={cn(
-                                  actionButtonClass,
-                                  'shrink-0 self-center min-w-8 justify-center'
-                                )}
+                                className={actionButtonClass}
                                 onClick={event => {
                                   event.stopPropagation()
                                   setPreviewTarget(preview)
@@ -593,22 +610,55 @@ export function ContextMentionPopover({
                             </TooltipContent>
                           </Tooltip>
                         )}
+                        {(item.type === 'issue' || item.type === 'pr') && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                aria-label={
+                                  existing
+                                    ? `Open existing investigation of ${item.label}`
+                                    : `Add ${item.label} and start investigating`
+                                }
+                                className={actionButtonClass}
+                                onClick={event => {
+                                  event.stopPropagation()
+                                  handleSelect(item, true)
+                                }}
+                              >
+                                {existing ? (
+                                  <ExternalLink className="size-3.5" />
+                                ) : (
+                                  <Wand2 className="size-3" />
+                                )}
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent className="flex items-center gap-2">
+                              {existing
+                                ? `Open ${contextLinkMatchLabel(existing, currentWorktreeId)}`
+                                : `Add ${item.label} and start investigating`}
+                              {showKeyboardHints && isSelected && (
+                                <Kbd>Shift+Enter</Kbd>
+                              )}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
                       </CommandItem>
                     )
                   })}
-                  {group.hasMore &&
-                    (group.id === 'issue' || group.id === 'pr') && (
-                      <button
+                  {group.hasMore && loadMoreLabels[group.id] && (
+                    <div className="flex justify-center px-2 py-2">
+                      <Button
                         type="button"
-                        className="w-full rounded px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                        onClick={() =>
-                          loadMore(group.id === 'issue' ? 'issue' : 'pr')
-                        }
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={() => loadMore(group.id)}
                       >
-                        Load more{' '}
-                        {group.id === 'issue' ? 'issues' : 'pull requests'}
-                      </button>
-                    )}
+                        Load more {loadMoreLabels[group.id]}
+                      </Button>
+                    </div>
+                  )}
                 </CommandGroup>
               ))
             )}

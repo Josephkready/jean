@@ -10,6 +10,7 @@ import { toast } from 'sonner'
 import { logger } from '@/lib/logger'
 import { generateId } from '@/lib/uuid'
 import { disposeTerminal } from '@/lib/terminal-instances'
+import { readCloseBypassDetail } from '@/lib/confirm-bypass'
 import {
   beginSessionStateHydration,
   endSessionStateHydration,
@@ -289,6 +290,28 @@ export async function reconnectNativeCliSession(
 }
 
 // Query keys for chat
+export const SEND_MESSAGE_MUTATION_KEY = ['chat', 'send-message'] as const
+
+/**
+ * True while this client's useSendMessage call for the session is in flight.
+ * Its onSuccess then replaces the chat:done message with the backend one.
+ * Turns started elsewhere (agent wakes, MCP, schedules, other clients) have
+ * no such call.
+ */
+export function hasLocalSendInFlight(
+  queryClient: QueryClient,
+  sessionId: string
+): boolean {
+  return (
+    queryClient.isMutating({
+      mutationKey: SEND_MESSAGE_MUTATION_KEY,
+      predicate: mutation =>
+        (mutation.state.variables as { sessionId?: string } | undefined)
+          ?.sessionId === sessionId,
+    }) > 0
+  )
+}
+
 export const chatQueryKeys = {
   all: ['chat'] as const,
   // Legacy: worktree-based history
@@ -1626,15 +1649,21 @@ export function useCloseSessionOrWorktreeKeybinding(
   }, [archiveSession, closeSession, queryClient])
 
   useEffect(() => {
-    const handleCloseSessionOrWorktree = () => {
+    const handleCloseSessionOrWorktree = (e: Event) => {
       // Skip when session modal is open — SessionChatModal handles CMD+W in that case
       if (useUIStore.getState().sessionChatModalOpen) return
+
+      const bypassConfirm = readCloseBypassDetail(e)
 
       // Check if confirmation is required
       const preferences = queryClient.getQueryData<AppPreferences>(
         preferencesQueryKeys.preferences()
       )
-      if (preferences?.confirm_session_close !== false && onConfirmRequired) {
+      if (
+        !bypassConfirm &&
+        preferences?.confirm_session_close !== false &&
+        onConfirmRequired
+      ) {
         // Find branch name and session count for the dialog
         const { activeWorktreeId } = useChatStore.getState()
         if (activeWorktreeId) {
@@ -1840,12 +1869,39 @@ export function upsertTurnAssistantMessage(
 }
 
 /**
+ * Put a send the backend rejected back into the composer, unless the user
+ * already typed something newer. A submit with attachments restores the typed
+ * text and the attachment chips; the wire message would instead inline them
+ * as `[Image attached: ...]` refs.
+ */
+function restoreRejectedSend(sessionId: string, sentMessage: string) {
+  const store = useChatStore.getState()
+  const typed = store.lastSentMessages[sessionId]
+  const hasAttachments = !!store.lastSentAttachments[sessionId]
+  if (store.inputDrafts[sessionId]?.trim()) {
+    store.clearLastSentAttachments(sessionId)
+  } else if (
+    hasAttachments &&
+    typed !== undefined &&
+    sentMessage.startsWith(typed)
+  ) {
+    store.setInputDraft(sessionId, typed)
+    store.restoreAttachments(sessionId)
+  } else {
+    store.setInputDraft(sessionId, sentMessage)
+    store.clearLastSentAttachments(sessionId)
+  }
+  store.clearLastSentMessage(sessionId)
+}
+
+/**
  * Hook to send a message to Claude (session-based)
  */
 export function useSendMessage() {
   const queryClient = useQueryClient()
 
   return useMutation({
+    mutationKey: SEND_MESSAGE_MUTATION_KEY,
     // Disable automatic retries - user can manually retry if needed
     // This prevents re-sending after cancellation
     retry: false,
@@ -1888,6 +1944,30 @@ export function useSendMessage() {
       if (!isTauri()) {
         throw new Error('Not in Tauri context')
       }
+
+      // Snapshot the exact send args so a background auto-continue (after a
+      // usage limit resets) can replay this send without the active-session UI.
+      // Any new send supersedes an armed auto-continue for the session.
+      const { setLastSentArgs, disarmAutoResume } = useChatStore.getState()
+      disarmAutoResume(sessionId)
+      setLastSentArgs(sessionId, {
+        sessionId,
+        worktreeId,
+        worktreePath,
+        message,
+        model,
+        executionMode,
+        thinkingLevel,
+        effortLevel,
+        parallelExecutionPrompt,
+        aiLanguage,
+        allowedTools,
+        mcpConfig,
+        chromeEnabled,
+        customProfileName,
+        backend,
+        includeRecap,
+      })
 
       console.log(
         `[SendMutation] mutationFn CALLED sessionId=${sessionId} worktreeId=${worktreeId}`
@@ -2130,15 +2210,9 @@ export function useSendMessage() {
         logger.warn('Duplicate send rejected — another run is active', {
           sessionId,
         })
-        const {
-          inputDrafts,
-          setInputDraft,
-          removeSendingSession,
-          clearExecutingMode,
-        } = useChatStore.getState()
-        if (!inputDrafts[sessionId]?.trim()) {
-          setInputDraft(sessionId, variables.message)
-        }
+        const { removeSendingSession, clearExecutingMode } =
+          useChatStore.getState()
+        restoreRejectedSend(sessionId, variables.message)
         removeSendingSession(sessionId)
         clearExecutingMode(sessionId)
         // Drop the optimistic user message by refetching authoritative state
@@ -2210,12 +2284,8 @@ export function useSendMessage() {
       // Real errors with no streamed content — rollback to previous state
       setError(sessionId, errorMessage || 'Unknown error occurred')
 
-      // The composer is cleared before the async mutation starts. Restore the
-      // submitted text after a rejected send, but never replace newer typing.
-      const { inputDrafts, setInputDraft } = useChatStore.getState()
-      if (!inputDrafts[sessionId]) {
-        setInputDraft(sessionId, variables.message)
-      }
+      // The composer is cleared before the async mutation starts.
+      restoreRejectedSend(sessionId, variables.message)
 
       if (context?.previous) {
         queryClient.setQueryData(
@@ -3006,6 +3076,19 @@ export async function steerOpencodeTurn(
     sessionId,
     message,
   })
+}
+
+/**
+ * Inject a user message into a running Claude turn through the detached
+ * Claude host. Rejects when the run is not host-backed or already finished;
+ * callers fall back to the queue.
+ */
+export async function steerClaudeTurn(
+  worktreeId: string,
+  sessionId: string,
+  message: string
+): Promise<void> {
+  await invoke('steer_claude_turn', { worktreeId, sessionId, message })
 }
 
 /**

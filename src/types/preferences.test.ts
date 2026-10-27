@@ -3,6 +3,8 @@ import {
   DEFAULT_RELEASE_NOTES_PROMPT,
   ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_BACKENDS,
   ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_MODELS,
+  MUSE_DEFAULT_MAGIC_PROMPT_BACKENDS,
+  MUSE_DEFAULT_MAGIC_PROMPT_MODELS,
   COMMANDCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
   COMMANDCODE_DEFAULT_MAGIC_PROMPT_MODELS,
   DEFAULT_INVESTIGATE_ADVISORY_PROMPT,
@@ -11,12 +13,16 @@ import {
   DEFAULT_INVESTIGATE_PR_PROMPT,
   DEFAULT_INVESTIGATE_SECURITY_ALERT_PROMPT,
   DEFAULT_INVESTIGATE_SENTRY_ISSUE_PROMPT,
+  DEFAULT_GLOBAL_SYSTEM_PROMPT,
   DEFAULT_INVESTIGATE_WORKFLOW_RUN_PROMPT,
+  DEFAULT_PARALLEL_EXECUTION_PROMPT,
   defaultPreferences,
   GROK_DEFAULT_MAGIC_PROMPT_BACKENDS,
   GROK_DEFAULT_MAGIC_PROMPT_MODELS,
   GROK_DEFAULT_MAGIC_PROMPT_MODES,
   KIMI_DEFAULT_MAGIC_PROMPT_BACKENDS,
+  DEVIN_DEFAULT_MAGIC_PROMPT_BACKENDS,
+  DEVIN_DEFAULT_MAGIC_PROMPT_MODELS,
   PI_DEFAULT_MAGIC_PROMPT_BACKENDS,
   PI_DEFAULT_MAGIC_PROMPT_MODELS,
   resolveMagicPromptBackend,
@@ -54,6 +60,10 @@ describe('magic prompt preference resolvers', () => {
     expect(defaultPreferences.font_weight).toBe('normal')
   })
 
+  it('keeps collapsed sidebar edge hover off by default', () => {
+    expect(defaultPreferences.sidebar_hover_open_enabled).toBe(false)
+  })
+
   it('uses Jean-managed Command Code CLI by default', () => {
     expect(defaultPreferences.commandcode_cli_source).toBe('jean')
   })
@@ -66,8 +76,16 @@ describe('magic prompt preference resolvers', () => {
     expect(defaultPreferences.kimi_cli_source).toBe('jean')
   })
 
+  it('uses the official PATH Devin CLI by default', () => {
+    expect(defaultPreferences.devin_cli_source).toBe('jean')
+  })
+
   it('uses Jean-managed Antigravity CLI by default', () => {
     expect(defaultPreferences.antigravity_cli_source).toBe('jean')
+  })
+
+  it('uses Jean-managed Muse CLI by default', () => {
+    expect(defaultPreferences.muse_cli_source).toBe('jean')
   })
 
   it('provides magic prompt defaults for Pi', () => {
@@ -133,6 +151,16 @@ describe('magic prompt preference resolvers', () => {
     )
   })
 
+  it('provides magic prompt defaults for Devin', () => {
+    expect(DEVIN_DEFAULT_MAGIC_PROMPT_BACKENDS.investigate_issue_backend).toBe(
+      'devin'
+    )
+    expect(DEVIN_DEFAULT_MAGIC_PROMPT_MODELS.investigate_issue_model).toBe(
+      'devin/default'
+    )
+    expect(defaultPreferences.selected_devin_model).toBe('devin/default')
+  })
+
   it('provides magic prompt defaults for Antigravity', () => {
     expect(
       ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_BACKENDS.investigate_issue_backend
@@ -143,6 +171,16 @@ describe('magic prompt preference resolvers', () => {
     expect(defaultPreferences.selected_antigravity_model).toBe(
       'antigravity/auto'
     )
+  })
+
+  it('provides magic prompt defaults for Muse', () => {
+    expect(MUSE_DEFAULT_MAGIC_PROMPT_BACKENDS.investigate_issue_backend).toBe(
+      'muse'
+    )
+    expect(MUSE_DEFAULT_MAGIC_PROMPT_MODELS.investigate_issue_model).toBe(
+      'muse/default'
+    )
+    expect(defaultPreferences.selected_muse_model).toBe('muse/default')
   })
 
   it('provides dedicated defaults for Sentry investigations', () => {
@@ -200,8 +238,9 @@ describe('magic prompt preference resolvers', () => {
     expect(prompt).toContain('until the latest pushed commit is green')
   })
 
-  it('keeps automatic recaps on by default', () => {
-    expect(defaultPreferences.auto_recaps_enabled).toBe(true)
+  it('shows filenames in mention badges and enables chat spellcheck by default', () => {
+    expect(defaultPreferences.show_full_file_path).toBe(false)
+    expect(defaultPreferences.spellcheck_enabled).toBe(true)
   })
 
   it('always-on parallel prompting falls back to the default prompt', () => {
@@ -211,6 +250,23 @@ describe('magic prompt preference resolvers', () => {
     expect(defaultPreferences).not.toHaveProperty('codex_multi_agent_enabled')
     expect(defaultPreferences).not.toHaveProperty('codex_max_agent_threads')
     expect(defaultPreferences.magic_prompts.parallel_execution).toBeNull()
+    expect(DEFAULT_PARALLEL_EXECUTION_PROMPT).toContain(
+      '### Subagent Strategy to keep main context window clean'
+    )
+    expect(DEFAULT_PARALLEL_EXECUTION_PROMPT).toContain(
+      'throw more compute at it via subagents'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain('Subagent Strategy')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      '### 3. Self-Improvement Loop'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      '### 6. Autonomous Bug Fixing'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain(
+      '### 7. Autonomous Bug Fixing'
+    )
+    expect(defaultPreferences.compact_chat_view_enabled).toBe(true)
   })
 
   it('prefers explicit backend overrides', () => {

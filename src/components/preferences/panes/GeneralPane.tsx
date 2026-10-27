@@ -24,6 +24,7 @@ import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { BackendLabel } from '@/components/ui/backend-label'
+import { BetaBadge } from '@/components/ui/badge'
 import {
   Command,
   CommandEmpty,
@@ -51,6 +52,13 @@ import {
   useAvailableGhVersions,
   ghCliQueryKeys,
 } from '@/services/gh-cli'
+import {
+  useGlabCliStatus,
+  useGlabCliAuth,
+  useGlabPathDetection,
+  useAvailableGlabVersions,
+  glabCliQueryKeys,
+} from '@/services/glab-cli'
 import {
   useCodexCliStatus,
   useCodexCliAuth,
@@ -112,8 +120,16 @@ import {
   useAvailableKimiModels,
   kimiCliQueryKeys,
 } from '@/services/kimi-cli'
+import {
+  useAvailableDevinModels,
+  useDevinCliAuth,
+  useDevinCliStatus,
+  useDevinPathDetection,
+  devinCliQueryKeys,
+} from '@/services/devin-cli'
 import type { ClaudeAuthStatus } from '@/types/claude-cli'
 import type { GhAuthStatus } from '@/types/gh-cli'
+import type { GlabAuthStatus } from '@/types/glab-cli'
 import type { CodexAuthStatus } from '@/types/codex-cli'
 import type { CodeRabbitAuthStatus } from '@/types/coderabbit-cli'
 import type { OpenCodeAuthStatus } from '@/types/opencode-cli'
@@ -122,6 +138,7 @@ import type { PiAuthStatus } from '@/types/pi-cli'
 import type { CommandCodeAuthStatus } from '@/types/commandcode-cli'
 import type { GrokAuthStatus } from '@/types/grok-cli'
 import type { KimiAuthStatus } from '@/types/kimi-cli'
+import type { DevinAuthStatus } from '@/types/devin-cli'
 import {
   Select,
   SelectContent,
@@ -154,7 +171,6 @@ import {
 import { withAdaptiveEffortOption } from '@/components/chat/toolbar/toolbar-options'
 import type { AppPreferences } from '@/types/preferences'
 import {
-  effortLevelOptions,
   codexReasoningOptions,
   codexModelVerbosityOptions,
   grokReasoningOptions,
@@ -176,6 +192,7 @@ import {
   type PiModel,
   type GrokModel,
   type KimiModel,
+  type DevinModel,
   type CliBackend,
   type TerminalApp,
   type EditorApp,
@@ -184,15 +201,18 @@ import {
   type OpenInDefault,
   newSessionKindOptions,
   type NewSessionKind,
+  CLOSE_CONFIRM_BYPASS_MODIFIERS,
+  type CloseConfirmBypassModifier,
 } from '@/types/preferences'
+import { closeConfirmBypassLabel } from '@/lib/confirm-bypass'
 import {
   COMMANDCODE_MODEL_OPTIONS,
   CURSOR_MODEL_OPTIONS,
   GROK_MODEL_OPTIONS,
+  DEVIN_MODEL_OPTIONS,
   KIMI_MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
   PI_MODEL_OPTIONS,
-  KIMI_EFFORT_LEVEL_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
 import {
   formatCursorModelLabel,
@@ -226,6 +246,8 @@ import { getPathUpdateAction } from '@/lib/cli-update'
 import { SettingsSection } from '../SettingsSection'
 import { BackendCliSourceSelect } from '../BackendCliSourceSelect'
 import { AiLanguageField } from './AiLanguageField'
+import { BrowserDefaultHostField } from './BrowserDefaultHostField'
+import { resolveOverrideReasoning } from './override-reasoning'
 import {
   resolveDefaultModelForBackend,
   resolvePiDefaultModel,
@@ -255,6 +277,14 @@ const InlineField: React.FC<{
   </div>
 )
 
+// Module-level is safe: closeConfirmBypassLabel reads `isClientMacOS`, itself a
+// module-level const derived from `navigator`, so it is settled at import time.
+const BYPASS_MODIFIER_LABELS: Record<CloseConfirmBypassModifier, string> = {
+  shift: closeConfirmBypassLabel('shift') ?? 'Shift',
+  alt: closeConfirmBypassLabel('alt') ?? 'Alt',
+  none: 'Off',
+}
+
 type PreferencesPaneScope =
   | 'general'
   | 'claude'
@@ -265,6 +295,7 @@ type PreferencesPaneScope =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'github'
   | 'coderabbit'
 
@@ -277,6 +308,7 @@ const backendPaneScopes: readonly PreferencesPaneScope[] = [
   'commandcode',
   'grok',
   'kimi',
+  'devin',
 ]
 
 function formatOpenCodeModelLabelForSettings(value: string) {
@@ -360,10 +392,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     | 'opencode'
     | 'pi'
     | 'gh'
+    | 'glab'
     | 'coderabbit'
     | 'commandcode'
     | 'grok'
     | 'kimi'
+    | 'devin'
     | null
   >(null)
   const [isDeletingCli, setIsDeletingCli] = useState(false)
@@ -404,12 +438,14 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: codexPathDetection } = useCodexPathDetection()
   const { data: opencodePathDetection } = useOpenCodePathDetection()
   const { data: ghPathDetection } = useGhPathDetection()
+  const { data: glabPathDetection } = useGlabPathDetection()
   const { data: coderabbitPathDetection } = useCodeRabbitPathDetection()
   const { data: cursorPathDetection } = useCursorPathDetection()
   const { data: piPathDetection } = usePiPathDetection()
   const { data: commandcodePathDetection } = useCommandCodePathDetection()
   const { data: grokPathDetection } = useGrokPathDetection()
   const { data: kimiPathDetection } = useKimiPathDetection()
+  const { data: devinPathDetection } = useDevinPathDetection()
 
   // CLI status hooks
   const { data: cliStatus, isLoading: isCliLoading } = useClaudeCliStatus()
@@ -422,6 +458,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     !!claudeLatestStable &&
     isNewerVersion(claudeLatestStable.version, cliStatus.version)
   const { data: ghStatus, isLoading: isGhLoading } = useGhCliStatus()
+  const { data: glabStatus, isLoading: isGlabLoading } = useGlabCliStatus()
   const { data: cursorStatus, isLoading: isCursorLoading } =
     useCursorCliStatus()
   const { data: piStatus, isLoading: isPiLoading } = usePiCliStatus()
@@ -429,6 +466,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     useCommandCodeCliStatus()
   const { data: grokStatus, isLoading: isGrokLoading } = useGrokCliStatus()
   const { data: kimiStatus, isLoading: isKimiLoading } = useKimiCliStatus()
+  const { data: devinStatus, isLoading: isDevinLoading } = useDevinCliStatus()
   const isGhPathSource = preferences?.gh_cli_source === 'path'
   const { data: ghVersions, isLoading: isGhVersionsLoading } =
     useAvailableGhVersions({ enabled: isGhPathSource && !!ghStatus?.installed })
@@ -437,6 +475,16 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     !!ghStatus?.version &&
     !!ghLatestStable &&
     isNewerVersion(ghLatestStable.version, ghStatus.version)
+  const isGlabPathSource = preferences?.glab_cli_source === 'path'
+  const { data: glabVersions, isLoading: isGlabVersionsLoading } =
+    useAvailableGlabVersions({
+      enabled: isGlabPathSource && !!glabStatus?.installed,
+    })
+  const glabLatestStable = glabVersions?.find(v => !v.prerelease)
+  const glabHasUpdate =
+    !!glabStatus?.version &&
+    !!glabLatestStable &&
+    isNewerVersion(glabLatestStable.version, glabStatus.version)
   const { data: codexStatus, isLoading: isCodexLoading } = useCodexCliStatus()
   const isCodexPathSource = preferences?.codex_cli_source === 'path'
   const { data: codexVersions, isLoading: isCodexVersionsLoading } =
@@ -484,6 +532,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: ghAuth, isLoading: isGhAuthLoading } = useGhCliAuth({
     enabled: !!ghStatus?.installed,
   })
+  const { data: glabAuth, isLoading: isGlabAuthLoading } = useGlabCliAuth({
+    enabled: !!glabStatus?.installed,
+  })
   const { data: codexAuth, isLoading: isCodexAuthLoading } = useCodexCliAuth({
     enabled: !!codexStatus?.installed,
   })
@@ -513,6 +564,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: kimiAuth, isLoading: isKimiAuthLoading } = useKimiCliAuth({
     enabled: !!kimiStatus?.installed,
   })
+  const { data: devinAuth, isLoading: isDevinAuthLoading } = useDevinCliAuth({
+    enabled: !!devinStatus?.installed,
+  })
   const { data: availableOpencodeModels } = useAvailableOpencodeModels({
     enabled: !!opencodeStatus?.installed,
   })
@@ -531,17 +585,22 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: availableKimiModels } = useAvailableKimiModels({
     enabled: !!kimiStatus?.installed,
   })
+  const { data: availableDevinModels } = useAvailableDevinModels({
+    enabled: !!devinStatus?.installed,
+  })
 
   // Re-check CLI status when the source preference changes (handles initial load
   // with source already set to "path" and any timing issues with onSuccess invalidation)
   const prevSources = useRef({
     claude: preferences?.claude_cli_source,
     gh: preferences?.gh_cli_source,
+    glab: preferences?.glab_cli_source,
     codex: preferences?.codex_cli_source,
     opencode: preferences?.opencode_cli_source,
     pi: preferences?.pi_cli_source,
     grok: preferences?.grok_cli_source,
     kimi: preferences?.kimi_cli_source,
+    devin: preferences?.devin_cli_source,
     coderabbit: preferences?.coderabbit_cli_source,
     commandcode: preferences?.commandcode_cli_source,
   })
@@ -549,11 +608,13 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     const cur = {
       claude: preferences?.claude_cli_source,
       gh: preferences?.gh_cli_source,
+      glab: preferences?.glab_cli_source,
       codex: preferences?.codex_cli_source,
       opencode: preferences?.opencode_cli_source,
       pi: preferences?.pi_cli_source,
       grok: preferences?.grok_cli_source,
       kimi: preferences?.kimi_cli_source,
+      devin: preferences?.devin_cli_source,
       coderabbit: preferences?.coderabbit_cli_source,
       commandcode: preferences?.commandcode_cli_source,
     }
@@ -562,6 +623,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
     if (cur.gh !== prevSources.current.gh) {
       queryClient.invalidateQueries({ queryKey: ghCliQueryKeys.status() })
+    }
+    if (cur.glab !== prevSources.current.glab) {
+      queryClient.invalidateQueries({ queryKey: glabCliQueryKeys.status() })
     }
     if (cur.codex !== prevSources.current.codex) {
       queryClient.invalidateQueries({ queryKey: codexCliQueryKeys.status() })
@@ -574,6 +638,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
     if (cur.kimi !== prevSources.current.kimi) {
       queryClient.invalidateQueries({ queryKey: kimiCliQueryKeys.status() })
+    }
+    if (cur.devin !== prevSources.current.devin) {
+      queryClient.invalidateQueries({ queryKey: devinCliQueryKeys.status() })
     }
     if (cur.coderabbit !== prevSources.current.coderabbit) {
       queryClient.invalidateQueries({
@@ -592,11 +659,13 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   }, [
     preferences?.claude_cli_source,
     preferences?.gh_cli_source,
+    preferences?.glab_cli_source,
     preferences?.codex_cli_source,
     preferences?.opencode_cli_source,
     preferences?.pi_cli_source,
     preferences?.grok_cli_source,
     preferences?.kimi_cli_source,
+    preferences?.devin_cli_source,
     preferences?.coderabbit_cli_source,
     preferences?.commandcode_cli_source,
     queryClient,
@@ -617,6 +686,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   // Track which auth check is in progress (for manual refresh)
   const [checkingClaudeAuth, setCheckingClaudeAuth] = useState(false)
   const [checkingGhAuth, setCheckingGhAuth] = useState(false)
+  const [checkingGlabAuth, setCheckingGlabAuth] = useState(false)
   const [checkingCodexAuth, setCheckingCodexAuth] = useState(false)
   const [checkingCodeRabbitAuth, setCheckingCodeRabbitAuth] = useState(false)
   const [checkingOpenCodeAuth, setCheckingOpenCodeAuth] = useState(false)
@@ -625,6 +695,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const [checkingCommandCodeAuth, setCheckingCommandCodeAuth] = useState(false)
   const [checkingGrokAuth, setCheckingGrokAuth] = useState(false)
   const [checkingKimiAuth, setCheckingKimiAuth] = useState(false)
+  const [checkingDevinAuth, setCheckingDevinAuth] = useState(false)
   const [openCodeModelPopoverOpen, setOpenCodeModelPopoverOpen] =
     useState(false)
   const [cursorModelPopoverOpen, setCursorModelPopoverOpen] = useState(false)
@@ -877,6 +948,19 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
+  const handleDevinSourceChange = (value: 'jean' | 'path') => {
+    if (preferences) {
+      patchPreferences.mutate(
+        { devin_cli_source: value },
+        {
+          onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: devinCliQueryKeys.all })
+          },
+        }
+      )
+    }
+  }
+
   const handleConfirmDeleteCli = async () => {
     if (!deleteCliTarget) return
     const target = deleteCliTarget
@@ -889,6 +973,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       },
       pi: { name: 'PI CLI', cmd: 'uninstall_pi_cli' as const },
       gh: { name: 'GitHub CLI', cmd: 'uninstall_gh_cli' as const },
+      glab: { name: 'GitLab CLI', cmd: 'uninstall_glab_cli' as const },
       coderabbit: {
         name: 'CodeRabbit CLI',
         cmd: 'uninstall_coderabbit_cli' as const,
@@ -899,6 +984,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       },
       grok: { name: 'Grok CLI', cmd: 'uninstall_grok_cli' as const },
       kimi: { name: 'Kimi Code CLI', cmd: 'uninstall_kimi_cli' as const },
+      devin: { name: 'Devin CLI', cmd: 'uninstall_devin_cli' as const },
     }
     const { name, cmd } = labelMap[target]
     setIsDeletingCli(true)
@@ -922,7 +1008,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                       ? 'grok_cli_source'
                       : target === 'kimi'
                         ? 'kimi_cli_source'
-                        : 'coderabbit_cli_source'
+                        : target === 'devin'
+                          ? 'devin_cli_source'
+                          : target === 'glab'
+                            ? 'glab_cli_source'
+                            : 'coderabbit_cli_source'
       await new Promise<void>((resolve, reject) => {
         patchPreferences.mutate(
           { [sourceKey]: 'path' } as Partial<AppPreferences>,
@@ -949,7 +1039,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                       ? grokCliQueryKeys.all
                       : target === 'kimi'
                         ? kimiCliQueryKeys.all
-                        : coderabbitCliQueryKeys.all
+                        : target === 'devin'
+                          ? devinCliQueryKeys.all
+                          : target === 'glab'
+                            ? glabCliQueryKeys.all
+                            : coderabbitCliQueryKeys.all
       queryClient.invalidateQueries({ queryKey: queryKeys })
       const pathFound =
         target === 'claude'
@@ -968,7 +1062,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                       ? grokPathDetection?.found
                       : target === 'kimi'
                         ? kimiPathDetection?.found
-                        : coderabbitPathDetection?.found
+                        : target === 'devin'
+                          ? devinPathDetection?.found
+                          : target === 'glab'
+                            ? glabPathDetection?.found
+                            : coderabbitPathDetection?.found
       if (pathFound) {
         toast.success(`Jean-managed ${name} removed. Using system PATH.`, {
           id: toastId,
@@ -994,6 +1092,19 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         {
           onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ghCliQueryKeys.all })
+          },
+        }
+      )
+    }
+  }
+
+  const handleGlabSourceChange = (value: 'jean' | 'path') => {
+    if (preferences) {
+      patchPreferences.mutate(
+        { glab_cli_source: value },
+        {
+          onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: glabCliQueryKeys.all })
           },
         }
       )
@@ -1094,6 +1205,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
+  const handleDevinModelChange = (value: DevinModel) => {
+    if (preferences) {
+      patchPreferences.mutate({ selected_devin_model: value })
+    }
+  }
+
   const selectedOpenCodeModel =
     preferences?.selected_opencode_model ?? 'opencode/gpt-6.1-sol'
   const openCodeModelOptions = (
@@ -1154,6 +1271,20 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const selectedKimiModelLabel =
     kimiModelOptions.find(option => option.value === selectedKimiModel)
       ?.label ?? selectedKimiModel.replace(/^kimi\//, '')
+  const selectedDevinModel =
+    preferences?.selected_devin_model ?? 'devin/default'
+  const devinModelOptions: { value: DevinModel; label: string }[] = [
+    ...(DEVIN_MODEL_OPTIONS as { value: DevinModel; label: string }[]),
+    ...(availableDevinModels ?? [])
+      .filter(model => model.id !== 'default')
+      .map(model => ({
+        value: `devin/${model.id}` as DevinModel,
+        label: model.isDefault ? `${model.label} (default)` : model.label,
+      })),
+  ]
+  const selectedDevinModelLabel =
+    devinModelOptions.find(option => option.value === selectedDevinModel)
+      ?.label ?? selectedDevinModel.replace(/^devin\//, '')
   const buildBackendOptions = backendOptions
   const effectiveBuildBackend = (preferences?.build_backend ??
     effectiveBackend) as CliBackend
@@ -1201,40 +1332,22 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       preferences,
       piModelOptions
     )
-  const buildReasoningRaw =
-    getCatalogModelReasoning(modelCatalog, effectiveBuildBackend, buildModel) ??
-    (['codex', 'opencode', 'pi', 'grok', 'kimi'].includes(effectiveBuildBackend)
-      ? {
-          type: 'effort' as const,
-          default: 'high',
-          levels:
-            effectiveBuildBackend === 'codex'
-              ? codexReasoningOptions
-              : effectiveBuildBackend === 'kimi'
-                ? KIMI_EFFORT_LEVEL_OPTIONS
-                : effortLevelOptions,
-        }
-      : null)
+  const buildReasoningRaw = resolveOverrideReasoning(
+    modelCatalog,
+    effectiveBuildBackend,
+    buildModel
+  )
   const buildReasoning = buildReasoningRaw
     ? {
         ...buildReasoningRaw,
         levels: withAdaptiveEffortOption(buildReasoningRaw.levels, buildModel),
       }
     : null
-  const yoloReasoningRaw =
-    getCatalogModelReasoning(modelCatalog, effectiveYoloBackend, yoloModel) ??
-    (['codex', 'opencode', 'pi', 'grok', 'kimi'].includes(effectiveYoloBackend)
-      ? {
-          type: 'effort' as const,
-          default: 'high',
-          levels:
-            effectiveYoloBackend === 'codex'
-              ? codexReasoningOptions
-              : effectiveYoloBackend === 'kimi'
-                ? KIMI_EFFORT_LEVEL_OPTIONS
-                : effortLevelOptions,
-        }
-      : null)
+  const yoloReasoningRaw = resolveOverrideReasoning(
+    modelCatalog,
+    effectiveYoloBackend,
+    yoloModel
+  )
   const yoloReasoning = yoloReasoningRaw
     ? {
         ...yoloReasoningRaw,
@@ -1266,6 +1379,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const kimiAuthMessage = kimiAuth?.timedOut
     ? 'Auth check timed out. Try again or run `kimi login` manually.'
     : kimiAuth?.error
+  const devinAuthMessage = devinAuth?.timedOut
+    ? 'Auth check timed out. Try again or run `devin auth login` manually.'
+    : devinAuth?.error
 
   const handleCodexAutoSteerToggle = (enabled: boolean) => {
     if (preferences) {
@@ -1283,10 +1399,26 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
+  const handleClaudeAutoSteerToggle = (enabled: boolean) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        claude_auto_steer_enabled: enabled,
+      })
+    }
+  }
+
   const handlePiAutoSteerToggle = (enabled: boolean) => {
     if (preferences) {
       patchPreferences.mutate({
         pi_auto_steer_enabled: enabled,
+      })
+    }
+  }
+
+  const handlePiAgentOwnsPolicyToggle = (enabled: boolean) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        pi_agent_owns_policy: enabled,
       })
     }
   }
@@ -1303,6 +1435,14 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     if (preferences) {
       patchPreferences.mutate({
         kimi_auto_steer_enabled: enabled,
+      })
+    }
+  }
+
+  const handleDevinAutoSteerToggle = (enabled: boolean) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        devin_auto_steer_enabled: enabled,
       })
     }
   }
@@ -1443,6 +1583,30 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     openCliLoginModal('gh', ghStatus.path, ['auth', 'login'])
   }, [ghStatus?.path, openCliLoginModal, queryClient, serverId])
 
+  const handleGlabLogin = useCallback(async () => {
+    if (!glabStatus?.path) return
+
+    // First check if already authenticated
+    setCheckingGlabAuth(true)
+    try {
+      // Invalidate cache and refetch to get fresh status
+      await queryClient.invalidateQueries({ queryKey: glabCliQueryKeys.auth() })
+      const result = await queryClient.fetchQuery<GlabAuthStatus>({
+        queryKey: [...glabCliQueryKeys.auth(), serverId],
+      })
+
+      if (result?.authenticated) {
+        toast.success('GitLab CLI is already authenticated')
+        return
+      }
+    } finally {
+      setCheckingGlabAuth(false)
+    }
+
+    // Not authenticated, open login modal
+    openCliLoginModal('glab', glabStatus.path, ['auth', 'login'])
+  }, [glabStatus?.path, openCliLoginModal, queryClient, serverId])
+
   const handleCodexLogin = useCallback(async () => {
     if (!codexStatus?.path) return
 
@@ -1523,6 +1687,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     if (!ghStatus?.path) return
     openCliLoginModal('gh', ghStatus.path, ['auth', 'login'])
   }, [ghStatus?.path, openCliLoginModal])
+
+  const handleGlabRelogin = useCallback(() => {
+    if (!glabStatus?.path) return
+    openCliLoginModal('glab', glabStatus.path, ['auth', 'login'])
+  }, [glabStatus?.path, openCliLoginModal])
 
   const handleCodexRelogin = useCallback(() => {
     if (!codexStatus?.path) return
@@ -1719,6 +1888,38 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
     openCliUpdateModal('kimi')
   }, [openCliUpdateModal, patchPreferences, preferences?.kimi_cli_source])
+
+  const handleDevinLogin = useCallback(async () => {
+    if (!devinStatus?.path) return
+    setCheckingDevinAuth(true)
+    try {
+      await queryClient.invalidateQueries({
+        queryKey: devinCliQueryKeys.auth(),
+      })
+      const result = await queryClient.fetchQuery<DevinAuthStatus>({
+        queryKey: devinCliQueryKeys.auth(),
+      })
+      if (result?.authenticated) {
+        toast.success('Devin CLI is already authenticated')
+        return
+      }
+    } finally {
+      setCheckingDevinAuth(false)
+    }
+    openCliLoginModal('devin', devinStatus.path, ['auth', 'login'])
+  }, [devinStatus?.path, openCliLoginModal, queryClient])
+
+  const handleDevinRelogin = useCallback(() => {
+    if (!devinStatus?.path) return
+    openCliLoginModal('devin', devinStatus.path, ['auth', 'login'])
+  }, [devinStatus?.path, openCliLoginModal])
+
+  const handleDevinInstall = useCallback(() => {
+    if (preferences?.devin_cli_source !== 'jean') {
+      patchPreferences.mutate({ devin_cli_source: 'jean' })
+    }
+    openCliUpdateModal('devin')
+  }, [openCliUpdateModal, patchPreferences, preferences?.devin_cli_source])
 
   const handleCopyPath = useCallback((path: string | null | undefined) => {
     if (!path) return
@@ -2010,6 +2211,162 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             {!ghStatus?.installed && !ghPathDetection?.found && (
               <p className="text-xs text-muted-foreground px-1">
                 Install with Jean, or install <code>gh</code> yourself in your
+                environment — we&apos;ll detect it on your PATH.
+              </p>
+            )}
+          </div>
+        </SettingsSection>
+      )}
+
+      {hasBackend() && scope === 'github' && (
+        <SettingsSection
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              GitLab CLI
+              <BetaBadge />
+            </span>
+          }
+          anchorId="pref-gitlab-section-cli"
+          actions={
+            glabStatus?.installed ? (
+              checkingGlabAuth || isGlabAuthLoading ? (
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  <Loader2 className="size-3 animate-spin" />
+                  Checking...
+                </span>
+              ) : glabAuth?.authenticated ? (
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Logged in
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleGlabRelogin}
+                  >
+                    Relogin
+                  </Button>
+                </span>
+              ) : (
+                <Button variant="outline" size="sm" onClick={handleGlabLogin}>
+                  Sign in to GitLab
+                </Button>
+              )
+            ) : (
+              <span className="text-sm text-muted-foreground">
+                Not installed
+              </span>
+            )
+          }
+        >
+          <div className="space-y-4">
+            <InlineField
+              label={glabStatus?.installed ? 'Version' : 'Status'}
+              description={
+                glabStatus?.installed
+                  ? 'Enables GitLab issues and merge requests'
+                  : 'Optional — enables GitLab issues and merge requests'
+              }
+            >
+              {isGlabLoading ? (
+                <Loader2 className="size-4 animate-spin text-muted-foreground" />
+              ) : glabStatus?.installed ? (
+                isGlabPathSource ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm">
+                      {glabStatus.version ?? 'Installed'}
+                    </span>
+                    {isGlabVersionsLoading ? (
+                      <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                    ) : (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!glabHasUpdate}
+                        onClick={() => {
+                          const action = getPathUpdateAction(
+                            glabStatus.path,
+                            glabPathDetection?.package_manager,
+                            'glab',
+                            null
+                          )
+                          if (action) {
+                            openCliLoginModal(
+                              'glab',
+                              action[0],
+                              action[1],
+                              'update'
+                            )
+                          } else {
+                            openCliUpdateModal('glab')
+                          }
+                        }}
+                      >
+                        {glabHasUpdate
+                          ? `Update to ${glabLatestStable?.version}`
+                          : 'Up to date'}
+                      </Button>
+                    )}
+                  </div>
+                ) : (
+                  <Button
+                    variant="outline"
+                    className="w-full sm:w-40 justify-between"
+                    onClick={() => openCliUpdateModal('glab')}
+                  >
+                    {glabStatus.version ?? 'Installed'}
+                  </Button>
+                )
+              ) : (
+                <Button
+                  className="w-full sm:w-40"
+                  onClick={() => openCliUpdateModal('glab')}
+                >
+                  Install
+                </Button>
+              )}
+            </InlineField>
+            <InlineField
+              label="Source"
+              description={
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() =>
+                        handleCopyPath(
+                          preferences?.glab_cli_source === 'path'
+                            ? glabPathDetection?.path
+                            : glabStatus?.path
+                        )
+                      }
+                      className="text-left hover:underline cursor-pointer"
+                    >
+                      {preferences?.glab_cli_source === 'path'
+                        ? (glabPathDetection?.path ?? 'System PATH')
+                        : (glabStatus?.path ?? 'Not installed')}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Click to copy path</TooltipContent>
+                </Tooltip>
+              }
+            >
+              <Select
+                value={preferences?.glab_cli_source ?? 'jean'}
+                onValueChange={handleGlabSourceChange}
+              >
+                <SelectTrigger className="w-full sm:w-80">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="jean">Jean (managed)</SelectItem>
+                  <SelectItem value="path" disabled={!glabPathDetection?.found}>
+                    System PATH
+                    {!glabPathDetection?.found && ' (not found)'}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </InlineField>
+            {!glabStatus?.installed && !glabPathDetection?.found && (
+              <p className="text-xs text-muted-foreground px-1">
+                Install with Jean, or install <code>glab</code> yourself in your
                 environment — we&apos;ll detect it on your PATH.
               </p>
             )}
@@ -2918,6 +3275,15 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 }}
               />
             </InlineField>
+            <InlineField
+              label="Steer running turn"
+              description="Inject new prompts into the running turn instead of queueing. Lands at the next tool call. macOS/Linux only; applies to new runs."
+            >
+              <Switch
+                checked={preferences?.claude_auto_steer_enabled ?? false}
+                onCheckedChange={handleClaudeAutoSteerToggle}
+              />
+            </InlineField>
           </div>
         </SettingsSection>
       )}
@@ -3243,6 +3609,15 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               <Switch
                 checked={preferences?.pi_auto_steer_enabled ?? false}
                 onCheckedChange={handlePiAutoSteerToggle}
+              />
+            </InlineField>
+            <InlineField
+              label="PI owns agent policy"
+              description="Keep PI's native tools, extensions, and project instructions. Jean only transports prompts and renders events without injecting a tool allowlist or system prompt."
+            >
+              <Switch
+                checked={preferences?.pi_agent_owns_policy ?? false}
+                onCheckedChange={handlePiAgentOwnsPolicyToggle}
               />
             </InlineField>
           </div>
@@ -3589,6 +3964,167 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         </>
       )}
 
+      {scope === 'devin' && (
+        <>
+          <SettingsSection
+            title="CLI source"
+            anchorId="pref-devin-section-cli"
+            variant="card"
+            actions={
+              devinStatus?.installed ? (
+                checkingDevinAuth || isDevinAuthLoading ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    <Loader2 className="size-3 animate-spin" />
+                    Checking...
+                  </span>
+                ) : devinAuth?.authenticated ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    Logged in
+                    <Button size="sm" onClick={handleDevinRelogin}>
+                      Relogin
+                    </Button>
+                  </span>
+                ) : (
+                  <Button size="sm" onClick={handleDevinLogin}>
+                    Login
+                  </Button>
+                )
+              ) : (
+                <Button size="sm" onClick={handleDevinInstall}>
+                  Install
+                </Button>
+              )
+            }
+          >
+            <div className="space-y-4">
+              <InlineField
+                label={devinStatus?.installed ? 'Version' : 'Status'}
+                description={
+                  devinStatus?.installed
+                    ? 'Enables Devin AI sessions through the Devin CLI ACP server.'
+                    : 'Install the official Devin CLI, then log in with your Devin account.'
+                }
+              >
+                {isDevinLoading ? (
+                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                ) : devinStatus?.installed ? (
+                  <Button
+                    variant="outline"
+                    className="w-full sm:w-40 justify-between"
+                    onClick={handleDevinInstall}
+                  >
+                    {devinStatus.version ?? 'Installed'}
+                  </Button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">
+                      Not found in PATH
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleDevinInstall}
+                    >
+                      Install now
+                    </Button>
+                  </div>
+                )}
+              </InlineField>
+              {devinAuthMessage && (
+                <p className="text-xs text-muted-foreground">
+                  {devinAuthMessage}
+                </p>
+              )}
+              <InlineField
+                label="Source"
+                description={
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={() =>
+                          handleCopyPath(
+                            preferences?.devin_cli_source === 'jean'
+                              ? devinStatus?.path
+                              : devinPathDetection?.path
+                          )
+                        }
+                        className="text-left hover:underline cursor-pointer"
+                      >
+                        {preferences?.devin_cli_source === 'jean'
+                          ? (devinStatus?.path ?? 'Jean-managed path')
+                          : (devinPathDetection?.path ?? 'System PATH')}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Click to copy path</TooltipContent>
+                  </Tooltip>
+                }
+              >
+                <BackendCliSourceSelect
+                  value={preferences?.devin_cli_source ?? 'jean'}
+                  onValueChange={handleDevinSourceChange}
+                  backendName="Devin CLI"
+                  path={devinPathDetection?.path}
+                  pathVersion={devinPathDetection?.version}
+                  pathFound={!!devinPathDetection?.found}
+                  action={
+                    preferences?.devin_cli_source === 'jean' &&
+                    devinStatus?.installed && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setDeleteCliTarget('devin')}
+                      >
+                        Uninstall
+                      </Button>
+                    )
+                  }
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Default model"
+            anchorId="pref-devin-section-settings"
+            variant="card"
+          >
+            <div className="space-y-4">
+              <InlineField
+                label="Model"
+                description="Devin CLI model for AI assistance"
+              >
+                <Select
+                  value={selectedDevinModel}
+                  onValueChange={value =>
+                    handleDevinModelChange(value as DevinModel)
+                  }
+                >
+                  <SelectTrigger className="w-80 max-w-full">
+                    <SelectValue>{selectedDevinModelLabel}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {devinModelOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+              <InlineField
+                label="Steer running turn"
+                description="Reserved for Devin steering support; new prompts currently queue while Devin is working"
+              >
+                <Switch
+                  checked={preferences?.devin_auto_steer_enabled ?? false}
+                  onCheckedChange={handleDevinAutoSteerToggle}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+        </>
+      )}
+
       {isGeneralScope && (
         <SettingsSection
           title="Defaults"
@@ -3621,7 +4157,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
             <InlineField
               label="Default permissions"
-              description="Permission policy for new sessions on the default backend."
+              description="Permission policy for new sessions. Plan mode is opt-in on each session, not a default."
             >
               <Select
                 value={preferences?.default_execution_mode ?? 'yolo'}
@@ -3633,9 +4169,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {preferences?.default_execution_mode === 'plan' && (
-                    <SelectItem value="plan">Plan (legacy workflow)</SelectItem>
-                  )}
                   {preferences?.default_execution_mode === 'build' &&
                     !getSupportedPermissionModes(
                       preferences?.default_backend ?? 'claude'
@@ -3658,20 +4191,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   ))}
                 </SelectContent>
               </Select>
-            </InlineField>
-
-            <InlineField
-              label="Automatic recaps"
-              description="Ask agents to end multi-step turns with a ## Recap section. Existing recaps remain viewable when this is off."
-            >
-              <Switch
-                checked={preferences?.auto_recaps_enabled ?? true}
-                onCheckedChange={checked => {
-                  patchPreferences.mutate({
-                    auto_recaps_enabled: checked,
-                  })
-                }}
-              />
             </InlineField>
 
             <InlineField
@@ -3874,9 +4393,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? remoteCodexDefaultModelOptions
                           : effectiveBuildBackend === 'commandcode'
                             ? commandCodeModelOptions
-                            : effectiveBuildBackend === 'grok'
-                              ? grokModelOptions
-                              : remoteClaudeModelOptions
+                            : effectiveBuildBackend === 'devin'
+                              ? devinModelOptions
+                              : effectiveBuildBackend === 'grok'
+                                ? grokModelOptions
+                                : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
@@ -4121,9 +4642,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? remoteCodexDefaultModelOptions
                           : effectiveYoloBackend === 'commandcode'
                             ? commandCodeModelOptions
-                            : effectiveYoloBackend === 'grok'
-                              ? grokModelOptions
-                              : remoteClaudeModelOptions
+                            : effectiveYoloBackend === 'devin'
+                              ? devinModelOptions
+                              : effectiveYoloBackend === 'grok'
+                                ? grokModelOptions
+                                : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
@@ -4298,15 +4821,17 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             anchorId="pref-general-section-notifications"
           >
             <div className="space-y-4">
-              <InlineField
-                label="Desktop notifications"
-                description="Show a native system banner when a session needs your input or finishes, but only while Jean is in the background."
-              >
-                <Switch
-                  checked={preferences?.desktop_notifications_enabled ?? true}
-                  onCheckedChange={handleDesktopNotificationsEnabledChange}
-                />
-              </InlineField>
+              {isNativeApp() && (
+                <InlineField
+                  label="Desktop notifications"
+                  description="Show a native system banner when a session needs your input or finishes, but only while Jean is in the background."
+                >
+                  <Switch
+                    checked={preferences?.desktop_notifications_enabled ?? true}
+                    onCheckedChange={handleDesktopNotificationsEnabledChange}
+                  />
+                </InlineField>
+              )}
 
               <InlineField
                 label="Web access sounds"
@@ -4411,6 +4936,41 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             </div>
           </SettingsSection>
 
+          <SettingsSection title="Chat" anchorId="pref-general-section-chat">
+            <div className="space-y-4">
+              <InlineField
+                label="Show full file paths"
+                description="Display full relative paths in file mention badges instead of just filenames (useful for monorepos)"
+              >
+                <Switch
+                  checked={preferences?.show_full_file_path ?? false}
+                  onCheckedChange={checked => {
+                    if (preferences) {
+                      patchPreferences.mutate({
+                        show_full_file_path: checked,
+                      })
+                    }
+                  }}
+                />
+              </InlineField>
+              <InlineField
+                label="Spellcheck"
+                description="Enable spellcheck in the chat input"
+              >
+                <Switch
+                  checked={preferences?.spellcheck_enabled ?? true}
+                  onCheckedChange={checked => {
+                    if (preferences) {
+                      patchPreferences.mutate({
+                        spellcheck_enabled: checked,
+                      })
+                    }
+                  }}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+
           <SettingsSection
             title="Auto-generate"
             anchorId="pref-general-section-auto-generate"
@@ -4477,6 +5037,15 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
           </SettingsSection>
 
           <SettingsSection
+            title="Browser"
+            anchorId="pref-general-section-browser"
+          >
+            <div className="space-y-4">
+              <BrowserDefaultHostField preferences={preferences} />
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
             title="Archive"
             anchorId="pref-general-section-archive"
           >
@@ -4495,6 +5064,34 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     }
                   }}
                 />
+              </InlineField>
+
+              <InlineField
+                label="Skip close confirmation"
+                description="Hold this modifier while closing a session or worktree to skip the confirmation dialog."
+              >
+                <Select
+                  value={preferences?.close_confirm_bypass_modifier ?? 'none'}
+                  onValueChange={(value: CloseConfirmBypassModifier) => {
+                    if (preferences) {
+                      patchPreferences.mutate({
+                        close_confirm_bypass_modifier: value,
+                      })
+                    }
+                  }}
+                  disabled={patchPreferences.isPending}
+                >
+                  <SelectTrigger className="w-full sm:w-48">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CLOSE_CONFIRM_BYPASS_MODIFIERS.map(modifier => (
+                      <SelectItem key={modifier} value={modifier}>
+                        {BYPASS_MODIFIER_LABELS[modifier]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </InlineField>
 
               <InlineField
@@ -4755,7 +5352,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? 'Grok CLI'
                           : deleteCliTarget === 'kimi'
                             ? 'Kimi Code CLI'
-                            : deleteCliTarget === 'pi'
+                            : deleteCliTarget === 'devin'
+                              ? 'Devin CLI'
+                              : deleteCliTarget === 'pi'
                               ? 'PI CLI'
                               : 'GitHub CLI'}
               ?
@@ -4779,9 +5378,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                                 ? grokPathDetection?.found
                                 : deleteCliTarget === 'kimi'
                                   ? kimiPathDetection?.found
-                                  : deleteCliTarget === 'pi'
-                                    ? piPathDetection?.found
-                                    : false
+                                  : deleteCliTarget === 'devin'
+                                    ? devinPathDetection?.found
+                                    : deleteCliTarget === 'pi'
+                                      ? piPathDetection?.found
+                                      : false
                 return pathFound
                   ? 'The Jean-managed binary will be removed and the source will switch to System PATH. You can reinstall it later from this page.'
                   : 'The Jean-managed binary will be removed. No System PATH version was detected, so this backend will be unavailable until you reinstall it.'

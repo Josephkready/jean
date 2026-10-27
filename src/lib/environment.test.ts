@@ -13,6 +13,7 @@ import {
   setWebAccessServerName,
   setWebAccessEnabled,
   setWsConnected,
+  updateTargetLabel,
   webAccessServerLabel,
 } from './environment'
 import {
@@ -136,5 +137,26 @@ describe('environment detection', () => {
 
     expect(hasBackend()).toBe(false)
     expect(hasBackendTransport()).toBe(true)
+  })
+
+  it('labels updates with the Jean instance they run on', () => {
+    setWebAccessServerName('Dev Server')
+    expect(updateTargetLabel()).toBe('Remote: Dev Server')
+
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: { invoke: vi.fn() },
+    })
+    const remote = addRemoteConnection({
+      name: 'devbox',
+      url: 'https://devbox.example.com',
+      token: 'test-token',
+    })
+    expect(updateTargetLabel()).toBe('Local')
+    expect(updateTargetLabel(remote.id)).toBe('Remote: devbox')
+
+    selectConnection(remote.id)
+    expect(updateTargetLabel()).toBe('Remote: devbox')
+    expect(updateTargetLabel(LOCAL_CONNECTION_ID)).toBe('Local')
   })
 })

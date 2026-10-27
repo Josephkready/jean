@@ -74,6 +74,7 @@ export const defaultResponses: Record<string, unknown> = {
   save_preferences: null,
 
   // UI State
+  get_native_client_id: '11111111-1111-4111-8111-111111111111',
   load_ui_state: uiState,
   save_ui_state: null,
   get_pinned_recent_session_ids: [],
@@ -136,6 +137,38 @@ export const defaultResponses: Record<string, unknown> = {
 
   // Archives
   list_archived_worktrees: [],
+  list_unmanaged_worktrees: [
+    {
+      path: '/tmp/e2e-test-project/.worktrees/feature-login',
+      branch: 'feature/login',
+      head: 'a1b2c3d4e5f67890',
+      headShort: 'a1b2c3d',
+      prunable: false,
+      locked: false,
+      detached: false,
+      bare: false,
+    },
+    {
+      path: '/tmp/e2e-test-project/.worktrees/hotfix',
+      branch: null,
+      head: 'deadbeefcafebabe',
+      headShort: 'deadbee',
+      prunable: false,
+      locked: true,
+      detached: true,
+      bare: false,
+    },
+  ],
+  import_worktree: {
+    id: 'imported-worktree',
+    project_id: project.id,
+    name: 'feature-login',
+    path: '/tmp/e2e-test-project/.worktrees/feature-login',
+    branch: 'feature/login',
+    created_at: 3_000,
+    order: 2,
+    session_type: 'worktree',
+  },
   list_all_archived_sessions: [],
 
   // Branches
@@ -149,8 +182,11 @@ export const defaultResponses: Record<string, unknown> = {
   rename_session: null,
   send_chat_message: null,
   cancel_chat_message: false,
+  list_pending_wakeups: [],
 
   // Misc
+  get_package_scripts: [],
+  get_run_scripts: [],
   save_emergency_data: null,
   load_emergency_data: null,
 }

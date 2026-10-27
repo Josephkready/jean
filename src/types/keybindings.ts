@@ -46,6 +46,8 @@ export type KeybindingAction =
   | 'search_chat'
   | 'toggle_zen_mode'
   | 'clear_session_context'
+  | 'show_workspace'
+  | 'show_agents'
 
 // Shortcut string format: "mod+key" where mod is cmd/ctrl
 // Examples: "mod+l", "mod+shift+p", "mod+1"
@@ -82,7 +84,9 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   new_worktree: 'mod+n',
   cycle_execution_mode: 'shift+tab',
   approve_plan: 'mod+enter',
-  approve_plan_yolo: 'mod+y',
+  // Full access stays on Y, with the clear-context (shift) and worktree (alt)
+  // variants. Bare mod+y is redo in text fields on Windows and Linux (#777).
+  approve_plan_yolo: 'mod+shift+alt+y',
   approve_plan_clear_context: 'mod+shift+y',
   approve_plan_clear_context_build: 'mod+shift+enter',
   approve_plan_worktree_build: 'mod+alt+enter',
@@ -107,7 +111,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   open_command_palette: 'mod+k',
   search_chat: 'mod+f',
   toggle_zen_mode: 'mod+shift+z',
-  clear_session_context: 'mod+shift+k',
+  // Destructive (wipes the transcript in place), so unbound by default (#693).
+  clear_session_context: '',
+  show_workspace: 'mod+shift+1',
+  show_agents: 'mod+shift+2',
 }
 
 // UI definitions for the settings pane
@@ -207,14 +214,15 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     action: 'close_session_or_worktree',
     label: 'Close session',
     description:
-      'Close the current session, or show project picker if last session',
+      'Close the current session, or the selected worktree when no session is open',
     default_shortcut: 'mod+w',
     category: 'chat',
   },
   {
     action: 'cycle_execution_mode',
-    label: 'Cycle execution mode',
-    description: 'Cycle through Plan, Build, and Full access modes',
+    label: 'Toggle Plan mode',
+    description:
+      'Toggle Plan mode while the composer is focused. Does not change the permission used after approval.',
     default_shortcut: 'shift+tab',
     category: 'chat',
   },
@@ -229,7 +237,7 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     action: 'approve_plan_yolo',
     label: 'Approve plan (Full access)',
     description: 'Approve the current plan with Full access',
-    default_shortcut: 'mod+y',
+    default_shortcut: 'mod+shift+alt+y',
     category: 'chat',
   },
   {
@@ -294,7 +302,8 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
   {
     action: 'toggle_browser',
     label: 'Toggle browser',
-    description: 'Show or hide the embedded browser side pane',
+    description:
+      'Show or hide the embedded browser (side pane, bottom panel, or session drawer)',
     default_shortcut: 'mod+shift+backquote',
     category: 'navigation',
   },
@@ -307,10 +316,24 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     category: 'navigation',
   },
   {
+    action: 'show_workspace',
+    label: 'Show workspace',
+    description: 'Open the Workspace section in the left sidebar',
+    default_shortcut: 'mod+shift+1',
+    category: 'navigation',
+  },
+  {
+    action: 'show_agents',
+    label: 'Show agents',
+    description: 'Open the Agents section in the left sidebar',
+    default_shortcut: 'mod+shift+2',
+    category: 'navigation',
+  },
+  {
     action: 'clear_session_context',
     label: 'Clear session context',
     description: 'Clear the current chat history and start with fresh context',
-    default_shortcut: 'mod+shift+k',
+    default_shortcut: '',
     category: 'chat',
   },
   {

@@ -13,7 +13,15 @@ import {
   type SessionServerSource,
 } from './multi-server-sessions'
 
-export type AgentStatus = 'idle' | 'working' | 'waiting' | 'paused'
+export type AgentStatus = 'idle' | 'working' | 'waiting'
+
+/** A skill file discovered for one backend and selected for this agent. */
+export interface AgentSkill {
+  name: string
+  path: string
+  /** Backend the skill was discovered for */
+  backend?: string | null
+}
 
 export interface AgentSummary {
   /** Agent key: raw ID on the local server, `serverId:id` on a remote one */
@@ -26,7 +34,6 @@ export interface AgentSummary {
   icon: string
   rolePrompt: string
   worktreeId: string
-  paused: boolean
   maxWakesPerHour: number
   builtin: boolean
   status: AgentStatus
@@ -42,6 +49,53 @@ export interface AgentSummary {
   unreadNotifications: number
   /** One line about the latest activity (chat reply, notification, task) */
   activity: string | null
+  /**
+   * Backend this agent's sessions use. Null keeps the current session and
+   * user default.
+   */
+  backend: string | null
+  /** Model id for that backend. Null keeps the backend's current default. */
+  model: string | null
+  /** Effort level (`low`, `high`, …). Null leaves effort unset. */
+  effort: string | null
+  /** Thinking level (`off`, `think`, `ultrathink`, …). Null leaves it unset. */
+  thinkingLevel: string | null
+  /** Skill files injected into this agent's prompt and wake-ups. */
+  skills: AgentSkill[]
+  /**
+   * MCP servers this agent may use. Null means no saved limit (today's
+   * behavior). An empty list allows no user MCP servers.
+   */
+  mcpServers?: AgentConnector[] | null
+  /**
+   * Jean MCP tool names this agent may call. Null allows every tool.
+   */
+  jeanTools?: string[] | null
+}
+
+/** One discovered MCP server selected for an agent. */
+export interface AgentConnector {
+  backend: string
+  name: string
+}
+
+/** A named worker this agent can spawn. `agentId` null means it is shared. */
+export interface SubagentType {
+  id: number
+  agentId: string | null
+  shared: boolean
+  name: string
+  description: string
+  instructions: string
+  backend: string | null
+  model: string | null
+  effort: string | null
+  thinkingLevel: string | null
+  skills: AgentSkill[]
+  /** plan | build | yolo, or null to keep the normal wake mode */
+  permissionMode: string | null
+  /** read_only, or null for the agent's normal tools */
+  toolMode: string | null
 }
 
 export interface AgentTask {
@@ -49,8 +103,11 @@ export interface AgentTask {
   agentId: string
   sessionId: string
   title: string
-  /** schedule | delegation | message | approval */
+  /** schedule | delegation | message | approval | subagent */
   kind: string
+  /** Set when this task was spawned from a subagent type. */
+  subagentTypeName?: string | null
+  spawnDepth?: number
   /** running | waiting | done | failed | cancelled */
   status: string
   summary: string | null
@@ -84,6 +141,16 @@ export interface AgentDelegation {
   updatedAt: number
 }
 
+export type ScheduleKind = 'once' | 'interval' | 'cron' | 'event'
+
+/** Events a routine can listen for. Matches `EVENT_TRIGGERS` in agents/db.rs. */
+export type ScheduleEvent =
+  | 'session_finished'
+  | 'session_failed'
+  | 'worktree_archived'
+  | 'pr_merged'
+  | 'approval_resolved'
+
 export interface AgentSchedule {
   id: number
   agentId: string
@@ -92,6 +159,22 @@ export interface AgentSchedule {
   everySecs: number | null
   nextRunAt: number
   lastRunAt: number | null
+  cron: string | null
+  timezone: string | null
+  event: ScheduleEvent | string | null
+  paused: boolean
+}
+
+export interface ScheduleInput {
+  name: string
+  prompt: string
+  kind: ScheduleKind
+  everySecs?: number | null
+  runAt?: string | null
+  cron?: string | null
+  timezone?: string | null
+  event?: string | null
+  paused?: boolean
 }
 
 export interface AgentApproval {
@@ -107,9 +190,12 @@ export interface AgentApproval {
 
 export type MemoryKind = 'rule' | 'fact' | 'open_work'
 
+/** agent = private. shared = cross-agent working memory. user = facts about the user. */
+export type MemoryScope = 'agent' | 'shared' | 'user'
+
 export interface AgentMemory {
   id: number
-  /** null = shared by all agents */
+  /** null for shared and user scopes */
   agentId: string | null
   projectId: string | null
   kind: MemoryKind
@@ -118,6 +204,53 @@ export interface AgentMemory {
   createdAt: number
   updatedAt: number
   expiresAt: number | null
+  scope: MemoryScope
+  /** Set when a newer fact replaced this one. */
+  supersededBy: number | null
+  supersededAt: number | null
+}
+
+export interface AgentJournalEntry {
+  id: number
+  agentId: string
+  projectId: string | null
+  content: string
+  /** Unix seconds for when this happened. */
+  occurredAt: number
+  createdAt: number
+  /** user | agent | rotation */
+  source: string
+  sourceSessionId: string | null
+}
+
+export interface AgentMemoryChange {
+  id: number
+  memoryId: number
+  /** null when the user made the change in the Memory view */
+  actorAgentId: string | null
+  /** null for shared and user scopes */
+  ownerAgentId: string | null
+  /** create | update | forget | supersede */
+  action: string
+  scope: string
+  kind: string
+  beforeContent: string | null
+  afterContent: string | null
+  createdAt: number
+}
+
+export interface AgentChange {
+  id: number
+  actorAgentId: string
+  targetAgentId: string
+  /** create | update | delete | revert | schedule_create | schedule_update | schedule_cancel */
+  action: string
+  summary: string
+  before: Record<string, unknown> | null
+  after: Record<string, unknown> | null
+  sessionId: string | null
+  createdAt: number
+  revertedChangeId: number | null
 }
 
 export interface AgentDetails {
@@ -125,8 +258,13 @@ export interface AgentDetails {
   schedules: AgentSchedule[]
   approvals: AgentApproval[]
   memories: AgentMemory[]
+  journal: AgentJournalEntry[]
+  memoryChanges: AgentMemoryChange[]
   tasks: AgentTask[]
   notifications: AgentNotification[]
+  subagentTypes: SubagentType[]
+  /** Self-management audit, newest first. */
+  changes: AgentChange[]
 }
 
 export interface AgentPatch {
@@ -134,8 +272,44 @@ export interface AgentPatch {
   description?: string
   icon?: string
   rolePrompt?: string
-  paused?: boolean
   maxWakesPerHour?: number
+  /** Null clears the field so the agent uses current defaults again. */
+  backend?: string | null
+  model?: string | null
+  effort?: string | null
+  thinkingLevel?: string | null
+  /** Replaces the selected skills. An empty list clears them. */
+  skills?: AgentSkill[]
+  /** Null clears a saved connector limit. An empty list allows none. */
+  mcpServers?: AgentConnector[] | null
+  /** Null allows every Jean tool. An empty list allows none. */
+  jeanTools?: string[] | null
+}
+
+/** A schedule copied onto an agent when a template is installed. */
+export interface AgentTemplateSchedule {
+  name: string
+  prompt: string
+  /** cron | interval | event */
+  kind: string
+  everySecs?: number | null
+  cron?: string | null
+  timezone?: string | null
+  event?: string | null
+}
+
+/**
+ * A repo-shipped role. Installing it creates a normal custom agent.
+ * `skillHints` are names to attach later, not skill files.
+ */
+export interface AgentTemplate {
+  id: string
+  name: string
+  description: string
+  icon: string
+  rolePrompt: string
+  skillHints: string[]
+  schedules: AgentTemplateSchedule[]
 }
 
 export const agentsQueryKeys = {
@@ -145,17 +319,34 @@ export const agentsQueryKeys = {
     [...agentsQueryKeys.all, 'details', agentId] as const,
   workdir: (agentId: string) =>
     [...agentsQueryKeys.all, 'workdir', agentId] as const,
+  templates: (serverId: string) =>
+    [...agentsQueryKeys.all, 'templates', serverId] as const,
 }
 
-type RawAgentSummary = Omit<AgentSummary, 'serverId' | 'serverName'>
+type AgentRunKeys = 'backend' | 'model' | 'effort' | 'thinkingLevel' | 'skills'
+
+/** `list_agents` result. Older servers do not send the run configuration. */
+type RawAgentSummary = Omit<
+  AgentSummary,
+  'serverId' | 'serverName' | AgentRunKeys
+> &
+  Partial<Pick<AgentSummary, AgentRunKeys>>
 
 /** Tag an agent with its server; remote IDs become server-scoped keys so
  * commands and chat sessions route to that server. */
 export function scopeAgentSummary(
   serverId: string,
   serverName: string,
-  agent: RawAgentSummary
+  raw: RawAgentSummary
 ): AgentSummary {
+  const agent = {
+    ...raw,
+    backend: raw.backend ?? null,
+    model: raw.model ?? null,
+    effort: raw.effort ?? null,
+    thinkingLevel: raw.thinkingLevel ?? null,
+    skills: raw.skills ?? [],
+  }
   if (serverId === LOCAL_SERVER_ID) return { ...agent, serverId, serverName }
   const scope = (resourceId: string) =>
     serverResourceKey({ serverId, resourceId })
@@ -294,11 +485,51 @@ export function useCreateAgent() {
       description: string
       icon: string
       rolePrompt: string
+      backend?: string | null
+      model?: string | null
+      effort?: string | null
+      thinkingLevel?: string | null
+      skills?: AgentSkill[]
     }): Promise<{ key: string; name: string }> => {
       const agent = await invokeForServer<{ id: string; name: string }>(
         serverId,
         'create_agent',
         args
+      )
+      const key =
+        serverId === LOCAL_SERVER_ID
+          ? agent.id
+          : serverResourceKey({ serverId, resourceId: agent.id })
+      return { key, name: agent.name }
+    }
+  )
+}
+
+/** Predefined roles on one server. The catalog is static for a server build. */
+export function useAgentTemplates(serverId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: agentsQueryKeys.templates(serverId),
+    queryFn: () =>
+      invokeForServer<AgentTemplate[]>(serverId, 'list_agent_templates'),
+    enabled,
+    staleTime: Infinity,
+  })
+}
+
+/** Install a template as a custom agent on `serverId`. */
+export function useInstallAgentTemplate() {
+  return useAgentsMutation(
+    async ({
+      serverId,
+      templateId,
+    }: {
+      serverId: string
+      templateId: string
+    }): Promise<{ key: string; name: string }> => {
+      const agent = await invokeForServer<{ id: string; name: string }>(
+        serverId,
+        'install_agent_template',
+        { templateId }
       )
       const key =
         serverId === LOCAL_SERVER_ID
@@ -318,6 +549,13 @@ export function useUpdateAgent() {
 export function useDeleteAgent() {
   return useAgentsMutation((args: { agentId: string }) =>
     invoke<null>('delete_agent', args)
+  )
+}
+
+export function useRevertAgentChange() {
+  return useAgentsMutation(
+    ({ agentId, changeId }: { agentId: string; changeId: number }) =>
+      invokeAgent<AgentChange>(agentId, 'revert_agent_change', { changeId })
   )
 }
 
@@ -341,16 +579,92 @@ export function useCancelAgentSchedule() {
   )
 }
 
+export function useCreateAgentSchedule() {
+  return useAgentsMutation((args: { agentId: string } & ScheduleInput) => {
+    const payload: Record<string, unknown> = { ...args }
+    return invoke<AgentSchedule>('create_agent_schedule', payload)
+  })
+}
+
+export function useUpdateAgentSchedule() {
+  return useAgentsMutation(
+    (
+      args: { agentId: string; scheduleId: number } & Partial<ScheduleInput>
+    ) => {
+      const payload: Record<string, unknown> = { ...args }
+      return invoke<AgentSchedule>('update_agent_schedule', payload)
+    }
+  )
+}
+
 export function useSaveAgentMemory() {
   return useAgentsMutation(
     (args: {
       agentId: string
       content: string
       kind: MemoryKind
-      shared: boolean
+      scope: MemoryScope
       pinned: boolean
+      projectId?: string | null
     }) => invoke<AgentMemory>('save_agent_memory', args)
   )
+}
+
+export interface AgentMemoryQuery {
+  query?: string
+  kind?: MemoryKind
+  scope?: MemoryScope
+  projectId?: string
+  pinned?: boolean
+  from?: number
+  to?: number
+}
+
+export function useSearchAgentMemory(
+  agentId: string,
+  request: AgentMemoryQuery,
+  enabled: boolean
+) {
+  return useQuery({
+    queryKey: [...agentsQueryKeys.details(agentId), 'memory-search', request],
+    queryFn: () =>
+      invoke<AgentMemory[]>('search_agent_memory', { agentId, ...request }),
+    enabled: enabled && !!agentId,
+  })
+}
+
+export function useSupersedeAgentMemory() {
+  return useAgentsMutation(
+    (args: { agentId: string; memoryId: number; content: string }) =>
+      invoke<AgentMemory>('supersede_agent_memory', args)
+  )
+}
+
+export function useSaveAgentJournal() {
+  return useAgentsMutation(
+    (args: {
+      agentId: string
+      content: string
+      occurredAt?: number | null
+      projectId?: string | null
+    }) => invoke<AgentJournalEntry>('save_agent_journal', args)
+  )
+}
+
+export function useSearchAgentJournal(
+  agentId: string,
+  request: AgentMemoryQuery,
+  enabled: boolean
+) {
+  return useQuery({
+    queryKey: [...agentsQueryKeys.details(agentId), 'journal-search', request],
+    queryFn: () =>
+      invoke<AgentJournalEntry[]>('search_agent_journal', {
+        agentId,
+        ...request,
+      }),
+    enabled: enabled && !!agentId,
+  })
 }
 
 export function useUpdateAgentMemory() {
@@ -377,4 +691,44 @@ export function useMarkAgentNotificationsRead() {
 
 export function exportAgentMemory(agentId: string): Promise<string> {
   return invoke<string>('export_agent_memory', { agentId })
+}
+
+export interface SubagentTypeInput {
+  id?: number
+  name: string
+  description: string
+  instructions: string
+  shared: boolean
+  backend: string | null
+  model: string | null
+  effort: string | null
+  thinkingLevel: string | null
+  skills: AgentSkill[]
+  permissionMode: string | null
+  toolMode: string | null
+}
+
+export function useSaveSubagentType() {
+  return useAgentsMutation(
+    ({ agentId, ...input }: { agentId: string } & SubagentTypeInput) =>
+      invokeAgent<SubagentType>(agentId, 'save_agent_subagent_type', input)
+  )
+}
+
+export function useDeleteSubagentType() {
+  return useAgentsMutation((args: { agentId: string; typeId: number }) =>
+    invokeAgent<null>(args.agentId, 'delete_agent_subagent_type', {
+      typeId: args.typeId,
+    })
+  )
+}
+
+export function useSpawnSubagent() {
+  return useAgentsMutation(
+    (args: { agentId: string; typeName: string; task: string }) =>
+      invokeAgent<AgentTask>(args.agentId, 'spawn_agent_subagent', {
+        typeName: args.typeName,
+        task: args.task,
+      })
+  )
 }

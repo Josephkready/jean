@@ -72,18 +72,41 @@ describe('client view state', () => {
     saveClientViewState({
       ...defaultClientViewState,
       rail_section: 'agents',
+      rail_sidebar_visible: { workspace: false },
       selected_agent_id: 'reviewer',
     })
     expect(loadClientViewState().rail_section).toBe('agents')
+    expect(loadClientViewState().rail_sidebar_visible).toEqual({
+      workspace: false,
+    })
     expect(loadClientViewState().selected_agent_id).toBe('reviewer')
 
     const saved = JSON.parse(storage.get(CLIENT_VIEW_STATE_STORAGE_KEY) ?? '{}')
     storage.set(
       CLIENT_VIEW_STATE_STORAGE_KEY,
-      JSON.stringify({ ...saved, rail_section: 'bogus', selected_agent_id: '' })
+      JSON.stringify({
+        ...saved,
+        rail_section: 'bogus',
+        rail_sidebar_visible: { workspace: 'no', other: true },
+        selected_agent_id: '',
+      })
     )
     expect(loadClientViewState().rail_section).toBe('workspace')
+    expect(loadClientViewState().rail_sidebar_visible).toEqual({})
     expect(loadClientViewState().selected_agent_id).toBe('jean')
+  })
+
+  it('keeps the agents Advanced toggle and defaults it to off', () => {
+    expect(loadClientViewState().agents_advanced).toBe(false)
+    saveClientViewState({ ...defaultClientViewState, agents_advanced: true })
+    expect(loadClientViewState().agents_advanced).toBe(true)
+
+    const saved = JSON.parse(storage.get(CLIENT_VIEW_STATE_STORAGE_KEY) ?? '{}')
+    storage.set(
+      CLIENT_VIEW_STATE_STORAGE_KEY,
+      JSON.stringify({ ...saved, agents_advanced: 'yes' })
+    )
+    expect(loadClientViewState().agents_advanced).toBe(false)
   })
 
   it('opens the Projects view for a saved Servers tab', () => {

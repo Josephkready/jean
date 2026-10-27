@@ -1,6 +1,8 @@
 import { Button } from '@/components/ui/button'
 import { FolderPlus, Github, Sparkles } from '@/components/icons/reicon'
-import { getBackendIcon } from '@/components/ui/backend-label'
+import { BetaBadge } from '@/components/ui/badge'
+import { GitLabIcon } from '@/components/icons/GitLabIcon'
+import { BackendLabel, getBackendIcon } from '@/components/ui/backend-label'
 import { cliLabel, type CliType } from './cli-setup-flows'
 
 interface SuccessStepProps {
@@ -21,14 +23,25 @@ export function SuccessStep({
       {readyClis.length > 0 && (
         <ul className="flex flex-wrap gap-2" aria-label="Ready tools">
           {readyClis.map(cli => {
-            const Icon = cli === 'gh' ? Github : getBackendIcon(cli)
+            const Icon =
+              cli === 'gh' ? Github : cli === 'glab' ? GitLabIcon : getBackendIcon(cli)
             return (
               <li
                 key={cli}
                 className="flex items-center gap-1.5 rounded-lg border bg-primary/5 px-2.5 py-1 text-xs"
               >
                 <Icon className="size-3.5" />
-                {cliLabel(cli)}
+                {cli === 'gh' || cli === 'glab' ? (
+                  <>
+                    {cliLabel(cli)}
+                    {cli === 'glab' && <BetaBadge />}
+                  </>
+                ) : (
+                  <BackendLabel
+                    backend={cli}
+                    badgeClassName="text-[8px] leading-3"
+                  />
+                )}
               </li>
             )
           })}

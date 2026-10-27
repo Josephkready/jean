@@ -22,6 +22,7 @@ import {
   getNewServersToAutoEnable,
   useAllBackendsMcpHealth,
   groupServersByBackend,
+  isAutoLoadedMcpBackend,
   mcpKey,
   migrateLegacyMcpKeys,
 } from '@/services/mcp'
@@ -35,6 +36,7 @@ import type { CliBackend } from '@/types/preferences'
 import { SettingsSection } from '../SettingsSection'
 import { AgentBrowserSection } from './AgentBrowserSection'
 import { JeanMcpSection } from './JeanMcpSection'
+import { DevinMcpSection } from './DevinMcpSection'
 
 function mcpAuthHint(backend: CliBackend): string {
   switch (backend) {
@@ -44,6 +46,8 @@ function mcpAuthHint(backend: CliBackend): string {
       return "Run 'opencode mcp auth' in your terminal to authenticate"
     case 'cursor':
       return "Run 'cursor-agent mcp login <server>' in your terminal to authenticate"
+    case 'devin':
+      return "Run 'devin mcp login <server>' for OAuth, or check the server API key headers"
     case 'grok':
       return "Run 'grok mcp doctor <server>' or open /mcps in the Grok TUI to authenticate"
     default:
@@ -235,6 +239,7 @@ export const McpServersPane: React.FC = () => {
     <div className="space-y-6">
       <JeanMcpSection mcpServers={mcpServers ?? []} />
       <AgentBrowserSection />
+      <DevinMcpSection />
       <SettingsSection
         title="Default MCP Servers"
         anchorId="pref-mcp-section-default-servers"
@@ -276,11 +281,13 @@ export const McpServersPane: React.FC = () => {
                       id={`mcp-${backend}-${server.name}`}
                       checked={
                         !server.disabled &&
-                        (backend === 'antigravity' ||
+                        (isAutoLoadedMcpBackend(backend) ||
                           enabledServersSet.has(mcpKey(backend, server.name)))
                       }
                       onCheckedChange={() => handleToggle(backend, server.name)}
-                      disabled={server.disabled || backend === 'antigravity'}
+                      disabled={
+                        server.disabled || isAutoLoadedMcpBackend(backend)
+                      }
                     />
                     <Label
                       htmlFor={`mcp-${backend}-${server.name}`}
@@ -314,7 +321,7 @@ export const McpServersPane: React.FC = () => {
                     <span className="text-xs text-muted-foreground">
                       {server.disabled
                         ? 'disabled'
-                        : backend === 'antigravity'
+                        : isAutoLoadedMcpBackend(backend)
                           ? 'automatic'
                           : server.scope}
                     </span>

@@ -9,6 +9,7 @@ import {
   Shield,
   GitBranch,
   Sentry,
+  MessagesSquare,
 } from '@/components/icons/reicon'
 import { LinearIcon } from '@/components/icons/LinearIcon'
 import type { LucideIcon } from '@/components/icons/reicon'
@@ -24,6 +25,8 @@ import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBack
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { useContextLinkUsage } from '@/hooks/useContextLinkUsage'
 import { resolveSelectedModelForBackend } from '@/lib/session-defaults'
+import { useGlabLogin } from '@/hooks/useGlabLogin'
+import { useProjectGitProvider, providerLabels } from '@/services/git-provider'
 import {
   Dialog,
   DialogContent,
@@ -45,6 +48,7 @@ import { SecurityAlertsTab } from './SecurityAlertsTab'
 import { BranchesTab } from './BranchesTab'
 import { LinearIssuesTab } from './LinearIssuesTab'
 import { SentryIssuesTab } from './SentryIssuesTab'
+import { GitHubDiscussionsTab } from './GitHubDiscussionsTab'
 import { IssuePreviewModal } from './IssuePreviewModal'
 
 export type TabId =
@@ -55,6 +59,7 @@ export type TabId =
   | 'branches'
   | 'linear'
   | 'sentry'
+  | 'discussions'
 
 export interface Tab {
   id: TabId
@@ -72,6 +77,7 @@ export const TABS: Tab[] = [
   { id: 'branches', label: 'Branches', key: '5', icon: GitBranch },
   { id: 'linear', label: 'Linear', key: '6', icon: LinearIcon },
   { id: 'sentry', label: 'Sentry', key: '7', icon: Sentry },
+  { id: 'discussions', label: 'Discussions', key: '8', icon: MessagesSquare },
 ]
 
 export function NewWorktreeModal() {
@@ -89,6 +95,7 @@ export function NewWorktreeModal() {
 
 function NewWorktreeModalContent() {
   const { triggerLogin: triggerGhLogin, isGhInstalled } = useGhLogin()
+  const { triggerLogin: triggerGlabLogin, isGlabInstalled } = useGlabLogin()
   const { newWorktreeModalOpen } = useUIStore()
   const isMobile = useIsMobile()
 
@@ -106,6 +113,7 @@ function NewWorktreeModalContent() {
     type: 'issue' | 'pr' | 'security' | 'advisory'
     number: number
     ghsaId?: string
+    repo?: string
   } | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Track preview-was-open across the same event cycle (ref survives after state clears)
@@ -126,6 +134,31 @@ function NewWorktreeModalContent() {
     enabled: newWorktreeModalOpen,
     serverId: targetServerId,
   })
+
+  // Resolve the project's git host provider for provider-aware auth + wording.
+  const { data: providerInfo, isLoading: isProviderLoading } =
+    useProjectGitProvider(data.selectedProject?.path)
+  const provider = providerInfo?.provider ?? 'github'
+  // Until the provider resolves it defaults to `github`; auth-error UI must wait
+  // for this so a GitLab project never flashes the GitHub sign-in prompt.
+  const providerResolved = !isProviderLoading
+  const labels = providerLabels(provider)
+  const triggerLogin = provider === 'gitlab' ? triggerGlabLogin : triggerGhLogin
+  const isCliInstalled = provider === 'gitlab' ? isGlabInstalled : isGhInstalled
+  // Security (Dependabot/advisories) and Discussions are GitHub-only; hide
+  // them for GitLab.
+  const githubOnlyTabsEnabled = provider !== 'gitlab'
+  const displayTabs = TABS.filter(
+    tab =>
+      (tab.id !== 'security' && tab.id !== 'discussions') ||
+      githubOnlyTabsEnabled
+  ).map(tab =>
+    tab.id === 'prs' ? { ...tab, label: labels.pullRequestsShort } : tab
+  )
+  // If the active tab was hidden (e.g. Security selected, then provider resolves
+  // to GitLab), fall back to a safe default instead of a blank hidden tab.
+  const activeTabAvailable = displayTabs.some(tab => tab.id === activeTab)
+
   // Existing worktrees/sessions per issue/PR/alert/Linear issue (duplicate guard)
   const { getMatches: getContextMatches } = useContextLinkUsage({
     enabled: newWorktreeModalOpen,
@@ -155,14 +188,14 @@ function NewWorktreeModalContent() {
     getContextMatches
   )
 
-  const handlePreviewIssue = (issue: { number: number }) => {
+  const handlePreviewIssue = (issue: { number: number; repo?: string }) => {
     previewOpenRef.current = true
-    setPreviewItem({ type: 'issue', number: issue.number })
+    setPreviewItem({ type: 'issue', number: issue.number, repo: issue.repo })
   }
 
-  const handlePreviewPR = (pr: { number: number }) => {
+  const handlePreviewPR = (pr: { number: number; repo?: string }) => {
     previewOpenRef.current = true
-    setPreviewItem({ type: 'pr', number: pr.number })
+    setPreviewItem({ type: 'pr', number: pr.number, repo: pr.repo })
   }
 
   const handlePreviewSecurityAlert = (alert: { number: number }) => {
@@ -188,10 +221,12 @@ function NewWorktreeModalContent() {
   const { handleKeyDown } = useNewWorktreeKeyboard({
     activeTab,
     setActiveTab: handleTabChange,
+    githubOnlyTabsEnabled,
     filteredIssues: data.filteredIssues,
     filteredPRs: data.filteredPRs,
     filteredSecurityAlerts: data.filteredSecurityAlerts,
     filteredBranches: data.filteredBranches,
+    branchRemoteCount: data.branchRemoteCount,
     selectedItemIndex,
     setSelectedItemIndex,
     creatingFromNumber: handlers.creatingFromNumber,
@@ -222,7 +257,16 @@ function NewWorktreeModalContent() {
     handleSelectSentryIssue: handlers.handleSelectSentryIssue,
     handleSelectSentryIssueAndInvestigate:
       handlers.handleSelectSentryIssueAndInvestigate,
+    filteredDiscussions: data.filteredDiscussions,
+    handleSelectDiscussion: handlers.handleSelectDiscussion,
   })
+
+  // Reset to a safe tab when the current one is hidden (e.g. Security on GitLab).
+  useEffect(() => {
+    if (!activeTabAvailable) {
+      handleTabChange('quick')
+    }
+  }, [activeTabAvailable, handleTabChange])
 
   // Apply store-provided default tab when modal opens (resets selection via handleTabChange)
   useEffect(() => {
@@ -291,7 +335,8 @@ function NewWorktreeModalContent() {
         activeTab === 'security' ||
         activeTab === 'branches' ||
         activeTab === 'linear' ||
-        activeTab === 'sentry') &&
+        activeTab === 'sentry' ||
+        activeTab === 'discussions') &&
       newWorktreeModalOpen
     ) {
       const timer = setTimeout(() => {
@@ -359,7 +404,7 @@ function NewWorktreeModalContent() {
           <SessionTabBar
             activeTab={activeTab}
             onTabChange={handleTabChange}
-            tabs={TABS}
+            tabs={displayTabs}
           />
 
           {(activeTab === 'issues' || activeTab === 'prs') && (
@@ -442,16 +487,19 @@ function NewWorktreeModalContent() {
                 setSelectedIndex={setSelectedItemIndex}
                 onSelectIssue={handlers.handleSelectIssue}
                 onInvestigateIssue={handlers.handleSelectIssueAndInvestigate}
-                onInvestigateIssueInNewSession={
-                  handlers.handleInvestigateIssueInNewSession
-                }
                 onBulkInvestigateIssues={handlers.handleBulkInvestigateIssues}
                 onPreviewIssue={handlePreviewIssue}
                 creatingFromNumber={handlers.creatingFromNumber}
+                creatingFromRepo={handlers.creatingFromRepo}
+                showSource={data.showGitHubSource}
+                hasMultipleGitHubRemotes={data.hasMultipleGitHubRemotes}
+                primaryGitHubRemote={data.primaryGitHubRemote}
                 isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
-                onGhLogin={triggerGhLogin}
-                isGhInstalled={isGhInstalled}
+                onLogin={triggerLogin}
+                isCliInstalled={isCliInstalled}
+                provider={provider}
+                providerResolved={providerResolved}
                 getContextMatches={getContextMatches}
               />
             )}
@@ -476,11 +524,18 @@ function NewWorktreeModalContent() {
                 onStackPR={handlers.handleStackOnPR}
                 onPreviewPR={handlePreviewPR}
                 creatingFromNumber={handlers.creatingFromNumber}
+                creatingFromRepo={handlers.creatingFromRepo}
                 stackingFromPR={handlers.stackingFromPR}
+                stackingFromRepo={handlers.stackingFromRepo}
+                showSource={data.showGitHubSource}
+                hasMultipleGitHubRemotes={data.hasMultipleGitHubRemotes}
+                primaryGitHubRemote={data.primaryGitHubRemote}
                 isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
-                onGhLogin={triggerGhLogin}
-                isGhInstalled={isGhInstalled}
+                onLogin={triggerLogin}
+                isCliInstalled={isCliInstalled}
+                provider={provider}
+                providerResolved={providerResolved}
                 getContextMatches={getContextMatches}
               />
             )}
@@ -578,11 +633,38 @@ function NewWorktreeModalContent() {
               />
             )}
 
+            {activeTab === 'discussions' && (
+              <GitHubDiscussionsTab
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                includeClosed={includeClosed}
+                setIncludeClosed={setIncludeClosed}
+                discussions={data.filteredDiscussions}
+                isLoading={data.isLoadingDiscussions}
+                isRefetching={data.isRefetchingDiscussions}
+                isSearching={data.isSearchingDiscussions}
+                error={data.discussionsError}
+                onRefresh={() => data.refetchDiscussions()}
+                hasMore={!searchQuery.trim() && data.hasMoreDiscussions}
+                isLoadingMore={data.isLoadingMoreDiscussions}
+                onLoadMore={() => void data.fetchMoreDiscussions()}
+                selectedIndex={selectedItemIndex}
+                setSelectedIndex={setSelectedItemIndex}
+                onSelectDiscussion={handlers.handleSelectDiscussion}
+                creatingFromNumber={handlers.creatingFromNumber}
+                searchInputRef={searchInputRef}
+                onLogin={triggerGhLogin}
+                isGhInstalled={isGhInstalled}
+                getContextMatches={getContextMatches}
+              />
+            )}
+
             {activeTab === 'branches' && (
               <BranchesTab
                 searchQuery={searchQuery}
                 setSearchQuery={setSearchQuery}
                 branches={data.filteredBranches}
+                remoteCount={data.branchRemoteCount}
                 isLoading={data.isLoadingBranches}
                 isRefetching={data.isRefetchingBranches}
                 error={data.branchesError}
@@ -631,6 +713,7 @@ function NewWorktreeModalContent() {
           type={previewItem.type}
           number={previewItem.number}
           ghsaId={previewItem.ghsaId}
+          repo={previewItem.repo}
         />
       )}
     </>

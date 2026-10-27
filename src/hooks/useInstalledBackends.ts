@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import { useClaudeCliStatus, useClaudeCliAuth } from '@/services/claude-cli'
 import { useCodexCliStatus, useCodexCliAuth } from '@/services/codex-cli'
 import {
@@ -13,7 +13,12 @@ import {
 } from '@/services/commandcode-cli'
 import { useGrokCliStatus, useGrokCliAuth } from '@/services/grok-cli'
 import { useKimiCliStatus, useKimiCliAuth } from '@/services/kimi-cli'
-import { useAntigravityCliStatus, useAntigravityCliAuth } from '@/services/antigravity-cli'
+import {
+  useAntigravityCliStatus,
+  useAntigravityCliAuth,
+} from '@/services/antigravity-cli'
+import { useMuseCliStatus, useMuseCliAuth } from '@/services/muse-cli'
+import { useDevinCliStatus, useDevinCliAuth } from '@/services/devin-cli'
 import type { CliBackend } from '@/types/preferences'
 
 /**
@@ -67,6 +72,8 @@ export function useInstalledBackends(options?: {
   const grok = useGrokCliStatus({ enabled, serverId })
   const kimi = useKimiCliStatus({ enabled, serverId })
   const antigravity = useAntigravityCliStatus({ enabled, serverId })
+  const muse = useMuseCliStatus({ enabled, serverId })
+  const devin = useDevinCliStatus({ enabled, serverId })
 
   const installedBackends = useMemo(() => {
     const backends: CliBackend[] = []
@@ -78,7 +85,9 @@ export function useInstalledBackends(options?: {
     if (commandcode.data?.installed) backends.push('commandcode')
     if (grok.data?.installed) backends.push('grok')
     if (kimi.data?.installed) backends.push('kimi')
+    if (devin.data?.installed) backends.push('devin')
     if (antigravity.data?.installed) backends.push('antigravity')
+    if (muse.data?.installed) backends.push('muse')
     return backends
   }, [
     claude.data?.installed,
@@ -89,7 +98,9 @@ export function useInstalledBackends(options?: {
     commandcode.data?.installed,
     grok.data?.installed,
     kimi.data?.installed,
+    devin.data?.installed,
     antigravity.data?.installed,
+    muse.data?.installed,
   ])
 
   const isLoading =
@@ -101,7 +112,9 @@ export function useInstalledBackends(options?: {
     commandcode.isLoading ||
     grok.isLoading ||
     kimi.isLoading ||
-    antigravity.isLoading
+    antigravity.isLoading ||
+    muse.isLoading ||
+    devin.isLoading
 
   return {
     installedBackends,
@@ -123,7 +136,9 @@ export function useBackendAuthStatuses(options?: { enabled?: boolean }) {
   const commandcode = useCommandCodeCliStatus({ enabled })
   const grok = useGrokCliStatus({ enabled })
   const kimi = useKimiCliStatus({ enabled })
+  const devin = useDevinCliStatus({ enabled })
   const antigravity = useAntigravityCliStatus({ enabled })
+  const muse = useMuseCliStatus({ enabled })
 
   const claudeAuth = useClaudeCliAuth({
     enabled: enabled && !!claude.data?.installed,
@@ -149,8 +164,14 @@ export function useBackendAuthStatuses(options?: { enabled?: boolean }) {
   const kimiAuth = useKimiCliAuth({
     enabled: enabled && !!kimi.data?.installed,
   })
+  const devinAuth = useDevinCliAuth({
+    enabled: enabled && !!devin.data?.installed,
+  })
   const antigravityAuth = useAntigravityCliAuth({
     enabled: enabled && !!antigravity.data?.installed,
+  })
+  const museAuth = useMuseCliAuth({
+    enabled: enabled && !!muse.data?.installed,
   })
 
   const authByBackend = useMemo(() => {
@@ -170,6 +191,8 @@ export function useBackendAuthStatuses(options?: { enabled?: boolean }) {
         antigravity.data?.installed,
         antigravityAuth.data
       ),
+      muse: resolvedAuth(muse.data?.installed, museAuth.data),
+      devin: resolvedAuth(devin.data?.installed, devinAuth.data),
     }
     return map
   }, [
@@ -191,6 +214,10 @@ export function useBackendAuthStatuses(options?: { enabled?: boolean }) {
     kimiAuth.data,
     antigravity.data?.installed,
     antigravityAuth.data,
+    muse.data?.installed,
+    museAuth.data,
+    devin.data?.installed,
+    devinAuth.data,
   ])
 
   const isStatusLoading =
@@ -202,7 +229,9 @@ export function useBackendAuthStatuses(options?: { enabled?: boolean }) {
     commandcode.isLoading ||
     grok.isLoading ||
     kimi.isLoading ||
-    antigravity.isLoading
+    antigravity.isLoading ||
+    muse.isLoading ||
+    devin.isLoading
 
   const isAuthLoading =
     (!!claude.data?.installed && claudeAuth.isLoading) ||
@@ -213,10 +242,45 @@ export function useBackendAuthStatuses(options?: { enabled?: boolean }) {
     (!!commandcode.data?.installed && commandcodeAuth.isLoading) ||
     (!!grok.data?.installed && grokAuth.isLoading) ||
     (!!kimi.data?.installed && kimiAuth.isLoading) ||
-    (!!antigravity.data?.installed && antigravityAuth.isLoading)
+    (!!antigravity.data?.installed && antigravityAuth.isLoading) ||
+    (!!muse.data?.installed && museAuth.isLoading) ||
+    (!!devin.data?.installed && devinAuth.isLoading)
+
+  const authQueries = {
+    claude: [claude, claudeAuth],
+    codex: [codex, codexAuth],
+    opencode: [opencode, opencodeAuth],
+    cursor: [cursor, cursorAuth],
+    pi: [pi, piAuth],
+    commandcode: [commandcode, commandcodeAuth],
+    grok: [grok, grokAuth],
+    kimi: [kimi, kimiAuth],
+    antigravity: [antigravity, antigravityAuth],
+    muse: [muse, museAuth],
+    devin: [devin, devinAuth],
+  } as const
+  const authQueriesRef = useRef(authQueries)
+  useLayoutEffect(() => {
+    authQueriesRef.current = authQueries
+  }, [authQueries])
+
+  /**
+   * Re-probe one backend's auth, bypassing the cached result. A cached `false`
+   * can be stale (expired cache entry, failed probe, login in another window),
+   * so callers re-check before blocking the user.
+   */
+  const refetchAuth = useCallback(
+    async (backend: CliBackend): Promise<boolean | undefined> => {
+      const [status, auth] = authQueriesRef.current[backend]
+      const { data } = await auth.refetch()
+      return resolvedAuth(status.data?.installed, data)
+    },
+    []
+  )
 
   return {
     authByBackend,
+    refetchAuth,
     isLoading: isStatusLoading || isAuthLoading,
   }
 }

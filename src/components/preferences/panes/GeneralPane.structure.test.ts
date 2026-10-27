@@ -17,6 +17,7 @@ describe('GeneralPane settings structure', () => {
       'commandcode',
       'grok',
       'kimi',
+      'devin',
     ]) {
       expect(source).toContain(`'${backend}',`)
     }
@@ -38,6 +39,8 @@ describe('GeneralPane settings structure', () => {
       'pref-grok-section-settings',
       'pref-kimi-section-cli',
       'pref-kimi-section-settings',
+      'pref-devin-section-cli',
+      'pref-devin-section-settings',
     ]) {
       const anchorIndex = source.indexOf(`anchorId="${anchorId}"`)
       expect(anchorIndex, anchorId).toBeGreaterThan(-1)
@@ -53,7 +56,7 @@ describe('GeneralPane settings structure', () => {
       'utf8'
     )
 
-    expect(source.match(/<BackendCliSourceSelect/g)).toHaveLength(7)
+    expect(source.match(/<BackendCliSourceSelect/g)).toHaveLength(8)
   })
 
   it('renders the Kimi auto-steer toggle inside Kimi settings', () => {
@@ -70,6 +73,24 @@ describe('GeneralPane settings structure', () => {
     expect(kimiSection).toContain('handleKimiAutoSteerToggle')
     expect(kimiSection).toContain('pref-kimi-section-cli')
     expect(kimiSection).toContain('pref-kimi-section-settings')
+  })
+
+  it('renders Devin setup and default model settings', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const devinSection = source.slice(
+      source.indexOf("{scope === 'devin' && ("),
+      source.indexOf('{isGeneralScope && (')
+    )
+
+    expect(devinSection).toContain('devin_cli_source')
+    expect(devinSection).toContain('selectedDevinModel')
+    expect(devinSection).toContain('handleDevinLogin')
+    expect(devinSection).toContain('handleDevinInstall')
+    expect(devinSection).toContain('pref-devin-section-cli')
+    expect(devinSection).toContain('pref-devin-section-settings')
   })
 
   it('renders the OpenCode auto-steer toggle inside OpenCode settings', () => {
@@ -161,6 +182,46 @@ describe('GeneralPane settings structure', () => {
     )
   })
 
+  it('renders the server preview hostname in general settings', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const fieldSource = readFileSync(
+      'src/components/preferences/panes/BrowserDefaultHostField.tsx',
+      'utf8'
+    )
+    const browserIndex = source.indexOf('title="Browser"')
+    const archiveIndex = source.indexOf('title="Archive"')
+
+    expect(browserIndex).toBeGreaterThan(-1)
+    expect(browserIndex).toBeLessThan(archiveIndex)
+    expect(source).toContain('anchorId="pref-general-section-browser"')
+    expect(source).toContain(
+      '<BrowserDefaultHostField preferences={preferences} />'
+    )
+    expect(fieldSource).toContain('browser_default_host')
+    expect(fieldSource).toContain('usePatchPreferences()')
+  })
+
+  it('renders chat path and spellcheck toggles before auto-generate', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const chatIndex = source.indexOf('title="Chat"')
+    const autoGenerateIndex = source.indexOf('title="Auto-generate"')
+    const section = source.slice(chatIndex, autoGenerateIndex)
+
+    expect(chatIndex).toBeGreaterThan(-1)
+    expect(chatIndex).toBeLessThan(autoGenerateIndex)
+    expect(section).toContain('anchorId="pref-general-section-chat"')
+    expect(section).toContain('show_full_file_path')
+    expect(section).toContain('spellcheck_enabled')
+    expect(section).toContain('Show full file paths')
+    expect(section).toContain('Spellcheck')
+  })
+
   it('renders the app version and build commit at the bottom of general settings', () => {
     const source = readFileSync(
       'src/components/preferences/panes/GeneralPane.tsx',
@@ -209,6 +270,21 @@ describe('GeneralPane settings structure', () => {
     expect(source.slice(versionSectionIndex, generalSettingsEnd)).not.toContain(
       '<SettingsSection'
     )
+  })
+
+  it('marks the GitLab CLI settings section as beta', () => {
+    const source = readFileSync(
+      'src/components/preferences/panes/GeneralPane.tsx',
+      'utf8'
+    )
+    const anchor = source.indexOf('anchorId="pref-gitlab-section-cli"')
+    expect(anchor).toBeGreaterThan(-1)
+    const section = source.slice(anchor - 250, anchor)
+    expect(section).toContain('GitLab CLI')
+    expect(section).toContain('<BetaBadge />')
+    const githubCli = source.indexOf('title="GitHub CLI"')
+    expect(githubCli).toBeGreaterThan(-1)
+    expect(source.slice(githubCli, githubCli + 200)).not.toContain('<BetaBadge />')
   })
 
   it('offers a browser sign-out only when running as web access', () => {

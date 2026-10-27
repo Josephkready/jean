@@ -2,7 +2,7 @@
 
 # Jean
 
-A dev environment for AI agents. Run Claude, Codex, Cursor, OpenCode, Pi, Command Code, Grok, Kimi Code, and Antigravity in parallel - each in its own git worktree - on your laptop or your own server.
+A dev environment for AI agents. Run Claude, Codex, Cursor, OpenCode, Pi, Command Code, Grok, Kimi Code, Antigravity, and Muse in parallel - each in its own git worktree - on your laptop or your own server.
 
 Tauri v2 · React 19 · Rust · TypeScript · Tailwind CSS v4 · shadcn/ui v4 · Zustand v5 · TanStack Query · Pierre Diffs · xterm.js
 
@@ -41,7 +41,7 @@ For more information, take a look at [jean.build](https://jean.build).
 
 - **Project & Worktree Management** - Multi-project support, linked projects for cross-project context, git worktree automation (create, archive, restore, delete), worktree labels and filters, custom project avatars
 - **Session Management** - Multiple sessions per worktree, Recent tab across all projects, execution modes (Plan, Build, Yolo) with plan approval flows, `/goal` tracking, session recap/digest, saved contexts with AI summarization, archiving with retention settings, recovery, auto-naming, canvas views
-- **AI Backends** - Claude, Codex, Cursor, OpenCode, Pi, Command Code, Grok, Kimi Code, and Antigravity (beta). Model selection and thinking/effort levels with per-mode overrides, MCP server support, multi-agent collaboration, file picker & image attachments, chat search, notification sounds, custom system prompts, custom CLI profiles
+- **AI Backends** - Claude, Codex, Cursor, OpenCode, Pi, Command Code, Grok, Kimi Code, Antigravity (beta), and Muse. Model selection and thinking/effort levels with per-mode overrides, MCP server support, multi-agent collaboration, file picker & image attachments, chat search, notification sounds, custom system prompts, custom CLI profiles
 - **Magic Commands & Prompts** - Investigate issues/PRs/workflows/security alerts, code review with finding tracking, AI commit messages, PR content generation, merge conflict resolution, release notes generation; every prompt is editable with its own backend, model, effort, and mode
 - **Mr. Robot (beta)** - Polls open GitHub issues, creates one worktree per issue, drafts a plan, and can execute approved plans
 - **Integrations** - GitHub (Issues, PRs, Security Alerts, Advisories, Dependabot, checkout PRs as worktrees, auto-archive on merge), Linear, Sentry, CodeRabbit
@@ -85,10 +85,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup and guidelines
 Every Jean instance can run **Web Access**: an embedded HTTP + WebSocket server
 that serves the same UI in a browser. That applies to both:
 
-| Mode | How you get Web Access |
-| --- | --- |
+| Mode                                         | How you get Web Access                                                                        |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | **Native desktop** (macOS / Windows / Linux) | Settings → **Web Access** - enable the HTTP server, set port/bind address, copy the token URL |
-| **Headless server** (`jean-server`) | Always on - the process *is* the Web Access endpoint |
+| **Headless server** (`jean-server`)          | Always on - the process _is_ the Web Access endpoint                                          |
 
 Use it to open Jean from another machine on your LAN, a phone/tablet browser,
 or a remote host. Token authentication is on by default; keep it enabled for

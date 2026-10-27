@@ -41,14 +41,29 @@ import {
   normalizeQuestionMultipleField,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
+import { ReplyBubbles } from './ReplyBubble'
 import { getProviderChangeBeforeMessage } from './message-settings-labels'
 import { ProviderChangeSeparator } from './ProviderChangeSeparator'
 import { EditedFilesDisplay } from './EditedFilesDisplay'
 import { parseServerResourceKey } from '@/lib/server-resource'
 import { AskUserQuestion } from './AskUserQuestion'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
-import { buildTimeline, coalesceContentBlocks } from './tool-call-utils'
-import { formatDuration, getAssistantDurationMs } from './time-utils'
+import {
+  assistantTextParts,
+  buildTimeline,
+  coalesceContentBlocks,
+} from './tool-call-utils'
+import { MessageTiming } from './MessageTiming'
+import { getAssistantDurationMs } from './time-utils'
+import { AgentApprovalInline } from '@/components/agents/AgentActivity'
+import { AgentMessageLinkRow } from '@/components/agents/AgentMessageLink'
+import { AgentQuestionCard } from '@/components/agents/AgentQuestionCard'
+import { parseInlineNumberedQuestion } from './inline-question-utils'
+import { InlineQuestionOptions } from './InlineQuestionOptions'
+import {
+  assistantReplyItems,
+  nextUserAnswers,
+} from '@/components/agents/agent-messages'
 import {
   TOOL_CALL_ROW_CLASS,
   TOOL_CALL_DETAIL_PILL_CLASS,
@@ -118,6 +133,10 @@ interface CompactMessageListProps {
   loadedRunStartIndex?: number
   hiddenPromptCount?: number
   onShowHiddenPrompts?: () => void
+  /** Show only assistant prose: no tool activity rows or edited files */
+  hideToolActivity?: boolean
+  /** Sends a user message to this session (answers to `ask_user` questions) */
+  onSendAnswer?: (text: string) => void
 }
 
 type RenderItem =
@@ -127,6 +146,8 @@ type RenderItem =
       messages: { message: ChatMessage; globalIndex: number }[]
       key: string
       latestText: string | null
+      /** Numbered question that the latest text asks ("reply with a number") */
+      inlineQuestion: { title?: string; options: string[] } | null
     }
   | { kind: 'question'; message: ChatMessage; globalIndex: number }
   | {
@@ -216,6 +237,15 @@ function splitMessageAtSteeredInputs(
   return segments
 }
 
+/** All assistant prose of a compact group, tool calls left out. */
+function collectAssistantText(group: { message: ChatMessage }[]): string[] {
+  return group.flatMap(({ message }) =>
+    message.role === 'assistant'
+      ? assistantTextParts(message.content_blocks ?? [], message.content ?? '')
+      : []
+  )
+}
+
 function isPureTextAssistantMessage(message: ChatMessage): boolean {
   if (message.role !== 'assistant') return false
   if ((message.tool_calls?.length ?? 0) > 0) return false
@@ -232,9 +262,7 @@ function isPureTextAssistantMessage(message: ChatMessage): boolean {
 
 /**
  * Returns the latest assistant prose text in a compact group as plain text.
- * Walks newest → oldest and returns the first non-empty result. If the latest
- * message contains a `## Recap` section, only that section is returned so the
- * compact view surfaces the wrap-up instead of replaying the whole turn.
+ * Walks newest → oldest and returns the first non-empty result.
  */
 function findLatestAssistantText(
   group: { message: ChatMessage }[]
@@ -269,10 +297,7 @@ function findLatestAssistantText(
         : message.content?.trim()
     if (!text) continue
 
-    const combined = text
-    if (!combined.trim()) continue
-    const recap = extractRecapSection(combined)
-    if (recap) return recap
+    if (!text.trim()) continue
     return text
   }
   return null
@@ -412,12 +437,17 @@ const CompactActivityRow = memo(function CompactActivityRow({
     () => group.some(item => item.message.cancelled),
     [group]
   )
-  const groupDurationMs = useMemo(() => {
+  const groupTiming = useMemo(() => {
     for (let i = group.length - 1; i >= 0; i--) {
       const item = group[i]
       if (!item) continue
       const duration = durationFor(item.globalIndex, item.message)
-      if (duration != null && duration > 0) return duration
+      if (duration != null && duration > 0) {
+        return {
+          durationMs: duration,
+          timestamp: item.message.timestamp,
+        }
+      }
     }
     return null
   }, [group, durationFor])
@@ -440,7 +470,7 @@ const CompactActivityRow = memo(function CompactActivityRow({
     <Collapsible
       open={isOpen}
       onOpenChange={setIsOpen}
-      className="min-w-0 pb-4"
+      className="group/message min-w-0 pb-4"
     >
       <div
         className={
@@ -491,14 +521,22 @@ const CompactActivityRow = memo(function CompactActivityRow({
           </div>
         </CollapsibleContent>
       </div>
-      {(groupDurationMs != null || hasCancelledMessage) && (
+      {(groupTiming != null || hasCancelledMessage) && (
         <div className="mt-1 flex min-h-4 items-center gap-2 text-xs leading-4 text-muted-foreground/40">
-          {groupDurationMs != null && (
+          {groupTiming != null ? (
             <span className="tabular-nums font-mono">
-              {formatDuration(groupDurationMs)}
+              <MessageTiming
+                durationMs={groupTiming.durationMs}
+                timestamp={groupTiming.timestamp}
+              >
+                {hasCancelledMessage && (
+                  <span className="ml-2 font-sans italic text-muted-foreground/50">
+                    (cancelled)
+                  </span>
+                )}
+              </MessageTiming>
             </span>
-          )}
-          {hasCancelledMessage && (
+          ) : (
             <span className="italic text-muted-foreground/50">(cancelled)</span>
           )}
         </div>
@@ -539,6 +577,7 @@ interface CompactQuestionMessageProps {
   ) => React.ReactNode
   hasFollowUpFor: (globalIndex: number) => boolean
   durationFor: (globalIndex: number, message: ChatMessage) => number | null
+  hideToolActivity: boolean
 }
 
 /**
@@ -563,6 +602,7 @@ function CompactQuestionMessage({
   renderMessage,
   hasFollowUpFor,
   durationFor,
+  hideToolActivity,
 }: CompactQuestionMessageProps) {
   const stripped = useMemo(() => stripQuestionsFromMessage(message), [message])
 
@@ -591,17 +631,32 @@ function CompactQuestionMessage({
     [stripped, globalIndex]
   )
 
+  const hiddenToolsText = useMemo(
+    () => (hideToolActivity ? collectAssistantText(activityGroup) : []),
+    [hideToolActivity, activityGroup]
+  )
+
   return (
     <>
-      {hasNonQuestionContent && (
-        <CompactActivityRow
-          group={activityGroup}
-          total={1}
-          renderMessage={renderMessage}
-          hasFollowUpFor={hasFollowUpFor}
-          durationFor={durationFor}
-        />
-      )}
+      {hideToolActivity
+        ? hiddenToolsText.length > 0 && (
+            <div className="pb-4">
+              <ReplyBubbles
+                parts={hiddenToolsText}
+                messageId={message.id}
+                sessionId={sessionId}
+              />
+            </div>
+          )
+        : hasNonQuestionContent && (
+            <CompactActivityRow
+              group={activityGroup}
+              total={1}
+              renderMessage={renderMessage}
+              hasFollowUpFor={hasFollowUpFor}
+              durationFor={durationFor}
+            />
+          )}
       {questionItems.map(item => {
         const isAnswered =
           hasFollowUpMessage ||
@@ -638,7 +693,10 @@ function CompactQuestionMessage({
       })}
       {durationMs != null && durationMs > 0 && (
         <span className="mt-1 block min-h-4 text-xs leading-4 text-muted-foreground/40 tabular-nums font-mono">
-          {formatDuration(durationMs)}
+          <MessageTiming
+            durationMs={durationMs}
+            timestamp={message.timestamp}
+          />
         </span>
       )}
     </>
@@ -703,6 +761,8 @@ export const CompactMessageList = memo(
         loadedRunStartIndex = 0,
         hiddenPromptCount = 0,
         onShowHiddenPrompts,
+        hideToolActivity = false,
+        onSendAnswer,
       },
       ref
     ) {
@@ -746,6 +806,11 @@ export const CompactMessageList = memo(
         }
         return map
       }, [messages])
+
+      const userAnswers = useMemo(
+        () => (hideToolActivity ? nextUserAnswers(messages) : []),
+        [hideToolActivity, messages]
+      )
 
       const hasFollowUpFor = useCallback(
         (globalIndex: number) => hasFollowUpMap.get(globalIndex) ?? false,
@@ -792,11 +857,27 @@ export const CompactMessageList = memo(
             buffer.length === 1
               ? `compact-${first.message.id}`
               : `compact-${first.message.id}-${last.message.id}`
+          const text = findLatestAssistantText(buffer)
+          // A `## Recap` section replaces the whole turn in the compact view
+          const shown = text && (extractRecapSection(text) ?? text)
+          // Options of a numbered question show as buttons below the text.
+          // The question line stays in the text when the recap has it.
+          const asked = shown ? parseInlineNumberedQuestion(shown) : null
+          const askedBefore =
+            !asked && text && text !== shown
+              ? parseInlineNumberedQuestion(text)
+              : null
           items.push({
             kind: 'compact',
             messages: buffer,
             key: compactKey,
-            latestText: findLatestAssistantText(buffer),
+            latestText: asked?.rest ?? shown,
+            inlineQuestion: asked
+              ? { options: asked.options }
+              : askedBefore && {
+                  title: askedBefore.question,
+                  options: askedBefore.options,
+                },
           })
           buffer = []
         }
@@ -898,6 +979,7 @@ export const CompactMessageList = memo(
             durationMs: number | null
             hideCancelledIndicator?: boolean
             hideEditedFiles?: boolean
+            bubble?: boolean
           }
         ) => (
           <MessageItem
@@ -939,6 +1021,8 @@ export const CompactMessageList = memo(
             hideApproveButtons={hideApproveButtons}
             hideCancelledIndicator={extra.hideCancelledIndicator}
             hideEditedFiles={extra.hideEditedFiles}
+            bubble={extra.bubble}
+            hideSettingsBadges={hideToolActivity}
             durationMs={extra.durationMs}
           />
         ),
@@ -972,6 +1056,7 @@ export const CompactMessageList = memo(
           isFindingFixed,
           onCopyToInput,
           hideApproveButtons,
+          hideToolActivity,
         ]
       )
 
@@ -1137,7 +1222,7 @@ export const CompactMessageList = memo(
                     if (el) messageRefs.current.set(item.globalIndex, el)
                     else messageRefs.current.delete(item.globalIndex)
                   }}
-                  className="pb-4"
+                  className="group/message pb-4"
                 >
                   <CompactQuestionMessage
                     message={item.message}
@@ -1154,6 +1239,7 @@ export const CompactMessageList = memo(
                     renderMessage={renderMessageItem}
                     hasFollowUpFor={hasFollowUpFor}
                     durationFor={durationFor}
+                    hideToolActivity={hideToolActivity}
                   />
                 </div>
               )
@@ -1213,11 +1299,60 @@ export const CompactMessageList = memo(
                 >
                   {renderMessageItem(singleMessage, {
                     hasFollowUpMessage,
+                    bubble: hideToolActivity,
                     durationMs: durationFor(
                       singleMessage.globalIndex,
                       singleMessage.message
                     ),
                   })}
+                </div>
+              )
+            }
+
+            if (hideToolActivity) {
+              // Messages to other agents or sessions, approvals, and questions: one row each
+              const replyItems = assistantReplyItems(item.messages)
+              if (replyItems.length === 0) return null
+              return (
+                <div key={item.key} className="flex flex-col gap-1.5 pb-4">
+                  {replyItems.map((reply, index) =>
+                    reply.type === 'text' ? (
+                      <ReplyBubbles
+                        key={`text-${index}`}
+                        parts={reply.texts}
+                        messageId={
+                          index === 0 ? item.key : `${item.key}:group${index}`
+                        }
+                        sessionId={sessionId}
+                      />
+                    ) : reply.type === 'question' ? (
+                      <AgentQuestionCard
+                        key={reply.toolId}
+                        question={reply.question}
+                        answer={
+                          userAnswers[
+                            item.messages[item.messages.length - 1]
+                              ?.globalIndex ?? -1
+                          ]
+                        }
+                        disabled={isSending}
+                        onSend={onSendAnswer}
+                      />
+                    ) : reply.type === 'approval' ? (
+                      <AgentApprovalInline
+                        key={reply.toolId}
+                        approvalId={reply.approvalId}
+                        worktreeId={worktreeId}
+                      />
+                    ) : (
+                      <AgentMessageLinkRow
+                        key={reply.link.toolId}
+                        link={reply.link}
+                        sentAt={reply.sentAt}
+                        worktreeId={worktreeId}
+                      />
+                    )
+                  )}
                 </div>
               )
             }
@@ -1237,6 +1372,7 @@ export const CompactMessageList = memo(
               Boolean(item.latestText) &&
               !(latestTextIsRecap && latestRunHasPlan)
             const surfaceRecap = latestTextIsRecap && showLatestText
+            const inlineQuestion = item.inlineQuestion
             const surfacedLatestToolCalls =
               isLatestCompact && (showLatestText || hasCancelledMessage)
                 ? latestCompactToolCalls
@@ -1264,6 +1400,14 @@ export const CompactMessageList = memo(
                       >
                         {item.latestText ?? ''}
                       </Markdown>
+                    )}
+                    {showLatestText && inlineQuestion && onSendAnswer && (
+                      <InlineQuestionOptions
+                        title={inlineQuestion.title}
+                        options={inlineQuestion.options}
+                        disabled={isSending}
+                        onSend={onSendAnswer}
+                      />
                     )}
                     {surfacedLatestToolCalls.length > 0 && (
                       <EditedFilesDisplay

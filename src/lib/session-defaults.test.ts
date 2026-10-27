@@ -12,7 +12,9 @@ const preferences = {
   selected_cursor_model: 'cursor/auto',
   selected_commandcode_model: 'commandcode/deepseek/deepseek-v4-flash',
   selected_kimi_model: 'kimi/custom-coding-model',
+  selected_devin_model: 'devin/custom-coding-model',
   selected_antigravity_model: 'antigravity/flash',
+  selected_muse_model: 'muse/muse-spark-1.2',
 } as unknown as AppPreferences
 
 describe('resolveDefaultModelForBackend', () => {
@@ -54,6 +56,18 @@ describe('resolveDefaultModelForBackend', () => {
     )
   })
 
+  it('uses the Devin model preference for Devin sessions', () => {
+    expect(resolveDefaultModelForBackend('devin', preferences)).toBe(
+      'devin/custom-coding-model'
+    )
+  })
+
+  it('falls back to the Devin configured default model', () => {
+    expect(resolveDefaultModelForBackend('devin', {} as AppPreferences)).toBe(
+      'devin/default'
+    )
+  })
+
   it('uses the Antigravity model preference for Antigravity sessions', () => {
     expect(resolveDefaultModelForBackend('antigravity', preferences)).toBe(
       'antigravity/flash'
@@ -64,6 +78,18 @@ describe('resolveDefaultModelForBackend', () => {
     expect(
       resolveDefaultModelForBackend('antigravity', {} as AppPreferences)
     ).toBe('antigravity/auto')
+  })
+
+  it('uses the Muse model preference for Muse sessions', () => {
+    expect(resolveDefaultModelForBackend('muse', preferences)).toBe(
+      'muse/muse-spark-1.2'
+    )
+  })
+
+  it('falls back to the Muse server default model', () => {
+    expect(resolveDefaultModelForBackend('muse', {} as AppPreferences)).toBe(
+      'muse/default'
+    )
   })
 
   it('uses the first available PI provider model when the stored PI default is unavailable', () => {

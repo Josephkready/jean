@@ -19,8 +19,11 @@ type CliKey =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'antigravity'
+  | 'muse'
   | 'gh'
+  | 'glab'
 
 interface CliMock {
   installed: boolean
@@ -39,8 +42,11 @@ const mocks = vi.hoisted(() => {
     'commandcode',
     'grok',
     'kimi',
+    'devin',
     'antigravity',
+    'muse',
     'gh',
+    'glab',
   ] as const
   const cli = Object.fromEntries(
     keys.map(key => [
@@ -191,15 +197,30 @@ vi.mock('@/services/kimi-cli', () => ({
   useKimiCliAuth: () => authResult('kimi'),
   useKimiPathDetection: () => pathResult('kimi'),
 }))
+vi.mock('@/services/devin-cli', () => ({
+  useDevinCliSetup: () => useSetupResult('devin'),
+  useDevinCliAuth: () => authResult('devin'),
+  useDevinPathDetection: () => pathResult('devin'),
+}))
 vi.mock('@/services/antigravity-cli', () => ({
   useAntigravityCliSetup: () => useSetupResult('antigravity'),
   useAntigravityCliAuth: () => authResult('antigravity'),
   useAntigravityPathDetection: () => pathResult('antigravity'),
 }))
+vi.mock('@/services/muse-cli', () => ({
+  useMuseCliSetup: () => useSetupResult('muse'),
+  useMuseCliAuth: () => authResult('muse'),
+  useMusePathDetection: () => pathResult('muse'),
+}))
 vi.mock('@/services/gh-cli', () => ({
   useGhCliSetup: () => useSetupResult('gh'),
   useGhCliAuth: () => authResult('gh'),
   useGhPathDetection: () => pathResult('gh'),
+}))
+vi.mock('@/services/glab-cli', () => ({
+  useGlabCliSetup: () => useSetupResult('glab'),
+  useGlabCliAuth: () => authResult('glab'),
+  useGlabPathDetection: () => pathResult('glab'),
 }))
 
 vi.mock('@/services/prerequisites', () => ({
@@ -217,8 +238,11 @@ vi.mock('@/services/preferences', () => ({
       commandcode_cli_source: 'jean',
       grok_cli_source: 'jean',
       kimi_cli_source: 'jean',
+      devin_cli_source: 'jean',
       antigravity_cli_source: 'jean',
+      muse_cli_source: 'jean',
       gh_cli_source: 'jean',
+      glab_cli_source: 'jean',
     },
   }),
   usePatchPreferences: () => ({
@@ -484,25 +508,148 @@ describe('OnboardingDialog', () => {
       )
     })
 
-    it('enables Finish only when GitHub CLI and one AI backend are ready', async () => {
+    it('enables Finish when an AI backend is ready even if GitHub CLI is not', async () => {
       setCli('claude', { installed: true, authenticated: true })
       setCli('gh', { installed: true, authenticated: false })
       const user = userEvent.setup()
       render(<OnboardingDialog />)
       await goToSetup(user)
 
+      expect(
+        await screen.findByText(/GitHub CLI is optional/)
+      ).toBeInTheDocument()
       const finish = await screen.findByRole('button', { name: 'Finish' })
-      expect(finish).toBeDisabled()
+      expect(finish).toBeEnabled()
 
-      // Sign in to GitHub CLI; the auth query then reports signed in.
-      await user.click(
-        screen.getByRole('button', { name: 'Complete GitHub CLI login' })
-      )
-      act(() => setCli('gh', { authenticated: true }))
-      await waitFor(() => expect(finish).toBeEnabled())
+      const ghRow = screen.getByTestId('setup-row-gh')
+      await user.click(within(ghRow).getByRole('button', { name: 'Skip' }))
+      expect(screen.queryByTestId('setup-row-gh')).not.toBeInTheDocument()
+
       await user.click(finish)
-
       expect(await screen.findByText("You're ready")).toBeInTheDocument()
+    })
+
+    it('shows optional GitLab CLI and still finishes with only an AI backend', async () => {
+      setCli('claude', { installed: true, authenticated: true })
+      const user = userEvent.setup()
+      render(<OnboardingDialog />)
+      await goToSetup(user)
+
+      expect(
+        await screen.findByText(/GitLab CLI is optional/)
+      ).toBeInTheDocument()
+      const finish = await screen.findByRole('button', { name: 'Finish' })
+      expect(finish).toBeEnabled()
+
+      const glabRow = screen.getByTestId('setup-row-glab')
+      expect(within(glabRow).getByText('optional')).toBeInTheDocument()
+      expect(within(glabRow).getByText('Beta')).toHaveClass('bg-warning/10')
+      expect(
+        within(screen.getByTestId('setup-row-gh')).queryByText('Beta')
+      ).toBeNull()
+      await user.click(within(glabRow).getByRole('button', { name: 'Skip' }))
+      expect(screen.queryByTestId('setup-row-glab')).not.toBeInTheDocument()
+
+      await user.click(finish)
+      expect(await screen.findByText("You're ready")).toBeInTheDocument()
+    })
+  })
+
+  describe('Devin', () => {
+    it('marks Devin as beta in the picker, setup row, and ready list', async () => {
+      setCli('devin', { installed: true, authenticated: true })
+      const user = userEvent.setup()
+      render(<OnboardingDialog />)
+      await chooseLocal(user)
+
+      const devin = await screen.findByRole('checkbox', { name: /Devin/ })
+      expect(
+        within(devin.closest('label') as HTMLElement).getByText('Beta')
+      ).toHaveClass('bg-warning/10')
+
+      await user.click(screen.getByRole('button', { name: 'Continue' }))
+
+      const row = await screen.findByTestId('setup-row-devin')
+      expect(within(row).getByText('Devin')).toBeInTheDocument()
+      expect(within(row).getByText('Beta')).toHaveClass('bg-warning/10')
+      expect(row).toHaveAttribute('aria-label', 'Devin (Beta)')
+
+      await user.click(screen.getByRole('button', { name: 'Finish' }))
+      expect(await screen.findByText("You're ready")).toBeInTheDocument()
+      expect(screen.getByText('Beta')).toHaveClass('bg-warning/10')
+    })
+  })
+
+  describe('Muse', () => {
+    it('keeps Muse not ready while installed but signed out', async () => {
+      setCli('muse', { installed: true })
+      const user = userEvent.setup()
+      render(<OnboardingDialog />)
+      await chooseLocal(user)
+
+      const muse = await screen.findByRole('checkbox', { name: /Muse/ })
+      expect(muse).toBeChecked()
+      expect(screen.getByRole('checkbox', { name: /Claude/ })).not.toBeChecked()
+      await user.click(screen.getByRole('button', { name: 'Continue' }))
+
+      expect(
+        await screen.findByRole('button', { name: 'Complete Muse login' })
+      ).toBeInTheDocument()
+      const finish = screen.getByRole('button', { name: 'Finish' })
+      expect(finish).toBeDisabled()
+      expect(mocks.cli.muse.install).not.toHaveBeenCalled()
+
+      act(() => setCli('muse', { authenticated: true }))
+      await waitFor(() => expect(finish).toBeEnabled())
+    })
+
+    it('saves Muse as default backend and magic prompt backend when ready', async () => {
+      setCli('muse', { installed: true, authenticated: true })
+      const user = userEvent.setup()
+      render(<OnboardingDialog />)
+      await goToSetup(user)
+      await user.click(await screen.findByRole('button', { name: 'Finish' }))
+      await screen.findByText("You're ready")
+      await user.click(screen.getByRole('button', { name: /Add a project/ }))
+
+      await waitFor(() =>
+        expect(mocks.patchPreferencesAsync).toHaveBeenCalledWith(
+          expect.objectContaining({
+            default_backend: 'muse',
+            magic_models_auto_initialized: true,
+            magic_prompt_backends: expect.objectContaining({
+              investigate_issue_backend: 'muse',
+              commit_message_backend: 'muse',
+              code_review_backend: 'muse',
+            }),
+            magic_prompt_models: expect.objectContaining({
+              investigate_issue_model: 'muse/default',
+              commit_message_model: 'muse/default',
+              code_review_model: 'muse/default',
+            }),
+          })
+        )
+      )
+    })
+
+    it('installs a picked Muse as a Jean-managed CLI', async () => {
+      const user = userEvent.setup()
+      render(<OnboardingDialog />)
+      await chooseLocal(user)
+      await user.click(await screen.findByRole('checkbox', { name: /Claude/ }))
+      await user.click(screen.getByRole('checkbox', { name: /Muse/ }))
+      await user.click(screen.getByRole('button', { name: 'Continue' }))
+
+      await waitFor(() =>
+        expect(mocks.cli.muse.install).toHaveBeenCalledWith(
+          '2.0.0',
+          expect.anything()
+        )
+      )
+      expect(mocks.patchPreferencesAsync).toHaveBeenCalledWith({
+        muse_cli_source: 'jean',
+      })
+      expect(mocks.cli.claude.install).not.toHaveBeenCalled()
     })
   })
 

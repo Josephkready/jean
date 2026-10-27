@@ -1,10 +1,10 @@
 import {
-  Brain,
   CircleDot,
   ExternalLink,
   FolderOpen,
   GitMerge,
   GitPullRequest,
+  MessagesSquare,
   Paperclip,
   Shield,
   ShieldAlert,
@@ -46,6 +46,7 @@ import type {
   LoadedPullRequestContext,
   LoadedSecurityAlertContext,
   LoadedAdvisoryContext,
+  LoadedDiscussionContext,
 } from '@/types/github'
 import type { LoadedLinearIssueContext } from '@/types/linear'
 import type { SentryIssueContext } from '@/types/sentry'
@@ -56,6 +57,12 @@ import type {
   PrDisplayStatus,
 } from '@/types/pr-status'
 import { openExternal } from '@/lib/platform'
+import {
+  hostedRepoWebUrl,
+  issueWebUrl,
+  pullRequestWebUrl,
+} from '@/lib/git-provider'
+import { providerLabels, useProjectGitProvider } from '@/services/git-provider'
 import { cn } from '@/lib/utils'
 import {
   CODEX_EFFORT_LEVEL_OPTIONS,
@@ -63,6 +70,7 @@ import {
   GROK_EFFORT_LEVEL_OPTIONS,
   KIMI_EFFORT_LEVEL_OPTIONS,
   ANTIGRAVITY_EFFORT_LEVEL_OPTIONS,
+  MUSE_EFFORT_LEVEL_OPTIONS,
   PI_EFFORT_LEVEL_OPTIONS,
   THINKING_LEVEL_OPTIONS,
   withAdaptiveEffortOption,
@@ -74,6 +82,7 @@ import {
 import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBackendModelPicker'
 import { ExecutionModeDropdown } from '@/components/chat/toolbar/ExecutionModeDropdown'
 import { DockBurgerButton } from '@/components/chat/toolbar/DockBurgerButton'
+import { ReasoningLevelDropdown } from '@/components/chat/toolbar/ReasoningLevelDropdown'
 import type { ModelReasoningCapability } from '@/services/model-catalog'
 
 /** Stable default so omit/undefined doesn't allocate a new [] each render. */
@@ -90,6 +99,7 @@ interface DesktopToolbarControlsProps {
   executionMode: ExecutionMode
   useAdaptiveThinking: boolean
   hideThinkingLevel?: boolean
+  hideModelPicker?: boolean
   sessionHasMessages?: boolean
   providerLocked?: boolean
   customCliProfiles: CustomCliProfile[]
@@ -111,6 +121,7 @@ interface DesktopToolbarControlsProps {
 
   loadedIssueContexts: LoadedIssueContext[]
   loadedPRContexts: LoadedPullRequestContext[]
+  loadedDiscussionContexts: LoadedDiscussionContext[]
   loadedSecurityContexts: LoadedSecurityAlertContext[]
   loadedAdvisoryContexts: LoadedAdvisoryContext[]
   loadedLinearContexts: LoadedLinearIssueContext[]
@@ -141,6 +152,7 @@ interface DesktopToolbarControlsProps {
   handleEffortLevelChange: (value: string) => void
   handleViewIssue: (ctx: LoadedIssueContext) => void
   handleViewPR: (ctx: LoadedPullRequestContext) => void
+  handleViewDiscussion: (ctx: LoadedDiscussionContext) => void
   handleViewSecurityAlert: (ctx: LoadedSecurityAlertContext) => void
   handleViewAdvisory: (ctx: LoadedAdvisoryContext) => void
   handleViewLinear: (ctx: LoadedLinearIssueContext) => void
@@ -159,6 +171,7 @@ export function DesktopToolbarControls({
   executionMode,
   useAdaptiveThinking,
   hideThinkingLevel,
+  hideModelPicker = false,
   sessionHasMessages,
   providerLocked,
   customCliProfiles,
@@ -170,13 +183,14 @@ export function DesktopToolbarControls({
   displayStatus,
   checkStatus: _checkStatus,
   mergeableStatus,
-  activeWorktreePath: _activeWorktreePath,
+  activeWorktreePath,
   availableMcpServers: _availableMcpServers,
   enabledMcpServers: _enabledMcpServers,
   isHealthChecking: _isHealthChecking,
   mcpStatuses: _mcpStatuses,
   loadedIssueContexts,
   loadedPRContexts,
+  loadedDiscussionContexts,
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
@@ -204,16 +218,26 @@ export function DesktopToolbarControls({
   handleEffortLevelChange,
   handleViewIssue,
   handleViewPR,
+  handleViewDiscussion,
   handleViewSecurityAlert,
   handleViewAdvisory,
   handleViewLinear,
   handleViewSentry,
   handleViewSavedContext,
 }: DesktopToolbarControlsProps) {
+  const { data: gitProviderInfo } = useProjectGitProvider(activeWorktreePath)
+  const gitProvider = gitProviderInfo?.provider ?? 'github'
+  const forgeLabels = providerLabels(gitProvider)
+  const forgeHost =
+    gitProviderInfo?.host ??
+    (gitProvider === 'gitlab' ? 'gitlab.com' : 'github.com')
+  const forgeRepoUrl = (owner: string, repo: string) =>
+    hostedRepoWebUrl(forgeHost, owner, repo)
   const isPi = selectedBackend === 'pi'
   const isGrok = selectedBackend === 'grok'
   const isKimi = selectedBackend === 'kimi'
   const isAntigravity = selectedBackend === 'antigravity'
+  const isMuse = selectedBackend === 'muse'
   const usesEffortControl =
     modelReasoning?.type === 'effort' ||
     (modelReasoning === undefined &&
@@ -222,30 +246,36 @@ export function DesktopToolbarControls({
         isPi ||
         isGrok ||
         isKimi ||
-        isAntigravity))
+        isAntigravity ||
+        isMuse))
   const effortLevelOptions =
     modelReasoning?.type === 'effort'
       ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
       : isAntigravity
         ? ANTIGRAVITY_EFFORT_LEVEL_OPTIONS
-        : isPi
-          ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
-          : isCodex
-            ? withAdaptiveEffortOption(
-                CODEX_EFFORT_LEVEL_OPTIONS,
-                selectedModel
-              )
-            : isKimi
+        : isMuse
+          ? MUSE_EFFORT_LEVEL_OPTIONS
+          : isPi
+            ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
+            : isCodex
               ? withAdaptiveEffortOption(
-                  KIMI_EFFORT_LEVEL_OPTIONS,
+                  CODEX_EFFORT_LEVEL_OPTIONS,
                   selectedModel
                 )
-              : isGrok
+              : isKimi
                 ? withAdaptiveEffortOption(
-                    GROK_EFFORT_LEVEL_OPTIONS,
+                    KIMI_EFFORT_LEVEL_OPTIONS,
                     selectedModel
                   )
-                : withAdaptiveEffortOption(EFFORT_LEVEL_OPTIONS, selectedModel)
+                : isGrok
+                  ? withAdaptiveEffortOption(
+                      GROK_EFFORT_LEVEL_OPTIONS,
+                      selectedModel
+                    )
+                  : withAdaptiveEffortOption(
+                      EFFORT_LEVEL_OPTIONS,
+                      selectedModel
+                    )
   const thinkingLevelOptions =
     modelReasoning?.type === 'thinking'
       ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
@@ -265,7 +295,9 @@ export function DesktopToolbarControls({
             : selectedEffortLevel
         : isGrok && selectedEffortLevel === 'ultracode'
           ? 'max'
-          : selectedEffortLevel
+          : isMuse && !effortOptionValues.has(selectedEffortLevel)
+            ? 'high' // Jean omits efforts Muse rejects, so Muse uses its default
+            : selectedEffortLevel
   const displayedEffortLabel =
     effortLevelOptions.find(o => o.value === displayedEffortLevel)?.label ??
     displayedEffortLevel
@@ -291,6 +323,7 @@ export function DesktopToolbarControls({
 
   const loadedIssueCount = loadedIssueContexts.length
   const loadedPRCount = loadedPRContexts.length
+  const loadedDiscussionCount = loadedDiscussionContexts.length
   const loadedSecurityCount =
     loadedSecurityContexts.length + loadedAdvisoryContexts.length
   const loadedLinearCount = loadedLinearContexts.length
@@ -345,6 +378,7 @@ export function DesktopToolbarControls({
 
       {(loadedIssueCount > 0 ||
         loadedPRCount > 0 ||
+        loadedDiscussionCount > 0 ||
         loadedSecurityCount > 0 ||
         loadedLinearCount > 0 ||
         loadedSentryCount > 0 ||
@@ -363,6 +397,7 @@ export function DesktopToolbarControls({
                   {[
                     loadedIssueCount > 0 && `${loadedIssueCount}`,
                     loadedPRCount > 0 && `${loadedPRCount}`,
+                    loadedDiscussionCount > 0 && `${loadedDiscussionCount}`,
                     loadedSecurityCount > 0 && `${loadedSecurityCount}`,
                     loadedLinearCount > 0 && `${loadedLinearCount}`,
                     loadedSentryCount > 0 && `${loadedSentryCount}`,
@@ -395,7 +430,11 @@ export function DesktopToolbarControls({
                         onClick={e => {
                           e.stopPropagation()
                           openExternal(
-                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/issues/${ctx.number}`
+                            issueWebUrl(
+                              forgeRepoUrl(ctx.repoOwner, ctx.repoName),
+                              ctx.number,
+                              gitProvider
+                            )
                           )
                         }}
                       >
@@ -410,7 +449,7 @@ export function DesktopToolbarControls({
                 <>
                   {loadedIssueContexts.length > 0 && <DropdownMenuSeparator />}
                   <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Pull Requests
+                    {forgeLabels.pullRequest}s
                   </DropdownMenuLabel>
                   {loadedPRContexts.map(ctx => (
                     <DropdownMenuItem
@@ -428,7 +467,44 @@ export function DesktopToolbarControls({
                         onClick={e => {
                           e.stopPropagation()
                           openExternal(
-                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/pull/${ctx.number}`
+                            pullRequestWebUrl(
+                              forgeRepoUrl(ctx.repoOwner, ctx.repoName),
+                              ctx.number,
+                              gitProvider
+                            )
+                          )
+                        }}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                      </button>
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              )}
+              {loadedDiscussionContexts.length > 0 && (
+                <>
+                  {(loadedIssueContexts.length > 0 ||
+                    loadedPRContexts.length > 0) && <DropdownMenuSeparator />}
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    Discussions
+                  </DropdownMenuLabel>
+                  {loadedDiscussionContexts.map(ctx => (
+                    <DropdownMenuItem
+                      key={ctx.number}
+                      onClick={() => handleViewDiscussion(ctx)}
+                    >
+                      <MessagesSquare className="h-4 w-4 text-success" />
+                      <span className="truncate">
+                        #{ctx.number} {ctx.title}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Open external link"
+                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
+                        onClick={e => {
+                          e.stopPropagation()
+                          openExternal(
+                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/discussions/${ctx.number}`
                           )
                         }}
                       >
@@ -442,7 +518,10 @@ export function DesktopToolbarControls({
               {loadedSecurityContexts.length > 0 && (
                 <>
                   {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0) && <DropdownMenuSeparator />}
+                    loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0) && (
+                    <DropdownMenuSeparator />
+                  )}
                   <DropdownMenuLabel className="text-xs text-muted-foreground">
                     Security Alerts
                   </DropdownMenuLabel>
@@ -477,6 +556,7 @@ export function DesktopToolbarControls({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0) && (
                     <DropdownMenuSeparator />
                   )}
@@ -514,6 +594,7 @@ export function DesktopToolbarControls({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0) && (
                     <DropdownMenuSeparator />
@@ -552,6 +633,7 @@ export function DesktopToolbarControls({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
                     loadedLinearContexts.length > 0) && (
@@ -591,6 +673,7 @@ export function DesktopToolbarControls({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
                     loadedLinearContexts.length > 0 ||
@@ -761,108 +844,51 @@ export function DesktopToolbarControls({
 
       <div className="hidden @xl:block h-4 w-px bg-border/50" />
 
-      <DesktopBackendModelPicker
-        disabled={false}
-        sessionHasMessages={sessionHasMessages}
-        providerLocked={providerLocked}
-        triggerClassName="rounded-none border-0 bg-transparent px-3"
-        selectedBackend={selectedBackend}
-        selectedModel={selectedModel}
-        selectedProvider={selectedProvider}
-        installedBackends={installedBackends}
-        customCliProfiles={customCliProfiles}
-        onModelChange={handleModelChange}
-        onBackendModelChange={handleBackendModelChange}
-      />
+      {!hideModelPicker && (
+        <DesktopBackendModelPicker
+          disabled={false}
+          sessionHasMessages={sessionHasMessages}
+          providerLocked={providerLocked}
+          triggerClassName="rounded-none border-0 bg-transparent px-3"
+          selectedBackend={selectedBackend}
+          selectedModel={selectedModel}
+          selectedProvider={selectedProvider}
+          installedBackends={installedBackends}
+          customCliProfiles={customCliProfiles}
+          onModelChange={handleModelChange}
+          onBackendModelChange={handleBackendModelChange}
+        />
+      )}
 
       {!hideReasoningControl && (
         <div className="hidden @xl:block h-4 w-px bg-border/50" />
       )}
 
       {hideReasoningControl ? null : usesEffortControl ? (
-        <DropdownMenu
+        <ReasoningLevelDropdown
           open={thinkingDropdownOpen}
           onOpenChange={setThinkingDropdownOpen}
-        >
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="hidden @xl:flex h-8 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-                >
-                  <Brain className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
-                  <span>{displayedEffortLabel}</span>
-                </button>
-              </DropdownMenuTrigger>
-            </TooltipTrigger>
-            <TooltipContent>
-              {`Effort: ${displayedEffortLabel} (⌘⇧E)`}
-            </TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="start" onCloseAutoFocus={focusChatInput}>
-            <DropdownMenuRadioGroup
-              value={displayedEffortLevel}
-              onValueChange={handleEffortLevelChange}
-            >
-              {effortLevelOptions.map((option, i) => (
-                <DropdownMenuRadioItem key={option.value} value={option.value}>
-                  <Brain className="mr-2 h-4 w-4" />
-                  {option.label}
-                  <span className="ml-auto pl-4 text-xs text-muted-foreground">
-                    {option.description}
-                  </span>
-                  <Kbd className="ml-2 text-[10px]">{i + 1}</Kbd>
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+          value={displayedEffortLevel}
+          options={effortLevelOptions}
+          onValueChange={handleEffortLevelChange}
+          tooltip={`Effort: ${displayedEffortLabel} (⌘⇧E)`}
+          showShortcuts
+          triggerClassName="hidden @xl:flex"
+          onCloseAutoFocus={focusChatInput}
+        />
       ) : (
-        <DropdownMenu
+        <ReasoningLevelDropdown
           open={thinkingDropdownOpen}
           onOpenChange={setThinkingDropdownOpen}
-        >
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="hidden @xl:flex h-8 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-                >
-                  <Brain
-                    className={cn(
-                      'h-3.5 w-3.5',
-                      displayedThinkingLevel !== 'off' &&
-                        'text-purple-600 dark:text-purple-400'
-                    )}
-                  />
-                  <span>{displayedThinkingLabel}</span>
-                </button>
-              </DropdownMenuTrigger>
-            </TooltipTrigger>
-            <TooltipContent>
-              {`Thinking: ${displayedThinkingLabel} (⌘⇧E)`}
-            </TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="start" onCloseAutoFocus={focusChatInput}>
-            <DropdownMenuRadioGroup
-              value={displayedThinkingLevel}
-              onValueChange={handleThinkingLevelChange}
-            >
-              {thinkingLevelOptions.map((option, i) => (
-                <DropdownMenuRadioItem key={option.value} value={option.value}>
-                  <Brain className="mr-2 h-4 w-4" />
-                  {option.label}
-                  <span className="ml-auto pl-4 text-xs text-muted-foreground">
-                    {'tokens' in option ? option.tokens : option.description}
-                  </span>
-                  <Kbd className="ml-2 text-[10px]">{i + 1}</Kbd>
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+          value={displayedThinkingLevel}
+          options={thinkingLevelOptions}
+          onValueChange={handleThinkingLevelChange}
+          active={displayedThinkingLevel !== 'off'}
+          tooltip={`Thinking: ${displayedThinkingLabel} (⌘⇧E)`}
+          showShortcuts
+          triggerClassName="hidden @xl:flex"
+          onCloseAutoFocus={focusChatInput}
+        />
       )}
 
       <div className="hidden @xl:block h-4 w-px bg-border/50" />

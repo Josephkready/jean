@@ -170,6 +170,7 @@ export async function processAttachmentFile(
         relativePath: result.path,
         extension: getExtension(result.filename),
         isDirectory: false,
+        attached: true,
       })
     } catch (error) {
       console.error('Failed to save file:', error)

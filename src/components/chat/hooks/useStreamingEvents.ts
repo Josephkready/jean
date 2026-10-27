@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import type { QueryClient } from '@tanstack/react-query'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
-import { chatQueryKeys } from '@/services/chat'
+import { chatQueryKeys, hasLocalSendInFlight } from '@/services/chat'
 import { isTauri, saveWorktreePr, projectsQueryKeys } from '@/services/projects'
 import type { Project, Worktree } from '@/types/projects'
 import { preferencesQueryKeys } from '@/services/preferences'
@@ -325,9 +325,10 @@ export default function useStreamingEvents({
         preferencesQueryKeys.preferences()
       )
       if (prefs?.desktop_notifications_enabled === false) return
-      const name = queryClient.getQueryData<Session>(
-        chatQueryKeys.session(sessionId)
-      )?.name
+      const name =
+        queryClient
+          .getQueryData<Session>(chatQueryKeys.session(sessionId))
+          ?.name?.trim() || `Session ${sessionId.slice(0, 8)}`
       if (kind === 'waiting') {
         notifySessionNeedsAttention(sessionId, title, name)
       } else {
@@ -842,7 +843,7 @@ export default function useStreamingEvents({
           setDeniedMessageContext(session_id, {
             message: originalMessage,
             model: selectedModels[session_id],
-            executionMode: executionModes[session_id] ?? 'plan',
+            executionMode: executionModes[session_id] ?? 'build',
             thinkingLevel: thinkingLevels[session_id] ?? 'off',
           })
         }
@@ -997,6 +998,26 @@ export default function useStreamingEvents({
           })
         }
       )
+
+    const unlistenDevinPermissionResolved = listen<{
+      session_id: string
+      worktree_id: string
+      rpc_id: number
+    }>('chat:devin_permission_resolved', event => {
+      const { session_id, worktree_id, rpc_id } = event.payload
+      const store = useChatStore.getState()
+      const current = store.getPendingCodexCommandApprovalRequests(session_id)
+      const next = current.filter(request => request.rpc_id !== rpc_id)
+      // A late response from a cancelled turn must not clear a newer request.
+      if (next.length === current.length) return
+      store.setPendingCodexCommandApprovalRequests(session_id, next)
+      const waiting = next.length > 0
+      store.setWaitingForInput(session_id, waiting)
+      persistCodexPendingState(session_id, worktree_id, {
+        pendingCodexCommandApprovalRequests: next,
+        waitingForInput: waiting,
+      })
+    })
 
     const unlistenCodexUserInputRequest = listen<CodexUserInputRequestEvent>(
       'chat:codex_user_input_request',
@@ -1200,14 +1221,20 @@ export default function useStreamingEvents({
       const sessionBackend = queryClient.getQueryData<Session>(
         chatQueryKeys.session(sessionId)
       )?.backend
+      // Without a local send, nothing replaces the optimistic message with
+      // the persisted one, and live blocks can miss text parts (reconnects,
+      // agent wakes). Load the persisted message instead.
       const needsBackendHydration = shouldHydrateCompletedSessionFromBackend(
         content ?? '',
         contentBlocks ?? [],
         toolCalls ?? [],
-        { backend: sessionBackend }
+        {
+          backend: sessionBackend,
+          force: !hasLocalSendInFlight(queryClient, sessionId),
+        }
       )
 
-      if (needsBackendHydration) {
+      if (needsBackendHydration && !hasMeaningfulPayload) {
         console.warn(
           `[chat:done] No streaming content for session=${sessionId}. ` +
             `Skipping empty optimistic assistant; hydrating from backend.`
@@ -2552,6 +2579,7 @@ export default function useStreamingEvents({
       unlistenOpencodePermissionRequest.then(f => f())
       unlistenOpencodePermissionReplied.then(f => f())
       unlistenCodexCommandApprovalRequest.then(f => f())
+      unlistenDevinPermissionResolved.then(f => f())
       unlistenCodexUserInputRequest.then(f => f())
       unlistenCodexMcpElicitation.then(f => f())
       unlistenCodexDynamicToolCall.then(f => f())

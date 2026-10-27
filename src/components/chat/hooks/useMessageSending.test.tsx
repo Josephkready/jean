@@ -10,6 +10,7 @@ import {
   steerGrokTurn,
   steerOpencodeTurn,
   steerPiTurn,
+  steerClaudeTurn,
 } from '@/services/chat'
 import type { ExecutionMode, Session } from '@/types/chat'
 import type * as ChatService from '@/services/chat'
@@ -28,6 +29,7 @@ const { mockInvoke, mockInstalledBackends, mockBackendAuthStatuses } =
         'grok',
         'kimi',
         'antigravity',
+        'muse',
       ] as string[],
       isLoading: false,
     },
@@ -42,7 +44,9 @@ const { mockInvoke, mockInstalledBackends, mockBackendAuthStatuses } =
         grok: true,
         kimi: true,
         antigravity: true,
+        muse: true,
       } as Record<string, boolean | undefined>,
+      refetchAuth: vi.fn(),
       isLoading: false,
     },
   }))
@@ -82,6 +86,7 @@ vi.mock('@/services/chat', async importOriginal => {
     steerGrokTurn: vi.fn(),
     steerOpencodeTurn: vi.fn(),
     steerPiTurn: vi.fn(),
+    steerClaudeTurn: vi.fn(),
   }
 })
 
@@ -91,6 +96,7 @@ function renderUseMessageSending({
   opencodeAutoSteer,
   piAutoSteer,
   grokAutoSteer,
+  claudeAutoSteer,
   inputValue = '/goal Ship the feature',
   selectedBackend = 'codex',
   selectedModel = 'gpt-5.5',
@@ -115,6 +121,7 @@ function renderUseMessageSending({
   opencodeAutoSteer?: boolean
   piAutoSteer?: boolean
   grokAutoSteer?: boolean
+  claudeAutoSteer?: boolean
   inputValue?: string
   selectedBackend?:
     | 'claude'
@@ -124,8 +131,16 @@ function renderUseMessageSending({
     | 'pi'
     | 'grok'
     | 'antigravity'
+    | 'muse'
   selectedModel?: string
-  selectedEffortLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  selectedEffortLevel?:
+    | 'off'
+    | 'minimal'
+    | 'low'
+    | 'medium'
+    | 'high'
+    | 'xhigh'
+    | 'ultra'
   sessionsData?: { sessions: { id: string }[] }
   createSession?: {
     mutateAsync: (args: {
@@ -166,6 +181,7 @@ function renderUseMessageSending({
         opencode_auto_steer_enabled: opencodeAutoSteer,
         pi_auto_steer_enabled: piAutoSteer,
         grok_auto_steer_enabled: grokAutoSteer,
+        claude_auto_steer_enabled: claudeAutoSteer,
       },
       sendMessage,
       createSession,
@@ -201,6 +217,7 @@ function resetInstalledBackendsMock() {
     'grok',
     'kimi',
     'antigravity',
+    'muse',
   ]
   mockInstalledBackends.isLoading = false
   mockBackendAuthStatuses.authByBackend = {
@@ -213,7 +230,13 @@ function resetInstalledBackendsMock() {
     grok: true,
     kimi: true,
     antigravity: true,
+    muse: true,
   }
+  mockBackendAuthStatuses.refetchAuth
+    .mockReset()
+    .mockImplementation(
+      async (backend: string) => mockBackendAuthStatuses.authByBackend[backend]
+    )
   mockBackendAuthStatuses.isLoading = false
 }
 
@@ -282,6 +305,103 @@ describe('useMessageSending Codex /goal', () => {
       expect.objectContaining({
         sessionId: 'session-1',
         message: 'keep this message',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('enters Plan mode and starts a planning turn from /plan', async () => {
+    useChatStore.setState({
+      executionModes: { 'session-1': 'yolo' },
+      permissionModes: { 'session-1': 'yolo' },
+    })
+    const { result, sendMessage, executionModeRef } = renderUseMessageSending({
+      inputValue: '/plan Tighten auth checks',
+      selectedBackend: 'claude',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(useChatStore.getState().executionModes['session-1']).toBe('plan')
+    expect(useChatStore.getState().permissionModes['session-1']).toBe('yolo')
+    expect(executionModeRef.current).toBe('plan')
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Tighten auth checks',
+        executionMode: 'plan',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('starts a default planning turn when /plan has no task', async () => {
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: '/plan',
+      selectedBackend: 'claude',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringMatching(/propose a plan/i),
+        executionMode: 'plan',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('leaves Plan without a turn when /build has no task', async () => {
+    useChatStore.setState({
+      executionModes: { 'session-1': 'plan' },
+      permissionModes: { 'session-1': 'yolo' },
+    })
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: '/build',
+      selectedBackend: 'claude',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(useChatStore.getState().executionModes['session-1']).toBe('yolo')
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+
+  it('leaves Plan and implements when /build includes a task', async () => {
+    useChatStore.setState({
+      executionModes: { 'session-1': 'plan' },
+      permissionModes: { 'session-1': 'supervised' },
+    })
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: '/build Apply the approved steps',
+      selectedBackend: 'claude',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(useChatStore.getState().executionModes['session-1']).toBe(
+      'supervised'
+    )
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Apply the approved steps',
+        executionMode: 'supervised',
       }),
       expect.any(Object)
     )
@@ -364,6 +484,29 @@ describe('useMessageSending Codex /goal', () => {
       'codex'
     )
     expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+
+  it('sends when cached auth is stale but a fresh probe is authenticated', async () => {
+    mockInstalledBackends.installedBackends = ['claude', 'codex']
+    mockBackendAuthStatuses.authByBackend = {
+      ...mockBackendAuthStatuses.authByBackend,
+      claude: false,
+    }
+    mockBackendAuthStatuses.refetchAuth.mockResolvedValueOnce(true)
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: 'hello',
+      selectedBackend: 'claude',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(mockBackendAuthStatuses.refetchAuth).toHaveBeenCalledWith('claude')
+    expect(handleCliAuthError).not.toHaveBeenCalled()
+    expect(sendMessage.mutate).toHaveBeenCalled()
   })
 
   it('starts goals in build mode by default', async () => {
@@ -758,6 +901,88 @@ describe('useMessageSending Antigravity effort', () => {
     expect(steerPiTurn).not.toHaveBeenCalled()
     expect(persistEnqueue).toHaveBeenCalled()
     expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+})
+
+describe('useMessageSending Muse', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
+    useChatStore.setState({
+      inputDrafts: {},
+      pendingImages: {},
+      pendingFiles: {},
+      pendingTextFiles: {},
+      pendingSkills: {},
+      sendingSessionIds: {},
+      executionModes: {},
+      permissionModes: {},
+      selectedModels: {},
+      executingModes: {},
+      errors: {},
+      lastSentMessages: {},
+      reviewingSessions: {},
+      waitingForInputSessionIds: {},
+      messageQueues: {},
+      approvedTools: {},
+      streamingContents: {},
+      activeToolCalls: {},
+      streamingContentBlocks: {},
+      streamingThinkingContent: {},
+    })
+  })
+
+  it('sends with the muse backend, model, and Muse-only effort level', async () => {
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'muse',
+      selectedModel: 'muse/muse-spark-1.2',
+      selectedEffortLevel: 'ultra',
+      inputValue: 'inspect muse effort',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        backend: 'muse',
+        model: 'muse/muse-spark-1.2',
+        effortLevel: 'ultra',
+        thinkingLevel: 'off',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('queues muse prompts while a turn is running (no steer API)', async () => {
+    useChatStore.setState({ sendingSessionIds: { 'session-1': true } })
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'muse',
+      selectedModel: 'muse/default',
+      inputValue: 'also inspect muse',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerCodexTurn).not.toHaveBeenCalled()
+    expect(steerGrokTurn).not.toHaveBeenCalled()
+    expect(steerOpencodeTurn).not.toHaveBeenCalled()
+    expect(steerPiTurn).not.toHaveBeenCalled()
+    expect(steerClaudeTurn).not.toHaveBeenCalled()
+    expect(persistEnqueue).toHaveBeenCalled()
+    const queued = useChatStore.getState().messageQueues['session-1']
+    expect(queued?.map(m => [m.backend, m.model, m.message])).toEqual([
+      ['muse', 'muse/default', 'also inspect muse'],
+    ])
     expect(sendMessage.mutate).not.toHaveBeenCalled()
   })
 })
@@ -1184,6 +1409,97 @@ describe('useMessageSending Codex auto-steer', () => {
     })
 
     expect(steerOpencodeTurn).not.toHaveBeenCalled()
+    expect(persistEnqueue).toHaveBeenCalled()
+    expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
+  })
+
+  it('steers the running claude turn when claude steering is enabled', async () => {
+    vi.mocked(steerClaudeTurn).mockResolvedValue(undefined)
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      claudeAutoSteer: true,
+      inputValue: 'also run echo STEERED',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerClaudeTurn).toHaveBeenCalledWith(
+      'worktree-1',
+      'session-1',
+      'also run echo STEERED'
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+
+  it('queues claude prompts when claude steering is disabled, even with forceSteer', async () => {
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      claudeAutoSteer: false,
+      inputValue: 'wait for it',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit(
+        { preventDefault: vi.fn() } as unknown as React.FormEvent,
+        { forceSteer: true }
+      )
+    })
+
+    expect(steerClaudeTurn).not.toHaveBeenCalled()
+    expect(persistEnqueue).toHaveBeenCalled()
+    expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
+  })
+
+  it('steers claude prompts with attachments as path refs', async () => {
+    vi.mocked(steerClaudeTurn).mockResolvedValue(undefined)
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      claudeAutoSteer: true,
+      inputValue: 'look at this',
+    })
+    useChatStore.setState({
+      pendingImages: {
+        'session-1': [
+          { id: 'img-1', path: '/tmp/img.png', filename: 'img.png' },
+        ],
+      },
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerClaudeTurn).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(steerClaudeTurn).mock.calls[0]?.[2]).toContain(
+      '/tmp/img.png'
+    )
+    expect(persistEnqueue).not.toHaveBeenCalled()
+  })
+
+  it('falls back to queueing when claude steering fails', async () => {
+    vi.mocked(steerClaudeTurn).mockRejectedValue(
+      new Error('Claude run is not steerable')
+    )
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      claudeAutoSteer: true,
+      inputValue: 'also check the tests',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(steerClaudeTurn).toHaveBeenCalled()
     expect(persistEnqueue).toHaveBeenCalled()
     expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
   })

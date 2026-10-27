@@ -1050,6 +1050,7 @@ async fn start_issue_auto_fix(
         app.clone(),
         project.path.clone(),
         issue_number,
+        None,
     )
     .await?;
     // The issue may have closed between the scan and this fetch.
@@ -1063,6 +1064,7 @@ async fn start_issue_auto_fix(
         title: issue.title,
         body: issue.body,
         comments,
+        repo: None,
     };
 
     let ready_worktree = create_auto_fix_worktree(app, project.id.clone(), issue_context).await?;
@@ -1190,6 +1192,7 @@ async fn create_auto_fix_worktree(
         project_id,
         None,
         Some(issue_context),
+        None,
         None,
         None,
         None,
@@ -1394,6 +1397,7 @@ fn project_from_pending_auto_yolo(entry: &PendingAutoYolo) -> Project {
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -1653,6 +1657,7 @@ fn default_model_for_backend(backend: &str) -> String {
         "commandcode" => "commandcode/default".to_string(),
         "grok" => "grok/grok-4.6".to_string(),
         "antigravity" => "antigravity/auto".to_string(),
+        "muse" => "muse/default".to_string(),
         _ => "claude-opus-5-5".to_string(),
     }
 }
@@ -1709,6 +1714,7 @@ mod tests {
             sentry_auth_token: None,
             sentry_organization_slug: None,
             sentry_project_slug: None,
+            sentry_projects: Vec::new(),
             sentry_base_url: None,
             linked_project_ids: Vec::new(),
             auto_fix_settings,
@@ -2017,6 +2023,10 @@ mod tests {
         assert_eq!(
             default_model_for_backend("antigravity"),
             "antigravity/auto".to_string()
+        );
+        assert_eq!(
+            default_model_for_backend("muse"),
+            "muse/default".to_string()
         );
         assert_eq!(
             default_model_for_backend("cursor"),

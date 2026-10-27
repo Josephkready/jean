@@ -18,6 +18,11 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ChatSearchBar } from './ChatSearchBar'
 import { Button } from '@/components/ui/button'
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
   AlertDialog,
   AlertDialogContent,
   AlertDialogHeader,
@@ -33,10 +38,13 @@ import { generateId } from '@/lib/uuid'
 import {
   ArrowDown,
   ArrowUp,
+  ClipboardList,
   GitBranch,
   GitMerge,
   Layers,
   Loader2,
+  Plus,
+  Square,
 } from '@/components/icons/reicon'
 import {
   useSession,
@@ -67,6 +75,7 @@ import type { Worktree } from '@/types/projects'
 import type {
   AttachedSavedContext,
   LoadedAdvisoryContext,
+  LoadedDiscussionContext,
   LoadedIssueContext,
   LoadedPullRequestContext,
   LoadedSecurityAlertContext,
@@ -78,6 +87,7 @@ import {
   useLoadedPRContexts,
   useLoadedSecurityContexts,
   useLoadedAdvisoryContexts,
+  useLoadedDiscussionContexts,
   useAttachedSavedContexts,
 } from '@/services/github'
 import { useLoadedLinearIssueContexts } from '@/services/linear'
@@ -143,7 +153,11 @@ import {
 import { isFirstWorktreeSession } from './setup-script-visibility'
 import { TodoWidget } from './TodoWidget'
 import { AgentWidget } from './AgentWidget'
-import { normalizeTodosForDisplay } from './tool-call-utils'
+import {
+  assistantTextParts,
+  normalizeTodosForDisplay,
+  restoreOmittedStreamingPrefix,
+} from './tool-call-utils'
 import { ImagePreview } from './ImagePreview'
 import { TextFilePreview } from './TextFilePreview'
 import { SkillBadge } from './SkillBadge'
@@ -192,11 +206,14 @@ import { RecentContexts } from './RecentContexts'
 import {
   buildPromptAttachmentMetadata,
   encodePromptAttachmentMetadata,
+  isAgentUpdateTurn,
+  splitAgentUpdateTurns,
   stripAllMarkers,
 } from './message-content-utils'
 import { useUIStore } from '@/store/ui-store'
 import { buildMcpConfigJson } from '@/services/mcp'
 import { CHECK_GITHUB_ISSUES_PROMPT } from '@/lib/github-discovery-prompt'
+import { routeCurrentSessionMagicPrompt } from '@/lib/magic-prompt-pty'
 import { buildCommentAndCloseIssuePrompt } from '@/lib/github-issue-close-prompt'
 import { buildCommitInSessionPrompt } from '@/lib/commit-in-session-prompt'
 import type { McpServerInfo } from '@/types/chat'
@@ -207,7 +224,9 @@ import {
   supportsAdaptiveThinking,
 } from '@/lib/model-utils'
 import { copyToClipboard, copyHtmlToClipboard } from '@/lib/clipboard'
-import { useClaudeCliStatus } from '@/services/claude-cli'
+import { useClaudeCliStatus, useClaudeUsage } from '@/services/claude-cli'
+import { useCodexUsage } from '@/services/codex-cli'
+import { getLimitResetAtMs, isUsageLimitError } from '@/lib/usage-limit'
 import {
   getCatalogModelReasoning,
   useModelCatalog,
@@ -265,6 +284,7 @@ import { useChatWindowEvents } from './hooks/useChatWindowEvents'
 import { useInvestigateHandlers } from './hooks/useInvestigateHandlers'
 import { useMcpServerResolution } from './hooks/useMcpServerResolution'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
+import { ReplyBubbles } from './ReplyBubble'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useToolbarHandlers } from './hooks/useToolbarHandlers'
 import { useMessageSending } from './hooks/useMessageSending'
@@ -283,6 +303,7 @@ import { navigateToForkedSession } from './fork-session-navigation'
 // Using these constants ensures referential equality for empty states
 const EMPTY_TOOL_CALLS: ToolCall[] = []
 const EMPTY_CONTENT_BLOCKS: ContentBlock[] = []
+const EMPTY_TEXT_PARTS: string[] = []
 const EMPTY_PENDING_IMAGES: PendingImage[] = []
 const EMPTY_PENDING_TEXT_FILES: PendingTextFile[] = []
 const EMPTY_PENDING_FILES: PendingFile[] = []
@@ -301,6 +322,7 @@ const EMPTY_ISSUE_CONTEXTS: LoadedIssueContext[] = []
 const EMPTY_PR_CONTEXTS: LoadedPullRequestContext[] = []
 const EMPTY_SECURITY_CONTEXTS: LoadedSecurityAlertContext[] = []
 const EMPTY_ADVISORY_CONTEXTS: LoadedAdvisoryContext[] = []
+const EMPTY_DISCUSSION_CONTEXTS: LoadedDiscussionContext[] = []
 const EMPTY_LINEAR_CONTEXTS: LoadedLinearIssueContext[] = []
 const EMPTY_SENTRY_CONTEXTS: SentryIssueContext[] = []
 const EMPTY_SAVED_CONTEXTS: AttachedSavedContext[] = []
@@ -320,6 +342,11 @@ function useStableMutation<T extends { mutate: unknown; mutateAsync: unknown }>(
   return useMemo(() => ({ mutate, mutateAsync }), [mutate, mutateAsync])
 }
 
+/** Tool calls that wait for the user and must stay visible in a quiet chat. */
+function needsUserInput(toolCall: ToolCall): boolean {
+  return isAskUserQuestion(toolCall) || isPlanToolCall(toolCall)
+}
+
 interface ChatWindowProps {
   /** When true, hides terminal panel and other elements not needed in modal */
   isModal?: boolean
@@ -327,6 +354,12 @@ interface ChatWindowProps {
   worktreeId?: string
   /** Override worktree path (used in modal mode to avoid setting global state) */
   worktreePath?: string
+  /**
+   * Quiet chat (agents): history shows only prose (no tool calls), and while
+   * a turn runs only this label and the timer instead of tool activity.
+   * Questions and plans still render because they need the user.
+   */
+  workingLabel?: string
 }
 
 // PERFORMANCE: memoized - props are primitives, so parents re-rendering
@@ -351,6 +384,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
   isModal = false,
   worktreeId: propWorktreeId,
   worktreePath: propWorktreePath,
+  workingLabel,
 }: ChatWindowProps = {}) {
   const isMobile = useIsMobile()
   const zenMode = useUIStore(state => state.zenMode)
@@ -468,6 +502,8 @@ const ChatWindowContent = memo(function ChatWindowContent({
     setExecutionMode,
     setError,
     dismissSetupScript,
+    armAutoResume,
+    disarmAutoResume,
   } = useChatStore.getState()
 
   const queryClient = useQueryClient()
@@ -560,6 +596,25 @@ const ChatWindowContent = memo(function ChatWindowContent({
     ) {
       store.completeSession(deferredSessionId)
     }
+  }, [deferredSessionId, session, isSessionSwitching])
+
+  // After a web reload, sessions outside the bootstrap snapshot (e.g. agent
+  // sessions) are marked sending without a start time, so the timer shows 0s.
+  // Seed it from the persisted run start.
+  useEffect(() => {
+    if (!deferredSessionId || !session || isSessionSwitching) return
+    if (session.last_run_status !== 'running' || !session.last_run_started_at)
+      return
+    const store = useChatStore.getState()
+    if (
+      !store.sendingSessionIds[deferredSessionId] ||
+      store.sendStartedAt[deferredSessionId] != null
+    )
+      return
+    store.addSendingSession(
+      deferredSessionId,
+      session.last_run_started_at * 1000
+    )
   }, [deferredSessionId, session, isSessionSwitching])
 
   const hasReviewResults = useChatStore(state =>
@@ -777,6 +832,12 @@ const ChatWindowContent = memo(function ChatWindowContent({
 
   // Loaded PR contexts for indicator and investigate PR functionality
   const { data: loadedPRContexts } = useLoadedPRContexts(
+    activeSessionId ?? null,
+    activeWorktreeId
+  )
+
+  // Loaded discussion contexts for indicator
+  const { data: loadedDiscussionContexts } = useLoadedDiscussionContexts(
     activeSessionId ?? null,
     activeWorktreeId
   )
@@ -1049,6 +1110,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
   // Custom providers don't support Opus 4.6 adaptive thinking — use thinking levels instead
   const useAdaptiveThinkingFlag =
     selectedBackend === 'antigravity' ||
+    selectedBackend === 'muse' ||
     (!isCustomProvider &&
       supportsAdaptiveThinking(
         selectedModel,
@@ -1090,6 +1152,21 @@ const ChatWindowContent = memo(function ChatWindowContent({
     activeSessionId
       ? (state.streamingContentBlocks[activeSessionId] ?? EMPTY_CONTENT_BLOCKS)
       : EMPTY_CONTENT_BLOCKS
+  )
+  // Quiet (agent) chats hide tool activity: show the agent's text while it
+  // works, one bubble per part, so the user sees its progress messages
+  const quietStreamingParts = useMemo(
+    () =>
+      workingLabel
+        ? assistantTextParts(
+            restoreOmittedStreamingPrefix(
+              streamingContent,
+              currentStreamingContentBlocks
+            ),
+            streamingContent
+          )
+        : EMPTY_TEXT_PARTS,
+    [workingLabel, currentStreamingContentBlocks, streamingContent]
   )
   // Per-session input - check if there's any input for submit button state
   // PERFORMANCE: Track hasValue via callback from ChatInput instead of store subscription
@@ -1136,6 +1213,29 @@ const ChatWindowContent = memo(function ChatWindowContent({
   const currentError = useChatStore(state =>
     deferredSessionId ? (state.errors[deferredSessionId] ?? null) : null
   )
+
+  // Auto-continue: offer only for usage/rate-limit errors on backends that
+  // expose a reset time (Claude, Codex). Reset time comes from the usage cache.
+  const isLimitError = isUsageLimitError(currentError)
+  const supportsAutoResume =
+    isLimitError &&
+    (resolvedBackend === 'claude' || resolvedBackend === 'codex')
+  const { data: claudeUsage } = useClaudeUsage({
+    enabled: supportsAutoResume && resolvedBackend === 'claude',
+  })
+  const { data: codexUsage } = useCodexUsage({
+    enabled: supportsAutoResume && resolvedBackend === 'codex',
+  })
+  const limitResetAtMs = supportsAutoResume
+    ? getLimitResetAtMs(resolvedBackend === 'claude' ? claudeUsage : codexUsage)
+    : null
+  // Without a known reset time, arming would resend straight into the limit.
+  const canAutoResume =
+    supportsAutoResume && limitResetAtMs != null && deferredSessionId != null
+  const autoResumeAtMs = useChatStore(state =>
+    deferredSessionId ? (state.autoResume[deferredSessionId] ?? null) : null
+  )
+
   // Per-worktree setup script result (stays at worktree level)
   const setupScriptResult = useChatStore(state =>
     activeWorktreeId ? state.setupScriptResults[activeWorktreeId] : undefined
@@ -1492,14 +1592,14 @@ const ChatWindowContent = memo(function ChatWindowContent({
     dismissedTodoMessageId,
     setDismissedTodoMessageId,
     activeAgents,
-    agentSourceMessageId,
-    dismissedAgentMessageId,
-    setDismissedAgentMessageId,
+    isAgentWidgetDismissed,
+    dismissAgentWidget,
   } = useActiveTodosAndAgents({
     activeSessionId,
     isSending,
     currentToolCalls,
     lastAssistantMessage,
+    messages: session?.messages,
   })
 
   // Plan state: finished pending plan awaiting approval
@@ -1568,7 +1668,8 @@ const ChatWindowContent = memo(function ChatWindowContent({
         backend === 'pi' ||
         backend === 'grok' ||
         backend === 'kimi' ||
-        backend === 'antigravity'
+        backend === 'antigravity' ||
+        backend === 'muse'
       const effortLevel = usesEffortBackend
         ? ((preferences?.magic_prompt_efforts?.code_review_effort as
             | EffortLevel
@@ -1720,6 +1821,14 @@ const ChatWindowContent = memo(function ChatWindowContent({
   )
 
   const handleCheckGitHubIssues = useCallback(() => {
+    if (
+      routeCurrentSessionMagicPrompt(
+        activeSessionId,
+        CHECK_GITHUB_ISSUES_PROMPT
+      ) !== 'chat'
+    ) {
+      return
+    }
     sendMessageNow({
       id: generateId(),
       message: CHECK_GITHUB_ISSUES_PROMPT,
@@ -1738,14 +1847,18 @@ const ChatWindowContent = memo(function ChatWindowContent({
       backend: selectedBackendRef.current,
       queuedAt: Date.now(),
     })
-  }, [getMcpConfig, sendMessageNow])
+  }, [activeSessionId, getMcpConfig, sendMessageNow])
 
   const handlePreReleaseReview = useCallback(() => {
+    const message =
+      preferences?.magic_prompts?.pre_release_review ??
+      DEFAULT_PRE_RELEASE_REVIEW_PROMPT
+    if (routeCurrentSessionMagicPrompt(activeSessionId, message) !== 'chat') {
+      return
+    }
     sendMessageNow({
       id: generateId(),
-      message:
-        preferences?.magic_prompts?.pre_release_review ??
-        DEFAULT_PRE_RELEASE_REVIEW_PROMPT,
+      message,
       pendingImages: [],
       pendingFiles: [],
       pendingSkills: [],
@@ -1762,6 +1875,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
       queuedAt: Date.now(),
     })
   }, [
+    activeSessionId,
     getMcpConfig,
     preferences?.magic_prompts?.pre_release_review,
     sendMessageNow,
@@ -1812,7 +1926,10 @@ const ChatWindowContent = memo(function ChatWindowContent({
 
   // Sends a magic prompt to this session with the selected backend/model/mode
   const sendMagicPrompt = useCallback(
-    (message: string) =>
+    (message: string) => {
+      if (routeCurrentSessionMagicPrompt(activeSessionId, message) !== 'chat') {
+        return
+      }
       sendMessageNow({
         id: generateId(),
         message,
@@ -1830,8 +1947,9 @@ const ChatWindowContent = memo(function ChatWindowContent({
         mcpConfig: getMcpConfig(),
         backend: selectedBackendRef.current,
         queuedAt: Date.now(),
-      }),
-    [getMcpConfig, sendMessageNow]
+      })
+    },
+    [activeSessionId, getMcpConfig, sendMessageNow]
   )
 
   const handleCommitInSession = useCallback(() => {
@@ -2441,13 +2559,18 @@ const ChatWindowContent = memo(function ChatWindowContent({
       streamingToolCalls: currentToolCalls,
     }
   )
+  // Agent replies to automatic updates show in the agent's Updates panel
   const messages = useMemo(
     () =>
-      hideTrailingInFlightMessage
-        ? rawSessionMessages.slice(0, -1)
-        : rawSessionMessages,
+      splitAgentUpdateTurns(
+        hideTrailingInFlightMessage
+          ? rawSessionMessages.slice(0, -1)
+          : rawSessionMessages
+      ).chat,
     [rawSessionMessages, hideTrailingInFlightMessage]
   )
+  const isUpdateTurnStreaming =
+    isSending && isAgentUpdateTurn(rawSessionMessages)
 
   // Pre-calculate last plan message index for approve button logic
   const lastPlanMessageIndex = useMemo(() => {
@@ -2464,17 +2587,22 @@ const ChatWindowContent = memo(function ChatWindowContent({
     return -1
   }, [messages])
 
+  // Simple agent chat uses a single-line pill composer
+  const pillComposer = Boolean(workingLabel)
+  const compactView =
+    (preferences?.compact_chat_view_enabled ?? true) || pillComposer
   const compactHistoryWindow = useMemo(
     () => getCurrentPromptWindow(messages),
     [messages]
   )
   // Keep history expanded for the whole session, so a new prompt or a finished
-  // run does not collapse it again.
+  // run does not collapse it again. Agent chat always shows the full history.
   const [expandedCompactSessionId, setExpandedCompactSessionId] = useState<
     string | null
   >(null)
   const isCompactHistoryExpanded =
-    !!deferredSessionId && expandedCompactSessionId === deferredSessionId
+    Boolean(workingLabel) ||
+    (!!deferredSessionId && expandedCompactSessionId === deferredSessionId)
   const compactExpandAnchorRef = useRef<PrependScrollAnchor | null>(null)
   const compactMessages = useMemo(
     () =>
@@ -2504,7 +2632,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
   }, [isCompactHistoryExpanded, scrollViewportRef])
   const handleShowTableInChat = useShowTableInChat({
     sessionId: deferredSessionId,
-    isCompact: Boolean(preferences?.compact_chat_view_enabled),
+    isCompact: compactView,
     compactStartIndex: compactHistoryWindow.startIndex,
     isCompactHistoryExpanded,
     onExpandCompactHistory: handleShowHiddenCompactPrompts,
@@ -2588,6 +2716,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
             worktreePath={activeWorktreePath}
             sessionId={activeSessionId}
             terminalId={sessionTerminalId}
+            showMagicButton={!isModal && !zenMode && !project?.server}
           />
         ) : isTerminalAwaitingReconnect ? (
           <div className="flex min-h-0 flex-1 items-center justify-center p-6">
@@ -2673,7 +2802,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                         viewportClassName="will-change-scroll"
                         onScroll={handleScroll}
                       >
-                        <div className="mx-auto max-w-7xl px-4 pt-4 pb-[calc(var(--chat-composer-height,0px)+1.5rem)] md:px-6 min-w-0 w-full">
+                        <div className="mx-auto max-w-7xl px-4 pt-[calc(var(--chat-top-inset,0px)+1rem)] pb-[calc(var(--chat-composer-height,0px)+1.5rem)] md:px-6 min-w-0 w-full">
                           <div
                             className="select-text space-y-4 font-mono text-sm min-w-0 break-words overflow-x-hidden"
                             // Suppress browser default menu on empty thread chrome
@@ -2754,9 +2883,11 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       projectId={worktree?.project_id}
                                     />
                                   )}
-                                {preferences?.compact_chat_view_enabled ? (
+                                {compactView ? (
                                   <CompactMessageList
                                     ref={virtualizedListRef}
+                                    hideToolActivity={Boolean(workingLabel)}
+                                    onSendAnswer={sendMagicPrompt}
                                     messages={compactMessages}
                                     scrollContainerRef={scrollViewportRef}
                                     totalMessages={compactMessages.length}
@@ -2839,6 +2970,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 ) : (
                                   <VirtualizedMessageList
                                     ref={virtualizedListRef}
+                                    onSendAnswer={sendMagicPrompt}
                                     messages={messages}
                                     scrollContainerRef={scrollViewportRef}
                                     totalMessages={messages.length}
@@ -2913,7 +3045,9 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 {(currentStreamingContentBlocks.length > 0 ||
                                   currentToolCalls.length > 0 ||
                                   streamingContent.trim().length > 0) &&
-                                  (preferences?.compact_chat_view_enabled ? (
+                                  ((!workingLabel && !isUpdateTurnStreaming) ||
+                                    currentToolCalls.some(needsUserInput)) &&
+                                  (compactView ? (
                                     <CompactStreamingTicker
                                       sessionId={activeSessionId}
                                       contentBlocks={
@@ -2956,7 +3090,19 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       onCopySteeredText={handleCopySteeredText}
                                     />
                                   ))}
+                                {quietStreamingParts.length > 0 &&
+                                  !isUpdateTurnStreaming &&
+                                  !currentToolCalls.some(needsUserInput) && (
+                                    <div className="pb-2">
+                                      <ReplyBubbles
+                                        streaming
+                                        parts={quietStreamingParts}
+                                        sessionId={activeSessionId}
+                                      />
+                                    </div>
+                                  )}
                                 <StreamingStatusBar
+                                  workingLabel={workingLabel}
                                   isSending={isSending}
                                   sendStartedAt={sendStartedAt}
                                   restoredRunStatus={
@@ -2989,6 +3135,11 @@ const ChatWindowContent = memo(function ChatWindowContent({
                             {activeCodexCommandApprovalRequest && (
                               <CodexCommandApprovalRequestCard
                                 request={activeCodexCommandApprovalRequest}
+                                title={
+                                  selectedBackend === 'devin'
+                                    ? 'Devin requests permission'
+                                    : undefined
+                                }
                                 onApprove={() =>
                                   handleCodexCommandApproval(
                                     activeCodexCommandApprovalRequest,
@@ -3144,9 +3295,28 @@ const ChatWindowContent = memo(function ChatWindowContent({
                         <div className="pointer-events-auto bg-background">
                           <ErrorBanner
                             error={currentError}
-                            onDismiss={() =>
-                              activeSessionId && setError(activeSessionId, null)
+                            onDismiss={() => {
+                              if (!activeSessionId) return
+                              // The banner is the only cancel control.
+                              disarmAutoResume(activeSessionId)
+                              setError(activeSessionId, null)
+                            }}
+                            onAutoContinue={
+                              canAutoResume
+                                ? () =>
+                                    armAutoResume(
+                                      deferredSessionId,
+                                      limitResetAtMs
+                                    )
+                                : undefined
                             }
+                            onCancelAutoContinue={
+                              deferredSessionId
+                                ? () => disarmAutoResume(deferredSessionId)
+                                : undefined
+                            }
+                            isAutoResumeArmed={autoResumeAtMs != null}
+                            limitResetAtMs={autoResumeAtMs ?? limitResetAtMs}
                           />
                         </div>
                       )}
@@ -3157,29 +3327,42 @@ const ChatWindowContent = memo(function ChatWindowContent({
                           className="pointer-events-auto relative sm:mx-auto sm:mb-3 sm:max-w-3xl xl:max-w-4xl"
                         >
                           {/* Goal, hidden history, pinned tables, and scroll-to-bottom tabs - attached to the top edge of the composer */}
-                          <div className="absolute right-3 bottom-full flex items-end gap-1">
+                          <div
+                            className={cn(
+                              'absolute right-3 bottom-full flex items-end gap-1',
+                              // Pill composer: float the tabs as pills above it
+                              pillComposer &&
+                                'right-5 mb-2 [&_button]:h-7 [&_button]:rounded-full [&_button]:border-b [&_button]:px-3 [&_button]:shadow-sm'
+                            )}
+                          >
                             {!zenMode && (
                               <GoalBadge
                                 sessionId={activeSessionId}
                                 onClearGoal={handleClearGoal}
                               />
                             )}
-                            {preferences?.compact_chat_view_enabled &&
+                            {compactView &&
                               !zenMode &&
                               !isCompactHistoryExpanded &&
                               compactHistoryWindow.hiddenPromptCount > 0 && (
-                                <button
-                                  type="button"
-                                  onClick={handleShowHiddenCompactPrompts}
-                                  aria-label={`Show ${compactHistoryWindow.hiddenPromptCount} earlier prompts`}
-                                  title="Show earlier prompts"
-                                  className="flex h-6 items-center gap-1 rounded-t-md border border-b-0 border-border bg-card px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                                >
-                                  <ArrowUp className="h-3.5 w-3.5" />
-                                  <span>
-                                    {compactHistoryWindow.hiddenPromptCount}
-                                  </span>
-                                </button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={handleShowHiddenCompactPrompts}
+                                      aria-label={`Show ${compactHistoryWindow.hiddenPromptCount} earlier prompts`}
+                                      className="flex h-6 items-center gap-1 rounded-t-md border border-b-0 border-border bg-card px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                                    >
+                                      <ArrowUp className="h-3.5 w-3.5" />
+                                      <span>
+                                        {compactHistoryWindow.hiddenPromptCount}
+                                      </span>
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    Show earlier prompts
+                                  </TooltipContent>
+                                </Tooltip>
                               )}
                             <PinnedTablesButton
                               sessionId={activeSessionId}
@@ -3214,37 +3397,38 @@ const ChatWindowContent = memo(function ChatWindowContent({
                               onScrollToBottom={scrollToBottom}
                             />
                             {!isAtBottom && messages.length > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => scrollToBottom(true)}
-                                aria-label="Scroll to bottom"
-                                title="Scroll to bottom"
-                                className="relative flex h-6 items-center gap-1 rounded-t-md border border-b-0 border-border bg-card px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                              >
-                                <ArrowDown className="h-3.5 w-3.5" />
-                                <span>Bottom</span>
-                                {isSending && (
-                                  <span
-                                    aria-hidden="true"
-                                    className="absolute -top-0.5 -right-0.5 flex h-2 w-2"
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    onClick={() => scrollToBottom(true)}
+                                    aria-label="Scroll to bottom"
+                                    className="relative flex h-6 items-center gap-1 rounded-t-md border border-b-0 border-border bg-card px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                                   >
-                                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
-                                    <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
-                                  </span>
-                                )}
-                              </button>
+                                    <ArrowDown className="h-3.5 w-3.5" />
+                                    <span>Bottom</span>
+                                    {isSending && (
+                                      <span
+                                        aria-hidden="true"
+                                        className="absolute -top-0.5 -right-0.5 flex h-2 w-2"
+                                      >
+                                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
+                                        <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
+                                      </span>
+                                    )}
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  Scroll to bottom
+                                </TooltipContent>
+                              </Tooltip>
                             )}
                           </div>
                           {/* Subagents panel - separate section above the chat input */}
                           {!zenMode &&
                             activeAgents.length > 0 &&
-                            (dismissedAgentMessageId === null ||
-                              activeAgents.some(
-                                agent => agent.status === 'in_progress'
-                              ) ||
-                              (agentSourceMessageId !== null &&
-                                agentSourceMessageId !==
-                                  dismissedAgentMessageId)) && (
+                            !pillComposer &&
+                            !isAgentWidgetDismissed && (
                               <AgentWidget
                                 key={activeSessionId ?? undefined}
                                 className="sm:mb-2"
@@ -3260,11 +3444,7 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       open
                                     )
                                 }
-                                onClose={() =>
-                                  setDismissedAgentMessageId(
-                                    agentSourceMessageId ?? '__streaming__'
-                                  )
-                                }
+                                onClose={dismissAgentWidget}
                               />
                             )}
                           {/* Queued prompts - rendered as an extension above the chat input */}
@@ -3286,6 +3466,8 @@ const ChatWindowContent = memo(function ChatWindowContent({
                             onSubmit={handleSubmit}
                             className={cn(
                               'relative overflow-hidden border-t border-border bg-card transition-[background-color,box-shadow] duration-150 sm:rounded-lg sm:border',
+                              pillComposer &&
+                                'mx-2 mb-4 rounded-[22px] border sm:mx-0 sm:mb-3 sm:rounded-[22px]',
                               activeSessionId &&
                                 currentQueuedMessages.length > 0 &&
                                 'sm:rounded-t-none',
@@ -3293,11 +3475,34 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 'ring-2 ring-primary ring-inset bg-primary/5'
                             )}
                             style={
-                              isMobile
-                                ? { paddingBottom: 'var(--safe-area-bottom)' }
-                                : undefined
+                              !isMobile
+                                ? undefined
+                                : pillComposer
+                                  ? // Keep the pill one line tall: clear the home indicator outside it
+                                    {
+                                      marginBottom:
+                                        'max(var(--safe-area-bottom, 0px), 1rem)',
+                                    }
+                                  : { paddingBottom: 'var(--safe-area-bottom)' }
                             }
                           >
+                            {executionMode === 'plan' && (
+                              <div
+                                className={cn(
+                                  'flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-800 dark:text-amber-200',
+                                  pillComposer && 'rounded-t-[20px] px-3 py-1.5'
+                                )}
+                                role="status"
+                              >
+                                <ClipboardList className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                <span>
+                                  <span className="font-medium">Plan mode.</span>{' '}
+                                  Jean will explore and propose a plan. It will
+                                  not change code until you approve, or until
+                                  you switch modes.
+                                </span>
+                              </div>
+                            )}
                             {/* Pending file preview (@ mentions) */}
                             <FilePreview
                               files={currentPendingFiles}
@@ -3367,14 +3572,26 @@ const ChatWindowContent = memo(function ChatWindowContent({
                             <div
                               className={cn(
                                 zenMode && 'flex items-center overflow-hidden',
-                                zenMode && 'max-h-20'
+                                zenMode && 'max-h-20',
+                                pillComposer && 'flex items-end gap-2 p-1.5'
                               )}
                             >
+                              {pillComposer && (
+                                <button
+                                  type="button"
+                                  onClick={handleToolbarAttach}
+                                  aria-label="Attach files"
+                                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+                                >
+                                  <Plus className="h-4 w-4" />
+                                </button>
+                              )}
                               {/* Textarea section */}
                               <div
                                 className={cn(
                                   'px-4 pt-3 pb-2 md:px-6',
-                                  zenMode && 'min-w-0 flex-1'
+                                  zenMode && 'min-w-0 flex-1',
+                                  pillComposer && 'min-w-0 flex-1 p-0 md:px-1'
                                 )}
                               >
                                 <ChatInput
@@ -3413,11 +3630,34 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                   inputRef={inputRef}
                                   installedBackends={installedBackends}
                                   selectedBackend={selectedBackend}
+                                  pill={pillComposer}
                                 />
                               </div>
 
                               {/* Bottom toolbar */}
-                              {zenMode ? (
+                              {pillComposer ? (
+                                isSending && !hasInputValue ? (
+                                  <button
+                                    type="button"
+                                    onClick={handleCancel}
+                                    aria-label="Stop"
+                                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90"
+                                  >
+                                    <Square className="h-3.5 w-3.5" />
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="submit"
+                                    disabled={
+                                      !hasInputValue && !hasPendingAttachments
+                                    }
+                                    aria-label={isSending ? 'Queue' : 'Send'}
+                                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
+                                  >
+                                    <ArrowUp className="h-4 w-4" />
+                                  </button>
+                                )
+                              ) : zenMode ? (
                                 <div className="shrink-0 pr-3">
                                   <SendCancelButton
                                     isSending={isSending}
@@ -3430,7 +3670,10 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                         preferences
                                       ) ||
                                       (steerModifierActive &&
-                                        isSteerCapableBackend(selectedBackend))
+                                        isSteerCapableBackend(
+                                          selectedBackend,
+                                          preferences
+                                        ))
                                     }
                                     steerWithModifier={
                                       steerModifierActive &&
@@ -3440,7 +3683,8 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       )
                                     }
                                     canSteer={isSteerCapableBackend(
-                                      selectedBackend
+                                      selectedBackend,
+                                      preferences
                                     )}
                                     queuedMessageCount={
                                       currentQueuedMessages.length
@@ -3460,6 +3704,10 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                     hasInputValue={hasInputValue}
                                     executionMode={executionMode}
                                     selectedBackend={selectedBackend}
+                                    isDevinCloud={
+                                      selectedBackend === 'devin' &&
+                                      session?.devin_location === 'cloud'
+                                    }
                                     sessionHasMessages={
                                       (session?.messages?.length ?? 0) > 0
                                     }
@@ -3505,6 +3753,10 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                     }
                                     loadedPRContexts={
                                       loadedPRContexts ?? EMPTY_PR_CONTEXTS
+                                    }
+                                    loadedDiscussionContexts={
+                                      loadedDiscussionContexts ??
+                                      EMPTY_DISCUSSION_CONTEXTS
                                     }
                                     loadedSecurityContexts={
                                       loadedSecurityContexts ??
@@ -3582,7 +3834,10 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                         preferences
                                       ) ||
                                       (steerModifierActive &&
-                                        isSteerCapableBackend(selectedBackend))
+                                        isSteerCapableBackend(
+                                          selectedBackend,
+                                          preferences
+                                        ))
                                     }
                                     steerWithModifier={
                                       steerModifierActive &&
@@ -3592,13 +3847,19 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                       )
                                     }
                                     canSteer={isSteerCapableBackend(
-                                      selectedBackend
+                                      selectedBackend,
+                                      preferences
                                     )}
                                     onSteer={handleSteer}
                                     queuedMessageCount={
                                       currentQueuedMessages.length
                                     }
-                                    availableMcpServers={availableMcpServers}
+                                    availableMcpServers={
+                                      selectedBackend === 'devin' &&
+                                      session?.devin_location === 'cloud'
+                                        ? []
+                                        : availableMcpServers
+                                    }
                                     enabledMcpServers={enabledMcpServers}
                                     onToggleMcpServer={handleToggleMcpServer}
                                     onOpenProjectSettings={

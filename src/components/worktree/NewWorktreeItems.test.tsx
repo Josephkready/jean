@@ -89,35 +89,51 @@ describe('compact issue and PR rows', () => {
     expect(onClick).toHaveBeenCalledWith(true)
   })
 
-  it('shows the current-worktree investigation action on desktop', async () => {
+  it('opens a PR when clicking anywhere on the row except its buttons', async () => {
     const user = userEvent.setup()
-    const onInvestigateInNewSession = vi.fn()
+    const onClick = vi.fn()
+    const onLabelClick = vi.fn()
+    const onPreview = vi.fn()
+    const onStack = vi.fn()
     render(
-      <IssueItem
-        issue={{
-          number: 42,
-          title: 'A detailed issue title',
+      <PRItem
+        pr={{
+          number: 712,
+          title: 'Row click',
           state: 'OPEN',
-          labels: [],
+          labels: [{ name: 'Bug', color: 'ff0000' }],
+          headRefName: 'fix/row-click',
+          baseRefName: 'main',
+          isDraft: false,
           created_at: '2026-01-01T00:00:00Z',
           author: { login: 'octocat' },
         }}
         index={0}
         isSelected={false}
         isCreating={false}
+        isStacking={false}
         onMouseEnter={vi.fn()}
-        onClick={vi.fn()}
+        onClick={onClick}
         onInvestigate={vi.fn()}
-        onInvestigateInNewSession={onInvestigateInNewSession}
-        onPreview={vi.fn()}
+        onStack={onStack}
+        onPreview={onPreview}
+        onLabelClick={onLabelClick}
       />
     )
+
+    await user.click(screen.getByText(/#712 opened/))
+    expect(onClick).toHaveBeenCalledWith(false)
+
+    onClick.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Bug' }))
+    await user.click(screen.getByRole('button', { name: 'Preview PR' }))
     await user.click(
-      screen.getByRole('button', {
-        name: /investigate issue in the current worktree/i,
-      })
+      screen.getByRole('button', { name: /New worktree based on/ })
     )
-    expect(onInvestigateInNewSession).toHaveBeenCalledTimes(1)
+    expect(onLabelClick).toHaveBeenCalledWith('Bug')
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(onStack).toHaveBeenCalledTimes(1)
+    expect(onClick).not.toHaveBeenCalled()
   })
 
   it('shows issue labels, author and number, and filters by label on click', async () => {
@@ -182,44 +198,6 @@ describe('compact issue and PR rows', () => {
 })
 
 describe('NewWorktreeItems mobile actions', () => {
-  it('offers investigating an issue in the current worktree', async () => {
-    isMobile = true
-    const user = userEvent.setup()
-    const onInvestigateInNewSession = vi.fn()
-    const issue: GitHubIssue = {
-      number: 42,
-      title: 'Investigate without a new worktree',
-      body: '',
-      state: 'OPEN',
-      labels: [],
-      created_at: '2026-01-01T00:00:00Z',
-      author: { login: 'octocat' },
-    }
-
-    render(
-      <IssueItem
-        issue={issue}
-        index={0}
-        isSelected={false}
-        isCreating={false}
-        onMouseEnter={vi.fn()}
-        onClick={vi.fn()}
-        onInvestigate={vi.fn()}
-        onInvestigateInNewSession={onInvestigateInNewSession}
-        onPreview={vi.fn()}
-      />
-    )
-
-    await user.click(screen.getByRole('button', { name: /issue actions/i }))
-    await user.click(
-      screen.getByRole('menuitem', {
-        name: /investigate in the current worktree/i,
-      })
-    )
-
-    expect(onInvestigateInNewSession).toHaveBeenCalledTimes(1)
-  })
-
   it('puts preview, investigate, and background investigation behind a mobile overflow menu', async () => {
     isMobile = true
     const user = userEvent.setup()
@@ -268,6 +246,23 @@ describe('BranchItem', () => {
     expect(screen.getAllByRole('button')).toHaveLength(1)
     await user.click(screen.getByRole('button', { name: 'feature/existing' }))
     expect(onClick).toHaveBeenCalledWith(false)
+  })
+
+  it('shows the remote when the same branch name exists on another remote', () => {
+    render(
+      <BranchItem
+        branch="main"
+        remote="upstream"
+        index={0}
+        isSelected={false}
+        isCreating={false}
+        onMouseEnter={vi.fn()}
+        onClick={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'main' })).toBeInTheDocument()
+    expect(screen.getByText('upstream')).toBeInTheDocument()
   })
 })
 

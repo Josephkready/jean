@@ -223,6 +223,7 @@ describe('attachment-processing', () => {
       relativePath: '/tmp/archive.zip',
       extension: 'zip',
       isDirectory: false,
+      attached: true,
     })
   })
 })

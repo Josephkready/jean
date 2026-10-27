@@ -41,6 +41,9 @@ const {
   setRailSection: vi.fn(),
   setSelectedAgentId: vi.fn(),
   agentState: {
+    pageOpen: false,
+    selectedAgentId: 'jean',
+    leftAt: 0,
     servers: [] as string[],
     agents: [] as {
       id: string
@@ -70,16 +73,22 @@ const remoteConnections = [
 
 vi.mock('@/store/ui-store', () => ({
   useUIStore: Object.assign(
-    () => ({
-      commandPaletteOpen: true,
-      setCommandPaletteOpen,
-    }),
+    (selector?: (state: Record<string, unknown>) => unknown) => {
+      const state = {
+        commandPaletteOpen: true,
+        setCommandPaletteOpen,
+        selectedAgentId: agentState.selectedAgentId,
+        agentsLeftAt: agentState.leftAt,
+      }
+      return selector ? selector(state) : state
+    },
     { getState: () => ({ setRailSection, setSelectedAgentId }) }
   ),
 }))
 
 vi.mock('@/components/agents/agents-feature', () => ({
   useAgentsEnabledServers: () => agentState.servers,
+  useShowAgents: () => agentState.pageOpen,
 }))
 
 vi.mock('@/services/agents', () => ({
@@ -201,6 +210,7 @@ describe('CommandPalette projects', () => {
     isNativeApp.mockReturnValue(true)
     getActiveConnectionId.mockReturnValue('remote-1')
     projectStoreState.selectedProjectId = null
+    agentState.pageOpen = false
     agentState.servers = []
     agentState.agents = []
   })
@@ -294,6 +304,23 @@ describe('CommandPalette projects', () => {
     expect(selectProject).not.toHaveBeenCalled()
   })
 
+  it('hides the current project in the project view', () => {
+    projectStoreState.selectedProjectId = 'project-2'
+
+    render(<CommandPalette />)
+
+    expect(screen.queryByText('Local Tool')).not.toBeInTheDocument()
+  })
+
+  it('lists the current project on the Agents page to switch back to it', () => {
+    projectStoreState.selectedProjectId = 'project-2'
+    agentState.pageOpen = true
+
+    render(<CommandPalette />)
+
+    expect(screen.getByText('Local Tool')).toBeInTheDocument()
+  })
+
   it('leaves the Agents page when a project is selected', () => {
     render(<CommandPalette />)
 
@@ -312,6 +339,10 @@ describe('CommandPalette agents', () => {
     isNativeApp.mockReturnValue(true)
     getActiveConnectionId.mockReturnValue('local')
     projectStoreState.selectedProjectId = null
+    projectStoreState.projectAccessTimestamps = {}
+    agentState.pageOpen = false
+    agentState.selectedAgentId = 'jean'
+    agentState.leftAt = 0
     agentState.servers = ['local']
     agentState.agents = [
       {
@@ -344,6 +375,28 @@ describe('CommandPalette agents', () => {
 
     expect(setRailSection).toHaveBeenCalledWith('agents')
     expect(setSelectedAgentId).toHaveBeenCalledWith('remote-2:reviewer')
+  })
+
+  it('lists the previous agent first after switching to a project', () => {
+    agentState.selectedAgentId = 'remote-2:reviewer'
+    agentState.leftAt = 200
+    projectStoreState.projectAccessTimestamps = { 'project-2': 100 }
+
+    render(<CommandPalette />)
+
+    const first = document.querySelector('[cmdk-item]')
+    expect(first).toHaveTextContent('Reviewer')
+  })
+
+  it('keeps projects first when a project was opened after the agent', () => {
+    agentState.selectedAgentId = 'remote-2:reviewer'
+    agentState.leftAt = 100
+    projectStoreState.projectAccessTimestamps = { 'project-2': 200 }
+
+    render(<CommandPalette />)
+
+    const first = document.querySelector('[cmdk-item]')
+    expect(first?.closest('[cmdk-group]')).toHaveTextContent(/^Projects/)
   })
 
   it('hides agents when the feature is off', () => {

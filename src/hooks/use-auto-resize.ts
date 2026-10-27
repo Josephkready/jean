@@ -52,9 +52,23 @@ export function useAutoResize(
     // Re-calc on window resize (viewport-relative max-height may change)
     window.addEventListener('resize', resize)
 
+    // Re-calc when the width changes: a size measured before layout settles
+    // (e.g. at width 0) wraps the text and locks in a too-tall height
+    let lastWidth = el.clientWidth
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => {
+            if (el.clientWidth === lastWidth) return
+            lastWidth = el.clientWidth
+            resize()
+          })
+    observer?.observe(el)
+
     return () => {
       el.removeEventListener('input', resize)
       window.removeEventListener('resize', resize)
+      observer?.disconnect()
     }
   }, [ref, resize])
 

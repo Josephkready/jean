@@ -1,3 +1,4 @@
+import { DevinLocationPicker } from '@/components/chat/toolbar/DevinLocationPicker'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { Zap } from '@/components/icons/reicon'
 import { dismissibleToast } from '@/lib/dismissible-toast'
@@ -97,6 +98,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   selectedEffortLevel,
   useAdaptiveThinking,
   hideThinkingLevel,
+  isDevinCloud = false,
   sessionHasMessages,
   providerLocked,
   baseBranch,
@@ -115,6 +117,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   favoritePackageScripts,
   loadedIssueContexts,
   loadedPRContexts,
+  loadedDiscussionContexts,
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
@@ -286,6 +289,7 @@ export const ChatToolbar = memo(function ChatToolbar({
     setViewingContext,
     handleViewIssue,
     handleViewPR,
+    handleViewDiscussion,
     handleViewSavedContext,
     handleViewSecurityAlert,
     handleViewAdvisory,
@@ -499,6 +503,14 @@ export const ChatToolbar = memo(function ChatToolbar({
         )}
       >
         <div className="inline-flex max-w-full flex-nowrap items-center overflow-x-auto whitespace-nowrap bg-transparent scrollbar-hide">
+          {selectedBackend === 'devin' && (
+            <DevinLocationPicker
+              sessionId={activeSessionId ?? null}
+              worktreeId={worktreeId}
+              worktreePath={activeWorktreePath ?? null}
+              isSending={isSending}
+            />
+          )}
           <div className={zenMode ? 'hidden' : 'contents'}>
             <DockBurgerButton className="flex @xl:hidden" />
 
@@ -526,6 +538,7 @@ export const ChatToolbar = memo(function ChatToolbar({
             )}
 
             <MobileSettingsMenu
+              hideModelPicker={isDevinCloud}
               isDisabled={false}
               providerLocked={providerLocked}
               selectedBackend={selectedBackend}
@@ -536,7 +549,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               hasMultipleBackendModelChoices={hasMultipleBackendModelChoices}
               selectedEffortLevel={selectedEffortLevel}
               selectedThinkingLevel={selectedThinkingLevel}
-              hideThinkingLevel={hideThinkingLevel}
+              hideThinkingLevel={hideThinkingLevel || isDevinCloud}
               useAdaptiveThinking={useAdaptiveThinking}
               isCodex={isCodex}
               modelReasoning={selectedModelReasoning}
@@ -551,6 +564,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               openReasoningSheetSignal={openReasoningSheetSignal}
               loadedIssueContexts={loadedIssueContexts}
               loadedPRContexts={loadedPRContexts}
+              loadedDiscussionContexts={loadedDiscussionContexts}
               loadedSecurityContexts={loadedSecurityContexts}
               loadedAdvisoryContexts={loadedAdvisoryContexts}
               loadedLinearContexts={loadedLinearContexts}
@@ -558,6 +572,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               attachedSavedContexts={attachedSavedContexts}
               handleViewIssue={handleViewIssue}
               handleViewPR={handleViewPR}
+              handleViewDiscussion={handleViewDiscussion}
               handleViewSecurityAlert={handleViewSecurityAlert}
               handleViewAdvisory={handleViewAdvisory}
               handleViewLinear={handleViewLinear}
@@ -580,7 +595,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               onToggleFavoritePackageScript={onToggleFavoritePackageScript}
             />
 
-            {isMobile && (
+            {isMobile && !isDevinCloud && (
               <MobileBackendModelPickerSheet
                 open={mobileBackendModelPickerOpen}
                 onOpenChange={setMobileBackendModelPickerOpen}
@@ -611,6 +626,7 @@ export const ChatToolbar = memo(function ChatToolbar({
 
             <DesktopToolbarControls
               activeSessionId={activeSessionId}
+              hideModelPicker={isDevinCloud}
               hasPendingQuestions={hasPendingQuestions}
               selectedBackend={selectedBackend}
               selectedModel={selectedModel}
@@ -619,7 +635,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               selectedEffortLevel={selectedEffortLevel}
               executionMode={executionMode}
               useAdaptiveThinking={useAdaptiveThinking}
-              hideThinkingLevel={hideThinkingLevel}
+              hideThinkingLevel={hideThinkingLevel || isDevinCloud}
               sessionHasMessages={sessionHasMessages}
               providerLocked={providerLocked}
               customCliProfiles={customCliProfiles}
@@ -638,6 +654,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               mcpStatuses={mcpStatuses}
               loadedIssueContexts={loadedIssueContexts}
               loadedPRContexts={loadedPRContexts}
+              loadedDiscussionContexts={loadedDiscussionContexts}
               loadedSecurityContexts={loadedSecurityContexts}
               loadedAdvisoryContexts={loadedAdvisoryContexts}
               loadedLinearContexts={loadedLinearContexts}
@@ -665,6 +682,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               handleEffortLevelChange={handleEffortLevelChange}
               handleViewIssue={handleViewIssue}
               handleViewPR={handleViewPR}
+              handleViewDiscussion={handleViewDiscussion}
               handleViewSecurityAlert={handleViewSecurityAlert}
               handleViewAdvisory={handleViewAdvisory}
               handleViewLinear={handleViewLinear}

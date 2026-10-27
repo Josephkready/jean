@@ -11,20 +11,13 @@ import {
   type RefObject,
 } from 'react'
 import {
-  Archive,
-  Copy,
   GitBranchPlus,
   GitPullRequestArrow,
   Globe,
   Maximize,
   Minimize,
-  Pencil,
-  RefreshCw,
-  Tag,
-  Play,
   Plus,
   Terminal,
-  Trash2,
 } from '@/components/icons/reicon'
 import { ModalCloseButton } from '@/components/ui/modal-close-button'
 import { cn } from '@/lib/utils'
@@ -51,14 +44,15 @@ import { useProjectsStore } from '@/store/projects-store'
 import {
   useSessions,
   useSession,
-  useCreateSession,
   useClearSessionHistory,
   useRenameSession,
   reconnectNativeCliSession,
-  canReconnectSession,
 } from '@/services/chat'
-import { resolveBackendCliPath } from '@/services/cli-binary'
 import { usePreferences } from '@/services/preferences'
+import {
+  hasCloseConfirmBypassModifier,
+  readCloseBypassDetail,
+} from '@/lib/confirm-bypass'
 import { parseServerResourceKey } from '@/lib/server-resource'
 import { LOCAL_SERVER_ID } from '@/types/server-resource'
 import { usePackageScripts, type PackageScript } from '@/services/projects'
@@ -68,17 +62,18 @@ import { isBaseSession, type Project, type Worktree } from '@/types/projects'
 import type { Session } from '@/types/chat'
 import { isNativeApp } from '@/lib/environment'
 import { isImeComposingEvent } from '@/lib/ime-composition'
-import { copyToClipboard } from '@/lib/clipboard'
 import { toast } from 'sonner'
 import { ChatWindow } from './ChatWindow'
 import { ModalTerminalDrawer } from './ModalTerminalDrawer'
+import { TerminalActivityIcon } from './TerminalActivityIcon'
+import { useWorktreeTerminalStatus } from '@/hooks/useWorktreeTerminalStatus'
 import { ModalBrowserDrawer } from '@/components/browser/ModalBrowserDrawer'
 import { OpenInButton } from '@/components/open-in/OpenInButton'
 import { ScriptsButton } from '@/components/open-in/ScriptsButton'
 import { DevToolsDropdown } from './DevToolsDropdown'
+import { TerminalMagicButton } from './TerminalMagicButton'
 import { DEFAULT_KEYBINDINGS, formatShortcutDisplay } from '@/types/keybindings'
 import {
-  buildNativeClientSessionInput,
   createSessionCardDataCache,
   getResumeCommand,
   isActionableWaitingStatus,
@@ -94,13 +89,13 @@ import { useCanvasStoreState } from './hooks/useCanvasStoreState'
 import {
   ContextMenu,
   ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
 import { WorktreeDropdownMenu } from '@/components/projects/WorktreeDropdownMenu'
+import { SessionContextMenuItems } from './SessionContextMenuItems'
 import { LabelModal } from './LabelModal'
 import { useSessionArchive } from './hooks/useSessionArchive'
+import { useOpenInNativeClient } from './hooks/useOpenInNativeClient'
 import { useIsMobile } from '@/hooks/use-mobile'
 import {
   isModOnlyHeld,
@@ -177,13 +172,17 @@ function HeaderSurfaceToggle({
   isOpen,
   shortcut,
   onClick,
+  active,
 }: {
   label: string
   icon: typeof Terminal
   isOpen: boolean
   shortcut: string | undefined
   onClick: () => void
+  /** When set, the control shows a live-PTY badge and an active label. */
+  active?: boolean
 }) {
+  const activityLabel = active ? `${label} active` : label
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -194,15 +193,23 @@ function HeaderSurfaceToggle({
             'h-7 w-7 text-muted-foreground hover:text-foreground',
             isOpen && 'bg-muted text-foreground'
           )}
-          aria-label={`Toggle ${label.toLowerCase()}`}
+          aria-label={
+            active
+              ? `Toggle ${label.toLowerCase()} (active)`
+              : `Toggle ${label.toLowerCase()}`
+          }
           aria-pressed={isOpen}
           onClick={onClick}
         >
-          <Icon className="h-4 w-4" />
+          {active === undefined ? (
+            <Icon className="h-4 w-4" />
+          ) : (
+            <TerminalActivityIcon active={active} className="h-4 w-4" />
+          )}
         </Button>
       </TooltipTrigger>
       <TooltipContent>
-        {label}
+        {activityLabel}
         {isNativeApp() && (
           <kbd className="ml-1 text-[0.625rem] opacity-60">
             {formatShortcutDisplay(shortcut)}
@@ -320,6 +327,7 @@ export const SessionChatModal = memo(function SessionChatModal({
   const showSessionTabs = tabSessions.length > 0 || !!currentSessionId
   const serverId = parseServerResourceKey(worktreeId)?.serverId
   const { data: preferences } = usePreferences(serverId)
+  const bypassModifier = preferences?.close_confirm_bypass_modifier
   const { data: packageScripts = [] } = usePackageScripts(worktreePath)
   const modalTerminalDockMode = useTerminalStore(
     state => state.modalTerminalDockMode
@@ -333,6 +341,7 @@ export const SessionChatModal = memo(function SessionChatModal({
   const hasBottomBrowser =
     isBrowserModalOpen && browserModalDockMode === 'bottom'
   const hasBottomDock = hasBottomTerminal || hasBottomBrowser
+  const { hasActiveTerminal } = useWorktreeTerminalStatus(worktreeId)
   // Horizontal scroll on session tabs
   const modalTabScrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -463,7 +472,6 @@ export const SessionChatModal = memo(function SessionChatModal({
 
   // Rename session state
   const renameSession = useRenameSession()
-  const createSession = useCreateSession()
   const clearSessionHistory = useClearSessionHistory()
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(
     null
@@ -591,7 +599,11 @@ export const SessionChatModal = memo(function SessionChatModal({
   // Close (delete or archive per removal behavior) or explicitly archive a
   // session tab, asking for confirmation first.
   const removeSessionTab = useCallback(
-    (session: Session, archive = false) => {
+    (
+      session: Session,
+      options: { archive?: boolean; bypassConfirm?: boolean } = {}
+    ) => {
+      const { archive = false, bypassConfirm = false } = options
       const activeSessions = tabSessions.filter(s => !s.archived_at)
       const sessionIsEmpty = isSessionEmpty(
         session,
@@ -602,7 +614,9 @@ export const SessionChatModal = memo(function SessionChatModal({
       // without a prompt (issue #56). Empty sessions (no messages and no
       // unsent draft) close immediately.
       const needsConfirm =
-        preferences?.confirm_session_close !== false && !sessionIsEmpty
+        !bypassConfirm &&
+        preferences?.confirm_session_close !== false &&
+        !sessionIsEmpty
 
       const action = () => {
         if (activeSessions.length > 1) {
@@ -639,22 +653,30 @@ export const SessionChatModal = memo(function SessionChatModal({
       if (e.button !== 1) return
       e.preventDefault()
       e.stopPropagation()
-      removeSessionTab(session)
+      removeSessionTab(session, {
+        bypassConfirm: hasCloseConfirmBypassModifier(e, bypassModifier),
+      })
     },
-    [removeSessionTab]
+    [removeSessionTab, bypassModifier]
   )
 
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: Event) => {
       e.stopImmediatePropagation()
+      const bypassConfirm = readCloseBypassDetail(e)
       const activeSessions = tabSessions.filter(s => !s.archived_at)
       if (activeSessions.length === 0) {
-        setCloseConfirmMode('worktree')
-        pendingCloseAction.current = () => {
+        const closeWorktree = () => {
           onRequestCloseWorktree()
           onClose()
         }
+        if (bypassConfirm) {
+          closeWorktree()
+          return
+        }
+        setCloseConfirmMode('worktree')
+        pendingCloseAction.current = closeWorktree
         setCloseConfirmOpen(true)
         return
       }
@@ -672,7 +694,11 @@ export const SessionChatModal = memo(function SessionChatModal({
       const sessionIsEmpty =
         !currentSession ||
         isSessionEmpty(currentSession, useChatStore.getState().inputDrafts)
-      if (preferences?.confirm_session_close !== false && !sessionIsEmpty) {
+      if (
+        !bypassConfirm &&
+        preferences?.confirm_session_close !== false &&
+        !sessionIsEmpty
+      ) {
         setCloseConfirmMode('session')
         pendingCloseAction.current = action
         setCloseConfirmOpen(true)
@@ -759,38 +785,10 @@ export const SessionChatModal = memo(function SessionChatModal({
       window.removeEventListener('clear-session-context', handleClearContext)
   }, [handleClearContext, isOpen])
 
-  const handleOpenInNativeClient = useCallback(
-    (session: Session) => {
-      void (async () => {
-        // Prefer Jean-managed / resolved absolute path so bare names like
-        // `grok` work when the CLI is not on PATH (default jean install).
-        const resolvedCommand = await resolveBackendCliPath(session.backend)
-        const input = buildNativeClientSessionInput(
-          session,
-          worktreeId,
-          worktreePath,
-          { resolvedCommand }
-        )
-        if (!input) {
-          toast.error('No native resume command is available for this session')
-          return
-        }
-
-        createSession.mutate(input, {
-          onSuccess: nativeSession => {
-            useChatStore
-              .getState()
-              .setSelectedBackend(nativeSession.id, input.backend)
-            void reconnectNativeCliSession(nativeSession, worktreeId, {
-              openModal: false,
-              showToast: false,
-            }).then(() => toast.success('Opened in native client'))
-          },
-        })
-      })()
-    },
-    [createSession, worktreeId, worktreePath]
-  )
+  const {
+    openInNativeClient: handleOpenInNativeClient,
+    isPending: isOpeningInNativeClient,
+  } = useOpenInNativeClient(worktreeId, worktreePath)
 
   useEffect(() => {
     if (!isOpen) return
@@ -1179,12 +1177,16 @@ export const SessionChatModal = memo(function SessionChatModal({
                   )}
                   {!zenMode && (
                     <>
+                      {currentSessionId && !project?.server && (
+                        <TerminalMagicButton sessionId={currentSessionId} />
+                      )}
                       {!isMobile && !project?.server && (
                         <>
                           <HeaderSurfaceToggle
                             label="Terminal"
                             icon={Terminal}
                             isOpen={isModalTerminalOpen}
+                            active={hasActiveTerminal}
                             shortcut={
                               localPreferences?.keybindings?.toggle_terminal ??
                               DEFAULT_KEYBINDINGS.toggle_terminal
@@ -1356,7 +1358,13 @@ export const SessionChatModal = memo(function SessionChatModal({
                                 tooltip={'Remove session'}
                                 onClick={e => {
                                   e.stopPropagation()
-                                  removeSessionTab(session)
+                                  removeSessionTab(session, {
+                                    bypassConfirm:
+                                      hasCloseConfirmBypassModifier(
+                                        e,
+                                        bypassModifier
+                                      ),
+                                  })
                                 }}
                                 className="ml-0.5 opacity-60 sm:opacity-0 sm:group-hover/tab:opacity-60 hover:!opacity-100"
                                 size="xs"
@@ -1365,91 +1373,32 @@ export const SessionChatModal = memo(function SessionChatModal({
                           </div>
                         </ContextMenuTrigger>
                         <ContextMenuContent className="w-64">
-                          <ContextMenuItem
-                            onSelect={() =>
+                          <SessionContextMenuItems
+                            session={session}
+                            hasLabel={!!sessionLabel}
+                            resumeCommand={resumeCommand}
+                            nativeClientPending={isOpeningInNativeClient}
+                            onRename={() =>
                               handleStartRename(session.id, session.name)
                             }
-                          >
-                            <Pencil className="mr-2 h-4 w-4" />
-                            Rename
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onSelect={() => {
+                            onToggleLabel={() => {
                               setLabelTargetSessionId(session.id)
                               setLabelModalOpen(true)
                             }}
-                          >
-                            <Tag className="mr-2 h-4 w-4" />
-                            {sessionLabel ? 'Remove Label' : 'Add Label'}
-                          </ContextMenuItem>
-                          {resumeCommand && (
-                            <>
-                              <ContextMenuItem
-                                disabled={createSession.isPending}
-                                onSelect={() =>
-                                  handleOpenInNativeClient(session)
-                                }
-                              >
-                                <Play className="mr-2 h-4 w-4" />
-                                Open in Native Client
-                              </ContextMenuItem>
-                              <ContextMenuItem
-                                onSelect={() => {
-                                  void copyToClipboard(resumeCommand)
-                                    .then(() =>
-                                      toast.success('Resume command copied')
-                                    )
-                                    .catch(() =>
-                                      toast.error(
-                                        'Failed to copy resume command'
-                                      )
-                                    )
-                                }}
-                              >
-                                <Copy className="mr-2 h-4 w-4" />
-                                Native Resume Command
-                              </ContextMenuItem>
-                            </>
-                          )}
-                          {canReconnectSession(session) && (
-                            <ContextMenuItem
-                              onSelect={() =>
-                                void reconnectNativeCliSession(
-                                  session,
-                                  worktreeId
-                                )
-                              }
-                            >
-                              <RefreshCw className="mr-2 h-4 w-4" />
-                              Reconnect
-                            </ContextMenuItem>
-                          )}
-                          <ContextMenuItem
-                            onSelect={() => {
-                              void copyToClipboard(session.id)
-                                .then(() => toast.success('Session ID copied'))
-                                .catch(() =>
-                                  toast.error('Failed to copy session ID')
-                                )
-                            }}
-                          >
-                            <Copy className="mr-2 h-4 w-4" />
-                            Copy Session ID
-                          </ContextMenuItem>
-                          <ContextMenuSeparator />
-                          <ContextMenuItem
-                            onSelect={() => removeSessionTab(session, true)}
-                          >
-                            <Archive className="mr-2 h-4 w-4" />
-                            Archive Session
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            variant="destructive"
-                            onSelect={() => removeSessionTab(session)}
-                          >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete Session
-                          </ContextMenuItem>
+                            onOpenInNativeClient={() =>
+                              handleOpenInNativeClient(session)
+                            }
+                            onReconnect={() =>
+                              void reconnectNativeCliSession(
+                                session,
+                                worktreeId
+                              )
+                            }
+                            onArchive={() =>
+                              removeSessionTab(session, { archive: true })
+                            }
+                            onDelete={() => removeSessionTab(session)}
+                          />
                         </ContextMenuContent>
                       </ContextMenu>
                     )

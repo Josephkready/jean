@@ -55,6 +55,10 @@ vi.mock('./panes/CursorPane', () => ({
   CursorPane: () => <div>Cursor pane</div>,
 }))
 
+vi.mock('./panes/MusePane', () => ({
+  MusePane: () => <div>Muse pane</div>,
+}))
+
 vi.mock('./panes/GitHubPane', () => ({
   GitHubPane: () => <div>GitHub CLI pane</div>,
 }))
@@ -131,6 +135,92 @@ describe('PreferencesDialog', () => {
       preferencesOpen: true,
       preferencesPane: null,
     })
+  })
+
+  it('opens as a near-fullscreen modal with a backdrop', () => {
+    render(<PreferencesDialog />)
+
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('data-slot', 'dialog-content')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    expect(dialog.className).toContain('w-[96vw]')
+    expect(dialog.className).toContain('h-[94dvh]')
+    expect(dialog.className).toContain('max-w-[96vw]')
+    expect(dialog.className).not.toContain('inset-0')
+    expect(dialog.className).not.toContain('max-w-lg')
+
+    const overlay = document.querySelector('[data-slot="dialog-overlay"]')
+    expect(overlay).toBeTruthy()
+    expect(overlay?.className).toContain('inset-0')
+  })
+
+  it('hides the rest of the page and keeps focus inside the modal', async () => {
+    render(
+      <>
+        <button type="button">Outside preferences</button>
+        <PreferencesDialog />
+      </>
+    )
+
+    const outside = screen.getByRole('button', {
+      name: 'Outside preferences',
+      hidden: true,
+    })
+    expect(
+      outside.closest('[aria-hidden="true"], [data-aria-hidden="true"]')
+    ).not.toBeNull()
+
+    outside.focus()
+    await waitFor(() => {
+      const dialog = screen.getByRole('dialog')
+      expect(outside).not.toHaveFocus()
+      expect(dialog.contains(document.activeElement)).toBe(true)
+    })
+  })
+
+  it('closes when the backdrop is clicked', async () => {
+    const user = userEvent.setup()
+
+    render(<PreferencesDialog />)
+
+    const overlay = document.querySelector('[data-slot="dialog-overlay"]')
+    if (!overlay) {
+      throw new Error('Expected preferences backdrop to be rendered')
+    }
+
+    await user.click(overlay)
+
+    await waitFor(() => {
+      expect(useUIStore.getState().preferencesOpen).toBe(false)
+    })
+  })
+
+  it('closes on Escape when search and nested menus are closed', async () => {
+    const user = userEvent.setup()
+
+    render(<PreferencesDialog />)
+
+    await user.keyboard('{Escape}')
+
+    await waitFor(() => {
+      expect(useUIStore.getState().preferencesOpen).toBe(false)
+    })
+  })
+
+  it('keeps the dialog open when Escape dismisses an open pane select', async () => {
+    const user = userEvent.setup()
+
+    render(<PreferencesDialog />)
+
+    await user.click(screen.getByRole('combobox'))
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+
+    await user.keyboard('{Escape}')
+
+    await waitFor(() => {
+      expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    })
+    expect(useUIStore.getState().preferencesOpen).toBe(true)
   })
 
   it('selects the server whose settings are shown in native mode', async () => {
@@ -217,8 +307,10 @@ describe('PreferencesDialog', () => {
       'Command Code',
       'Grok',
       'Kimi Code',
+      'DevinBeta',
       'Antigravity CLIBeta',
-      'GitHub CLI',
+      'MuseBeta',
+      'Git Provider',
       'CodeRabbit CLI',
       'Terminal',
       'Magic Prompts',
@@ -256,18 +348,14 @@ describe('PreferencesDialog', () => {
       expect(within(button).queryByText('Beta')).toBeNull()
     }
 
-    const antigravityButton = within(navigationMenu)
-      .getByText('Antigravity CLI')
-      .closest('button')
-    if (!antigravityButton) {
-      throw new Error(
-        'Expected Antigravity CLI navigation button to be rendered'
-      )
-    }
+    for (const label of ['Devin', 'Antigravity CLI', 'Muse']) {
+      const button = within(navigationMenu).getByText(label).closest('button')
+      if (!button) {
+        throw new Error(`Expected ${label} navigation button to be rendered`)
+      }
 
-    expect(within(antigravityButton).getByText('Beta')).toHaveClass(
-      'bg-warning/10'
-    )
+      expect(within(button).getByText('Beta')).toHaveClass('bg-warning/10')
+    }
 
     const kimiButton = within(navigationMenu)
       .getByText('Kimi Code')
@@ -279,6 +367,77 @@ describe('PreferencesDialog', () => {
     expect(within(kimiButton).getByLabelText('Kimi Code')).toHaveClass(
       'translate-x-0.5'
     )
+
+    const devinButton = within(navigationMenu)
+      .getByText('Devin')
+      .closest('button')
+    if (!devinButton) {
+      throw new Error('Expected Devin navigation button to be rendered')
+    }
+
+    expect(within(devinButton).getByLabelText('Devin')).toBeInTheDocument()
+  })
+
+  it('opens the Muse pane from the desktop navigation', async () => {
+    const user = userEvent.setup()
+
+    render(<PreferencesDialog />)
+
+    const navigationMenu = screen
+      .getByRole('dialog')
+      .querySelector<HTMLElement>('[data-sidebar="menu"]')
+    if (!navigationMenu) {
+      throw new Error('Expected desktop navigation menu to be rendered')
+    }
+
+    const museButton = within(navigationMenu)
+      .getByText('Muse')
+      .closest('button')
+    if (!museButton) {
+      throw new Error('Expected Muse navigation button to be rendered')
+    }
+
+    expect(screen.queryByText('Muse pane')).toBeNull()
+    await user.click(museButton)
+
+    expect(screen.getByText('Muse pane')).toBeInTheDocument()
+  })
+
+  it('marks the Devin settings pane, breadcrumb, and mobile option as beta', async () => {
+    const user = userEvent.setup()
+
+    render(<PreferencesDialog />)
+
+    const navigationMenu = screen
+      .getByRole('dialog')
+      .querySelector<HTMLElement>('[data-sidebar="menu"]')
+    if (!navigationMenu) {
+      throw new Error('Expected desktop navigation menu to be rendered')
+    }
+
+    const devinButton = within(navigationMenu)
+      .getByText('Devin')
+      .closest('button')
+    if (!devinButton) {
+      throw new Error('Expected Devin navigation button to be rendered')
+    }
+
+    await user.click(devinButton)
+
+    const pane = document.getElementById('pref-pane-devin')
+    if (!pane) {
+      throw new Error('Expected Devin pane to be rendered')
+    }
+    expect(within(pane).getByText('Devin')).toBeInTheDocument()
+    expect(within(pane).getByText('Beta')).toHaveClass('bg-warning/10')
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'breadcrumb' })
+    expect(within(breadcrumb).getByText('Devin')).toBeInTheDocument()
+    expect(within(breadcrumb).getByText('Beta')).toHaveClass('bg-warning/10')
+
+    await user.click(screen.getByRole('combobox'))
+    const devinOption = screen.getByRole('option', { name: 'Devin' })
+    expect(within(devinOption).getByText('Beta')).toHaveClass('bg-warning/10')
   })
 
   it('shows Web Access but hides Keybindings in the mobile pane selector', async () => {

@@ -30,9 +30,15 @@ preferences pane.
 | `previous_worktree`         | `Cmd+Alt+Up`      | Switch to previous worktree             |
 | `cycle_execution_mode`      | `Shift+Tab`       | Cycle through Plan/Build/Yolo modes     |
 | `approve_plan`              | `Cmd+Enter`       | Approve plan or answer question         |
+| `approve_plan_yolo`         | `Cmd+Shift+Alt+Y` | Approve the current plan with Full access |
 | `restore_last_archived`     | `Cmd+Shift+Alt+T` | Restore most recently archived item     |
 
 **Note:** `Cmd` on Mac, `Ctrl` on Windows/Linux.
+
+Full access approval stays on `Y`, matching the other Full access chords
+(`Cmd+Shift+Y` clears context, `Cmd+Alt+Y` approves into a new worktree). The
+plain chord is `Cmd+Shift+Alt+Y` so `Cmd+Y` / `Ctrl+Y` stays redo in a focused
+text field on Windows and Linux. macOS redo remains `Cmd+Shift+Z`.
 
 `Cmd+Left`/`Cmd+Right` switch session tabs only when the focused text field is
 empty; otherwise they move the caret as usual.
@@ -212,6 +218,13 @@ function migrateKeybindings(
 
 **Key insight:** This pattern preserves user customizations while updating defaults. If a user explicitly chose `mod+1`, they keep it. If they were using the old default, they get the new one.
 
+`approve_plan_yolo` moved from `mod+y` to `mod+shift+alt+y` as a one-shot
+migration (`approve_plan_yolo_mod_y` in `applied_keybinding_migrations`). The
+first load rewrites a stored `mod+y` and records the id. A later save of
+`mod+y` is kept. Any other custom chord is left untouched. The repeating
+`MIGRATED_KEYBINDINGS` list is not used for this change, because a value on
+that list is rewritten on every load.
+
 ## Persistence
 
 Keybindings are stored in `preferences.json` via the Rust backend:
@@ -386,6 +399,45 @@ fn default_keybindings() -> std::collections::HashMap<String, String> {
 5. **Support migration**: Add to `MIGRATED_KEYBINDINGS` when changing defaults
 6. **Use `mod` prefix**: Allows cross-platform compatibility
 7. **Provide feedback**: Use notifications or UI changes to confirm execution
+
+## Close-confirmation bypass modifier
+
+Holding a modifier while closing a session or worktree skips the
+`CloseWorktreeDialog` confirmation. The modifier is the client-only preference
+`close_confirm_bypass_modifier` (`'shift' | 'alt' | 'none'`, default `'none'` —
+off, closing always confirms until opted out), configured in Settings → General
+→ Archive, directly under the "Confirm before closing" switch. It never changes
+what closing does — only whether the dialog appears first — so it is a second,
+narrower gate layered on `confirm_session_close`.
+
+Any stored value is coerced to a known member by
+`resolveCloseConfirmBypassModifier` in `src/lib/confirm-bypass.ts` — the single
+validation point. Both `hasCloseConfirmBypassModifier` and
+`closeConfirmBypassLabel` route through it, and `normalize()` in
+`src/lib/client-preferences.ts` coerces on every round-trip, so a hand-edited
+localStorage entry or a web-access client cannot store an unknown value (a bad
+value falls back to the default and renders no empty-label hint).
+
+Mouse surfaces (tab X, middle-clicks) read the modifier straight off the
+`MouseEvent` via `hasCloseConfirmBypassModifier` in `src/lib/confirm-bypass.ts`.
+
+The keyboard path (Cmd/Ctrl+W) needs extra care: `eventToShortcutString`
+serializes a held Shift into a different string (`mod+shift+w`), which is not the
+`mod+w` binding and would otherwise be a dead key. `resolveShortcutWithBypass` in
+`src/hooks/useMainWindowEventListeners.ts` does a strip-and-retry: if the raw
+shortcut matches nothing, it strips the configured modifier and retries, and
+**accepts the retry only when it resolves to `close_session_or_worktree`**. A
+general strip-and-retry would let a held modifier shadow unrelated bindings. The
+bypass flag then rides in the `close-session-or-worktree` CustomEvent detail,
+read through `readCloseBypassDetail` by the three listeners (global fallback,
+canvas, session modal).
+
+When a side or modal terminal is focused, the shortcut is remapped to close the
+active terminal tab (keyed off the resolved action, not the raw string), so the
+bypass is a no-op there by design — terminal tabs have no confirmation dialog.
+`'mod'` is deliberately not an option: `Cmd/Ctrl+W` already serializes to the
+bound `mod+w`, so the strip-and-retry would never run and the keyboard path could
+not honor it.
 
 ## Shift+Enter in the embedded terminal
 

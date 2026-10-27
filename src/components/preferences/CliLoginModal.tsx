@@ -11,8 +11,10 @@ import { toast } from 'sonner'
 import { invoke, listen } from '@/lib/transport'
 import { useQueryClient } from '@tanstack/react-query'
 import { logger } from '@/lib/logger'
+import { updateTargetLabel } from '@/lib/environment'
 import { claudeCliQueryKeys } from '@/services/claude-cli'
 import { ghCliQueryKeys } from '@/services/gh-cli'
+import { glabCliQueryKeys } from '@/services/glab-cli'
 import { codexCliQueryKeys } from '@/services/codex-cli'
 import { opencodeCliQueryKeys } from '@/services/opencode-cli'
 import { cursorCliQueryKeys } from '@/services/cursor-cli'
@@ -20,7 +22,9 @@ import { piCliQueryKeys } from '@/services/pi-cli'
 import { commandcodeCliQueryKeys } from '@/services/commandcode-cli'
 import { grokCliQueryKeys } from '@/services/grok-cli'
 import { kimiCliQueryKeys } from '@/services/kimi-cli'
+import { devinCliQueryKeys } from '@/services/devin-cli'
 import { antigravityCliQueryKeys } from '@/services/antigravity-cli'
+import { museCliQueryKeys } from '@/services/muse-cli'
 import { coderabbitCliQueryKeys } from '@/services/coderabbit-cli'
 import { githubQueryKeys } from '@/services/github'
 import {
@@ -30,7 +34,11 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { useUIStore, type McpLoginContext } from '@/store/ui-store'
+import {
+  useUIStore,
+  type CliLoginModalType,
+  type McpLoginContext,
+} from '@/store/ui-store'
 import { refreshMcpLoginHealth } from '@/services/mcp-auth'
 import { serverResourceKey } from '@/lib/server-resource'
 import { useShallow } from 'zustand/react/shallow'
@@ -80,19 +88,7 @@ export function CliLoginModal() {
 }
 
 interface CliLoginModalContentProps {
-  cliType:
-    | 'claude'
-    | 'gh'
-    | 'codex'
-    | 'opencode'
-    | 'cursor'
-    | 'pi'
-    | 'commandcode'
-    | 'grok'
-    | 'kimi'
-    | 'antigravity'
-    | 'coderabbit'
-    | null
+  cliType: CliLoginModalType
   command: string
   commandArgs: string[] | null
   action: 'login' | 'update' | 'install'
@@ -126,27 +122,35 @@ function CliLoginModalContent({
   }, [minimized])
 
   const cliName =
-    cliType === 'claude'
-      ? 'Claude CLI'
-      : cliType === 'codex'
-        ? 'Codex CLI'
-        : cliType === 'coderabbit'
-          ? 'CodeRabbit CLI'
-          : cliType === 'opencode'
-            ? 'OpenCode CLI'
-            : cliType === 'cursor'
-              ? 'Cursor CLI'
-              : cliType === 'pi'
-                ? 'PI CLI'
-                : cliType === 'commandcode'
-                  ? 'Command Code CLI'
-                  : cliType === 'grok'
-                    ? 'Grok CLI'
-                    : cliType === 'kimi'
-                      ? 'Kimi Code'
-                      : cliType === 'antigravity'
-                        ? 'Antigravity CLI'
-                        : 'GitHub CLI'
+    cliType === 'cliproxyapi'
+      ? 'CLIProxyAPI'
+      : cliType === 'claude'
+        ? 'Claude CLI'
+        : cliType === 'codex'
+          ? 'Codex CLI'
+          : cliType === 'coderabbit'
+            ? 'CodeRabbit CLI'
+            : cliType === 'opencode'
+              ? 'OpenCode CLI'
+              : cliType === 'cursor'
+                ? 'Cursor CLI'
+                : cliType === 'pi'
+                  ? 'PI CLI'
+                  : cliType === 'commandcode'
+                    ? 'Command Code CLI'
+                    : cliType === 'grok'
+                      ? 'Grok CLI'
+                      : cliType === 'kimi'
+                        ? 'Kimi Code'
+                        : cliType === 'devin'
+                          ? 'Devin CLI'
+                          : cliType === 'antigravity'
+                            ? 'Antigravity CLI'
+                            : cliType === 'muse'
+                              ? 'Muse CLI'
+                              : cliType === 'glab'
+                                ? 'GitLab CLI'
+                                : 'GitHub CLI'
   const cliTitle =
     cliType === 'cursor' ||
     cliType === 'pi' ||
@@ -156,11 +160,16 @@ function CliLoginModalContent({
         <BackendLabel backend={cliType} />
         <span>CLI</span>
       </span>
-    ) : cliType === 'kimi' || cliType === 'antigravity' ? (
+    ) : cliType === 'kimi' ||
+      cliType === 'devin' ||
+      cliType === 'antigravity' ||
+      cliType === 'muse' ? (
       <BackendLabel backend={cliType} />
     ) : (
       cliName
     )
+
+  const target = updateTargetLabel(mcpContext?.serverId)
 
   // Generate unique terminal ID for this login session
   const [terminalId] = useState(() => {
@@ -228,6 +237,9 @@ function CliLoginModalContent({
         } else if (cliType === 'gh') {
           queryClient.invalidateQueries({ queryKey: ghCliQueryKeys.all })
           queryClient.invalidateQueries({ queryKey: githubQueryKeys.all })
+        } else if (cliType === 'glab') {
+          queryClient.invalidateQueries({ queryKey: glabCliQueryKeys.all })
+          queryClient.invalidateQueries({ queryKey: githubQueryKeys.all })
         } else if (cliType === 'codex') {
           queryClient.invalidateQueries({ queryKey: codexCliQueryKeys.all })
         } else if (cliType === 'opencode') {
@@ -244,10 +256,14 @@ function CliLoginModalContent({
           queryClient.invalidateQueries({ queryKey: grokCliQueryKeys.all })
         } else if (cliType === 'kimi') {
           queryClient.invalidateQueries({ queryKey: kimiCliQueryKeys.all })
+        } else if (cliType === 'devin') {
+          queryClient.invalidateQueries({ queryKey: devinCliQueryKeys.all })
         } else if (cliType === 'antigravity') {
           queryClient.invalidateQueries({
             queryKey: antigravityCliQueryKeys.all,
           })
+        } else if (cliType === 'muse') {
+          queryClient.invalidateQueries({ queryKey: museCliQueryKeys.all })
         } else if (cliType === 'coderabbit') {
           queryClient.invalidateQueries({
             queryKey: coderabbitCliQueryKeys.all,
@@ -283,7 +299,7 @@ function CliLoginModalContent({
         logger.debug(logBase + logOutput)
         if (minimizedRef.current) {
           toast.success(
-            `${cliName} ${action === 'install' ? 'installed' : 'updated'} successfully`
+            `${cliName} (${target}) ${action === 'install' ? 'installed' : 'updated'} successfully`
           )
           onLoginSuccessClose()
         } else {
@@ -293,7 +309,7 @@ function CliLoginModalContent({
         logger.error(logBase + logOutput)
         if (minimizedRef.current) {
           toast.error(
-            `Failed to ${action === 'install' ? 'install' : 'update'} ${cliName}`,
+            `Failed to ${action === 'install' ? 'install' : 'update'} ${cliName} (${target})`,
             {
               description: signal
                 ? `Process stopped by signal ${signal}`
@@ -310,17 +326,18 @@ function CliLoginModalContent({
       clearTimeout(closeTimeout)
       setOnStopped(terminalId, undefined)
     }
-  }, [terminalId, cliName, command, commandArgs, action])
+  }, [terminalId, cliName, target, command, commandArgs, action])
 
   const handleMinimize = useCallback(() => {
     if (!cliType) return
     useUIStore.getState().setMinimizedCliUpdate({
       type: cliType,
       name: cliName,
+      target,
       kind: 'terminal',
       progress: null,
     })
-  }, [cliType, cliName])
+  }, [cliType, cliName, target])
 
   return (
     <Dialog open={!minimized} onOpenChange={handleOpenChange}>
@@ -359,6 +376,14 @@ function CliLoginModalContent({
             the full return URL from your browser and paste it here when asked.
             If the browser cannot load the return page, you can still copy its
             URL.
+          </p>
+        )}
+
+        {cliType === 'cliproxyapi' && (
+          <p className="text-sm text-muted-foreground">
+            CLIProxyAPI opens the provider login and saves the account in its
+            own auth directory. Jean does not store this subscription login and
+            does not switch accounts.
           </p>
         )}
 

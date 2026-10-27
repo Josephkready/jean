@@ -10,6 +10,7 @@ describe('MinimizedCliUpdate', () => {
     useUIStore.getState().setMinimizedCliUpdate({
       type: 'codex',
       name: 'Codex CLI',
+      target: 'Remote: devbox',
       kind: 'reinstall',
       progress: 42,
     })
@@ -17,9 +18,10 @@ describe('MinimizedCliUpdate', () => {
     render(<MinimizedCliUpdate />)
 
     const indicator = screen.getByRole('button', {
-      name: 'Codex CLI update: 42%',
+      name: 'Codex CLI update (Remote: devbox): 42%',
     })
     expect(indicator).toHaveTextContent('Codex CLI')
+    expect(indicator).toHaveTextContent('Remote: devbox')
     expect(indicator).toHaveTextContent('42%')
 
     fireEvent.click(indicator)
@@ -30,6 +32,7 @@ describe('MinimizedCliUpdate', () => {
     useUIStore.getState().setMinimizedCliUpdate({
       type: 'gh',
       name: 'GitHub CLI',
+      target: 'Local',
       kind: 'terminal',
       progress: null,
     })
@@ -38,7 +41,7 @@ describe('MinimizedCliUpdate', () => {
 
     expect(
       screen.getByRole('button', {
-        name: 'GitHub CLI update: Updating',
+        name: 'GitHub CLI update (Local): Updating',
       })
     ).toHaveTextContent('Updating…')
   })

@@ -11,6 +11,7 @@ import {
   steerGrokTurn,
   steerOpencodeTurn,
   steerPiTurn,
+  steerClaudeTurn,
 } from '@/services/chat'
 import { skillQueryKeys } from '@/services/skills'
 import { buildMcpConfigJson } from '@/services/mcp'
@@ -43,6 +44,7 @@ import {
   useBackendAuthStatuses,
   useInstalledBackends,
 } from '@/hooks/useInstalledBackends'
+import { applySessionSettingToSession } from './session-setting-sync'
 import { CODEX_GOAL_TURN_PREFIX } from '../goal-utils'
 
 interface UseMessageSendingParams {
@@ -72,6 +74,7 @@ interface UseMessageSendingParams {
         opencode_auto_steer_enabled?: boolean
         pi_auto_steer_enabled?: boolean
         grok_auto_steer_enabled?: boolean
+        claude_auto_steer_enabled?: boolean
       }
     | undefined
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -86,6 +89,22 @@ interface UseMessageSendingParams {
   markAtBottom: () => void
   clearInputDraft: (sessionId: string) => void
   clearChatInputState: () => void
+}
+
+const PLAN_TURN_PROMPT =
+  'Explore the task and propose a plan. Do not implement changes. Wait for approval before writing code.'
+
+function rememberedImplementMode(sessionId: string): ExecutionMode {
+  const remembered = useChatStore.getState().permissionModes[sessionId]
+  if (
+    remembered === 'build' ||
+    remembered === 'yolo' ||
+    remembered === 'supervised' ||
+    remembered === 'auto'
+  ) {
+    return remembered
+  }
+  return 'build'
 }
 
 /** `/goal` arguments the Claude CLI treats as "clear". */
@@ -128,7 +147,11 @@ export function useMessageSending({
   // Installed backends for availability; auth map for login gate at send time.
   const { installedBackends, isLoading: backendsLoading } =
     useInstalledBackends()
-  const { authByBackend, isLoading: authLoading } = useBackendAuthStatuses()
+  const {
+    authByBackend,
+    refetchAuth,
+    isLoading: authLoading,
+  } = useBackendAuthStatuses()
 
   // Helper to resolve custom CLI profile name for the active provider.
   // Claude: custom_cli_profiles; Codex: custom_codex_providers (same wire field).
@@ -394,7 +417,9 @@ export function useMessageSending({
         !usingCustomProvider &&
         !backendsLoading &&
         !authLoading &&
-        !isBackendUsable(true, authByBackend[sendBackend])
+        !isBackendUsable(true, authByBackend[sendBackend]) &&
+        // Cached `false` may be stale — re-probe once before blocking.
+        !isBackendUsable(true, await refetchAuth(sendBackend))
       ) {
         handleCliAuthError(`${sendBackend} is not authenticated`, sendBackend)
         return
@@ -492,7 +517,60 @@ export function useMessageSending({
           executionModeRef.current = goalMode
         }
       }
-      if (!startedCodexGoalTurn && textMessage.startsWith('/')) {
+      let handledWorkflowCommand = false
+      const workflowMatch = textMessage.match(
+        /^\/(plan|build)(?:\s+([\s\S]*))?$/
+      )
+      if (workflowMatch) {
+        const command = workflowMatch[1]
+        const arg = (workflowMatch[2] ?? '').trim()
+        const hasAttachments =
+          images.length > 0 ||
+          files.length > 0 ||
+          textFiles.length > 0 ||
+          skills.length > 0
+        const nextMode: ExecutionMode =
+          command === 'plan' ? 'plan' : rememberedImplementMode(activeSessionId)
+        setExecutionMode(activeSessionId, nextMode)
+        executionModeRef.current = nextMode
+        queryClient.setQueryData(
+          chatQueryKeys.session(activeSessionId),
+          (old: Session | null | undefined) =>
+            old
+              ? applySessionSettingToSession(old, 'executionMode', nextMode)
+              : old
+        )
+        void invoke('broadcast_session_setting', {
+          sessionId: activeSessionId,
+          key: 'executionMode',
+          value: nextMode,
+        }).catch(() => undefined)
+        void invoke('update_session_state', {
+          worktreeId: activeWorktreeId,
+          worktreePath: activeWorktreePath,
+          sessionId: activeSessionId,
+          selectedExecutionMode: nextMode,
+          selectedPermissionMode:
+            useChatStore.getState().permissionModes[activeSessionId],
+        }).catch(() => undefined)
+
+        if (command === 'build' && !arg && !hasAttachments) {
+          clearInputDraft(activeSessionId)
+          clearChatInputState()
+          toast.message('Left Plan mode')
+          return
+        }
+
+        message =
+          arg ||
+          (command === 'plan' ? PLAN_TURN_PROMPT : 'Continue implementing.')
+        handledWorkflowCommand = true
+      }
+      if (
+        !startedCodexGoalTurn &&
+        !handledWorkflowCommand &&
+        textMessage.startsWith('/')
+      ) {
         const slashName = textMessage.slice(1).split(/\s/)[0] ?? ''
         const params = textMessage.slice(1 + slashName.length).trim()
         const claudeSkills =
@@ -580,7 +658,8 @@ export function useMessageSending({
         selectedBackend === 'pi' ||
         selectedBackend === 'grok' ||
         selectedBackend === 'kimi' ||
-        selectedBackend === 'antigravity'
+        selectedBackend === 'antigravity' ||
+        selectedBackend === 'muse'
       const queuedMessage: QueuedMessage = {
         id: generateId(),
         message,
@@ -623,7 +702,7 @@ export function useMessageSending({
         // Auto-steer: inject the prompt into a steer-capable running turn
         // instead of queueing. All attachment kinds (file @-mentions, skills,
         // pasted images, pasted text files) serialize to path refs via
-        // buildMessageWithRefs, so text-only steer backends (Grok/Pi/OpenCode)
+        // buildMessageWithRefs, so text-only steer backends (Grok/Pi/OpenCode/Claude)
         // can carry them. Codex additionally gets structured attachment input.
         // Steer failures (turn ended / not started yet) fall back to queue.
         const hasAttachments =
@@ -633,7 +712,7 @@ export function useMessageSending({
           skills.length > 0
         const backend = selectedBackendRef.current
         if (
-          isSteerCapableBackend(backend) &&
+          isSteerCapableBackend(backend, preferences) &&
           (options?.forceSteer ||
             isBackendAutoSteerEnabled(backend, preferences))
         ) {
@@ -641,6 +720,12 @@ export function useMessageSending({
             const steerMessage = buildMessageWithRefs(queuedMessage)
             if (backend === 'pi') {
               await steerPiTurn(activeWorktreeId, activeSessionId, steerMessage)
+            } else if (backend === 'claude') {
+              await steerClaudeTurn(
+                activeWorktreeId,
+                activeSessionId,
+                steerMessage
+              )
             } else if (backend === 'grok') {
               await steerGrokTurn(
                 activeWorktreeId,
@@ -706,6 +791,7 @@ export function useMessageSending({
       markAtBottom,
       preferences,
       queryClient,
+      refetchAuth,
       sendMessageNow,
     ]
   )

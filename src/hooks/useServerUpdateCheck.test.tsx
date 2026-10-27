@@ -12,6 +12,7 @@ vi.mock('@/lib/transport', () => ({
 
 vi.mock('@/lib/environment', () => ({
   isLocalBackend: () => isLocalBackendMock(),
+  updateTargetLabel: () => 'Remote: devbox',
 }))
 
 vi.mock('sonner', () => ({

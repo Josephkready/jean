@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { invoke } from '@/lib/transport'
-import { isLocalBackend } from '@/lib/environment'
+import { isLocalBackend, updateTargetLabel } from '@/lib/environment'
 import { logger } from '@/lib/logger'
 import { useUIStore } from '@/store/ui-store'
 
@@ -59,7 +59,9 @@ function normalizeStatus(raw: Record<string, unknown>): ServerUpdateStatus {
 
 /** Apply a pending host update (title bar, modal, or toast action). */
 export async function applyServerUpdate(version: string): Promise<void> {
-  const toastId = toast.loading(`Installing update ${version}...`)
+  const toastId = toast.loading(
+    `Installing update ${version} (${updateTargetLabel()})...`
+  )
   try {
     const result = await invoke<ServerUpdateApplyResult>('apply_server_update')
     // Clear sticky indicators once install succeeded / already latest.
@@ -121,9 +123,10 @@ export function useServerUpdateCheck() {
     // pendingServerUpdate — the header badge remains.
     if (toastShownForVersionRef.current === version) return
     toastShownForVersionRef.current = version
+    const title = `jean-server ${version} is available (${updateTargetLabel()})`
 
     if (!status.canUpdate) {
-      toast.info(`jean-server ${version} is available`, {
+      toast.info(title, {
         id: 'server-update-available',
         description:
           status.reason ||
@@ -133,7 +136,7 @@ export function useServerUpdateCheck() {
       return
     }
 
-    toast.info(`jean-server ${version} is available`, {
+    toast.info(title, {
       id: 'server-update-available',
       description: `You are on ${status.currentVersion}. A permanent control stays in the title bar if you dismiss this.`,
       duration: 12_000,

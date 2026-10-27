@@ -3,6 +3,7 @@ import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@/test/test-utils'
 import { CompactMessageList } from './CompactMessageList'
+import { formatLocalTime } from './time-utils'
 import type {
   ChatMessage,
   Question,
@@ -148,6 +149,78 @@ describe('CompactMessageList', () => {
     expect(screen.getByText('package.json')).toBeVisible()
   })
 
+  it('keeps the activity-row receive time hidden until the row is hovered', () => {
+    const sentAt = 1_700_000_000
+    const receivedAt = sentAt + 4
+    renderCompact([
+      message('user-1', 'user', sentAt, 'check status'),
+      message('assistant-1', 'assistant', receivedAt, '', {
+        tool_calls: [
+          {
+            id: 'tool-1',
+            name: 'Bash',
+            input: { command: 'rtk git status --short' },
+            output: 'clean',
+          },
+        ],
+        content_blocks: [{ type: 'tool_use', tool_call_id: 'tool-1' }],
+      }),
+    ])
+
+    const receiveTime = screen.getByText(
+      (_, element) =>
+        element?.textContent === ` · ${formatLocalTime(receivedAt)}`
+    )
+
+    expect(receiveTime).toHaveClass(
+      'opacity-0',
+      '[@media(pointer:fine)]:group-hover/message:opacity-100'
+    )
+    expect(receiveTime.closest('[class~="group/message"]')).not.toBeNull()
+    expect(screen.getByText('4s').parentElement).toContainElement(receiveTime)
+  })
+
+  it('keeps a question reply receive time hidden until that message is hovered', () => {
+    const sentAt = 1_700_000_000
+    const receivedAt = sentAt + 4
+    renderCompact([
+      message('user-1', 'user', sentAt, 'ask me'),
+      message('assistant-1', 'assistant', receivedAt, '', {
+        tool_calls: [
+          {
+            id: 'question-1',
+            name: 'question',
+            input: {
+              questions: [
+                {
+                  header: 'Bird Type',
+                  question: 'What is your favorite type of bird?',
+                  multiple: false,
+                  options: [
+                    { label: 'Raptors', description: 'Eagles, hawks, falcons' },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        content_blocks: [{ type: 'tool_use', tool_call_id: 'question-1' }],
+      }),
+    ])
+
+    const receiveTime = screen.getByText(
+      (_, element) =>
+        element?.textContent === ` · ${formatLocalTime(receivedAt)}`
+    )
+
+    expect(
+      screen.getByText('What is your favorite type of bird?')
+    ).toBeVisible()
+    expect(receiveTime).toHaveClass('opacity-0')
+    expect(receiveTime.closest('[class~="group/message"]')).not.toBeNull()
+    expect(screen.getByText('4s').parentElement).toContainElement(receiveTime)
+  })
+
   it('renders cancelled marker outside the compact activity card', () => {
     renderCompact([
       message('user-1', 'user', 100, 'check status'),
@@ -267,6 +340,42 @@ describe('CompactMessageList', () => {
     expect(screen.queryByText('Polling VM.')).not.toBeInTheDocument()
   })
 
+  it('shows only assistant prose when tool activity is hidden', () => {
+    renderCompact(
+      [
+        message('user-1', 'user', 100, 'check status'),
+        message('assistant-1', 'assistant', 104, '', {
+          tool_calls: [
+            {
+              id: 'tool-1',
+              name: 'Bash',
+              input: { command: 'git status --short' },
+              output: 'clean',
+            },
+          ],
+          content_blocks: [
+            { type: 'text', text: 'Checking the repo.' },
+            { type: 'tool_use', tool_call_id: 'tool-1' },
+            { type: 'text', text: 'The tree is clean.' },
+          ],
+        }),
+        message('user-2', 'user', 200, 'again'),
+        message('assistant-2', 'assistant', 204, '', {
+          tool_calls: [
+            { id: 'tool-2', name: 'Bash', input: {}, output: 'clean' },
+          ],
+          content_blocks: [{ type: 'tool_use', tool_call_id: 'tool-2' }],
+        }),
+      ],
+      { hideToolActivity: true }
+    )
+
+    expect(screen.getByText('Checking the repo.')).toBeVisible()
+    expect(screen.getByText('The tree is clean.')).toBeVisible()
+    expect(screen.queryByText('Bash')).not.toBeInTheDocument()
+    expect(screen.queryByText(/\d+ steps?/)).not.toBeInTheDocument()
+  })
+
   it('keeps pre-tool assistant prose in its timeline position after reload', () => {
     renderCompact([
       message('user-1', 'user', 100, 'fix the terminal'),
@@ -350,6 +459,61 @@ describe('CompactMessageList', () => {
       recapHeading.compareDocumentPosition(editedFiles) &
         Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
+  })
+
+  it('shows options of a question in the recap as buttons', () => {
+    const onSendAnswer = vi.fn()
+    const text =
+      'I read the code.\n\n## Recap\n\nWhich mode do you want?\n\nReply with a number:\n\n1. Grid\n2. List'
+    const messages = [
+      message('user-1', 'user', 100, 'add modes'),
+      message('assistant-1', 'assistant', 104, text, {
+        tool_calls: [{ id: 'tool-1', name: 'Read', input: { path: 'a.ts' } }],
+        content_blocks: [
+          { type: 'tool_use', tool_call_id: 'tool-1' },
+          { type: 'text', text },
+        ],
+      }),
+    ]
+    const { rerender } = renderCompact(messages, { onSendAnswer })
+
+    const question = screen.getByText('Which mode do you want?')
+    const option = screen.getByRole('button', { name: /^2\.\s?List$/ })
+    expect(screen.queryByText('Reply with a number:')).not.toBeInTheDocument()
+    expect(
+      question.compareDocumentPosition(option) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /^2\.\s?List$/ }))
+    expect(onSendAnswer).toHaveBeenCalledWith('2. List')
+
+    const answered = [...messages, message('user-2', 'user', 110, '2. List')]
+    rerender(
+      <CompactMessageList
+        messages={answered}
+        scrollContainerRef={createRef<HTMLDivElement>()}
+        totalMessages={answered.length}
+        lastPlanMessageIndex={-1}
+        sessionId="session-1"
+        worktreePath="/tmp/worktree"
+        approveShortcut="Cmd+Enter"
+        isSending={false}
+        onPlanApproval={vi.fn()}
+        onQuestionAnswer={noopQuestionAnswer}
+        onQuestionSkip={vi.fn()}
+        onFileClick={vi.fn()}
+        onFixFinding={noopFixFinding}
+        onFixAllFindings={noopFixAllFindings}
+        isQuestionAnswered={vi.fn(() => false)}
+        getSubmittedAnswers={vi.fn(() => undefined)}
+        areQuestionsSkipped={vi.fn(() => false)}
+        isFindingFixed={vi.fn(() => false)}
+        onSendAnswer={onSendAnswer}
+      />
+    )
+    expect(
+      screen.queryByRole('button', { name: /^1\.\s?Grid$/ })
+    ).not.toBeInTheDocument()
   })
 
   it('shows edited files after surfaced latest text when recap is absent', () => {

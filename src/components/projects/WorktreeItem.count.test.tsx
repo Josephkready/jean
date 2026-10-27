@@ -26,9 +26,11 @@ vi.mock('@/services/git-status', () => ({
 }))
 vi.mock('@/services/chat', () => ({
   useSessions: () => ({ data: { sessions: mocks.sessions } }),
+  useRenameSession: () => ({ mutate: vi.fn() }),
 }))
 vi.mock('@/services/projects', () => ({
   useRenameWorktree: () => ({ mutate: vi.fn() }),
+  useWorktrees: () => ({ data: [] }),
 }))
 vi.mock('@/components/chat/hooks/useCanvasStoreState', () => ({
   useCanvasStoreState: () => ({}),

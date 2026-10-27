@@ -39,7 +39,9 @@ import { useAvailablePiModels } from '@/services/pi-cli'
 import { useAvailableCommandCodeModels } from '@/services/commandcode-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
 import { useAvailableKimiModels } from '@/services/kimi-cli'
+import { useAvailableDevinModels } from '@/services/devin-cli'
 import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
+import { useAvailableMuseModels } from '@/services/muse-cli'
 import {
   getCatalogModelFastInfo,
   useModelCatalog,
@@ -179,8 +181,14 @@ export function BackendModelPickerContent({
   const { data: availableKimiModels } = useAvailableKimiModels({
     enabled: installedBackends.includes('kimi'),
   })
+  const { data: availableDevinModels } = useAvailableDevinModels({
+    enabled: installedBackends.includes('devin'),
+  })
   const { data: availableAntigravityModels } = useAvailableAntigravityModels({
     enabled: installedBackends.includes('antigravity'),
+  })
+  const { data: availableMuseModels } = useAvailableMuseModels({
+    enabled: installedBackends.includes('muse'),
   })
 
   const opencodeModelOptions = useMemo(() => {
@@ -233,6 +241,14 @@ export function BackendModelPickerContent({
       })),
     [availableKimiModels]
   )
+  const devinModelOptions = useMemo(
+    () =>
+      availableDevinModels?.map(model => ({
+        value: `devin/${model.id}`,
+        label: model.label,
+      })),
+    [availableDevinModels]
+  )
   const antigravityModelOptions = useMemo(
     () =>
       availableAntigravityModels?.map(model => ({
@@ -240,6 +256,14 @@ export function BackendModelPickerContent({
         label: model.label,
       })),
     [availableAntigravityModels]
+  )
+  const museModelOptions = useMemo(
+    () =>
+      availableMuseModels?.map(model => ({
+        value: model.id,
+        label: model.label,
+      })),
+    [availableMuseModels]
   )
 
   const { backendModelSections: baseBackendModelSections } =
@@ -253,6 +277,8 @@ export function BackendModelPickerContent({
       commandcodeModelOptions,
       grokModelOptions,
       kimiModelOptions,
+      museModelOptions,
+      devinModelOptions,
       customCliProfiles,
       installedBackends,
     })
@@ -707,9 +733,11 @@ export function BackendModelPickerContent({
                 >
                   <div className="min-w-0 flex-1">
                     <div className="truncate">{option.label}</div>
-                    <div className="truncate text-xs text-muted-foreground">
-                      {option.value}
-                    </div>
+                    {option.value !== defaultModelOption?.value && (
+                      <div className="truncate text-xs text-muted-foreground">
+                        {option.value}
+                      </div>
+                    )}
                   </div>
                   <div
                     className="ml-2 grid shrink-0 grid-cols-[5.75rem_1.5rem_1rem] items-center gap-2"

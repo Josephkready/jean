@@ -174,13 +174,16 @@ pub async fn dispatch_command(
             crate::set_window_vibrancy(app.clone(), enabled).await?;
             Ok(Value::Null)
         }
+        "get_native_client_id" => to_value(crate::get_native_client_id(app.clone()).await?),
         "load_ui_state" => {
-            let result = crate::load_ui_state(app.clone()).await?;
+            let client_id: String = field(&args, "clientId", "client_id")?;
+            let result = crate::load_ui_state(app.clone(), client_id).await?;
             to_value(result)
         }
         "save_ui_state" => {
             let ui_state = field(&args, "uiState", "ui_state")?;
-            crate::save_ui_state(app.clone(), ui_state).await?;
+            let client_id: String = field(&args, "clientId", "client_id")?;
+            crate::save_ui_state(app.clone(), client_id, ui_state).await?;
             Ok(Value::Null)
         }
         "get_pinned_recent_session_ids" => {
@@ -279,6 +282,7 @@ pub async fn dispatch_command(
             let advisory_context = field_opt(&args, "advisoryContext", "advisory_context")?;
             let linear_context = field_opt(&args, "linearContext", "linear_context")?;
             let sentry_context = field_opt(&args, "sentryContext", "sentry_context")?;
+            let discussion_context = field_opt(&args, "discussionContext", "discussion_context")?;
             let custom_name = field_opt(&args, "customName", "custom_name")?;
             let auto_open_in_jean = field_opt(&args, "autoOpenInJean", "auto_open_in_jean")?;
             let origin = field_opt(&args, "origin", "origin")?;
@@ -292,6 +296,7 @@ pub async fn dispatch_command(
                 advisory_context,
                 linear_context,
                 sentry_context,
+                discussion_context,
                 custom_name,
                 auto_open_in_jean,
                 origin,
@@ -328,6 +333,11 @@ pub async fn dispatch_command(
             let result = crate::projects::get_project_branches(app.clone(), project_id).await?;
             to_value(result)
         }
+        "list_worktree_branches" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let result = crate::projects::list_worktree_branches(app.clone(), project_id).await?;
+            to_value(result)
+        }
         "update_project_settings" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
             let name: Option<String> = from_field_opt(&args, "name")?;
@@ -354,6 +364,8 @@ pub async fn dispatch_command(
                 field_opt(&args, "sentryOrganizationSlug", "sentry_organization_slug")?;
             let sentry_project_slug: Option<String> =
                 field_opt(&args, "sentryProjectSlug", "sentry_project_slug")?;
+            let sentry_projects: Option<Vec<crate::projects::types::SentryProjectLink>> =
+                field_opt(&args, "sentryProjects", "sentry_projects")?;
             let linked_project_ids: Option<Vec<String>> =
                 field_opt(&args, "linkedProjectIds", "linked_project_ids")?;
             let auto_fix_settings: Option<Option<crate::projects::types::ProjectAutoFixSettings>> =
@@ -374,6 +386,7 @@ pub async fn dispatch_command(
                 sentry_auth_token,
                 sentry_organization_slug,
                 sentry_project_slug,
+                sentry_projects,
                 linked_project_ids,
                 auto_fix_settings,
             )
@@ -856,8 +869,10 @@ pub async fn dispatch_command(
         "get_github_issue" => {
             let project_path: String = field(&args, "projectPath", "project_path")?;
             let issue_number: u32 = field(&args, "issueNumber", "issue_number")?;
+            let repo: Option<String> = from_field_opt(&args, "repo")?;
             let result =
-                crate::projects::get_github_issue(app.clone(), project_path, issue_number).await?;
+                crate::projects::get_github_issue(app.clone(), project_path, issue_number, repo)
+                    .await?;
             to_value(result)
         }
         "list_github_prs" => {
@@ -869,8 +884,9 @@ pub async fn dispatch_command(
         "get_github_pr" => {
             let project_path: String = field(&args, "projectPath", "project_path")?;
             let pr_number: u32 = field(&args, "prNumber", "pr_number")?;
+            let repo: Option<String> = from_field_opt(&args, "repo")?;
             let result =
-                crate::projects::get_github_pr(app.clone(), project_path, pr_number).await?;
+                crate::projects::get_github_pr(app.clone(), project_path, pr_number, repo).await?;
             to_value(result)
         }
         "get_pr_review_comments" => {
@@ -1114,6 +1130,86 @@ pub async fn dispatch_command(
                 ghsa_id,
                 project_path,
                 worktree_id,
+            )
+            .await?;
+            to_value(result)
+        }
+
+        "list_github_discussions" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let state: Option<String> = from_field_opt(&args, "state")?;
+            let after: Option<String> = from_field_opt(&args, "after")?;
+            let result =
+                crate::projects::list_github_discussions(app.clone(), project_path, state, after)
+                    .await?;
+            to_value(result)
+        }
+        "search_github_discussions" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let query: String = from_field(&args, "query")?;
+            let result =
+                crate::projects::search_github_discussions(app.clone(), project_path, query)
+                    .await?;
+            to_value(result)
+        }
+        "get_github_discussion" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let result = crate::projects::get_github_discussion(
+                app.clone(),
+                project_path,
+                discussion_number,
+            )
+            .await?;
+            to_value(result)
+        }
+        "load_discussion_context" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let result = crate::projects::load_discussion_context(
+                app.clone(),
+                session_id,
+                discussion_number,
+                project_path,
+            )
+            .await?;
+            to_value(result)
+        }
+        "list_loaded_discussion_contexts" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let worktree_id: Option<String> = field_opt(&args, "worktreeId", "worktree_id")?;
+            let result = crate::projects::list_loaded_discussion_contexts(
+                app.clone(),
+                session_id,
+                worktree_id,
+            )
+            .await?;
+            to_value(result)
+        }
+        "remove_discussion_context" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            crate::projects::remove_discussion_context(
+                app.clone(),
+                session_id,
+                discussion_number,
+                project_path,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["contexts"]);
+            Ok(Value::Null)
+        }
+        "get_discussion_context_content" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let discussion_number: u32 = field(&args, "discussionNumber", "discussion_number")?;
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let result = crate::projects::get_discussion_context_content(
+                app.clone(),
+                session_id,
+                discussion_number,
+                project_path,
             )
             .await?;
             to_value(result)
@@ -1907,6 +2003,11 @@ pub async fn dispatch_command(
             let path: String = from_field(&args, "path")?;
             let result = crate::projects::import_worktree(app.clone(), project_id, path).await?;
             emit_cache_invalidation(app, &["projects"]);
+            to_value(result)
+        }
+        "list_unmanaged_worktrees" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let result = crate::projects::list_unmanaged_worktrees(app.clone(), project_id).await?;
             to_value(result)
         }
         "permanently_delete_worktree" => {
@@ -2765,6 +2866,42 @@ pub async fn dispatch_command(
             crate::grok_cli::login_grok_cli_device(app.clone()).await?;
             Ok(Value::Null)
         }
+        "check_devin_cli_installed" => {
+            to_value(crate::devin_cli::check_devin_cli_installed(app.clone()).await?)
+        }
+        "detect_devin_in_path" => {
+            to_value(crate::devin_cli::detect_devin_in_path(app.clone()).await?)
+        }
+        "check_devin_cli_auth" => {
+            to_value(crate::devin_cli::check_devin_cli_auth(app.clone()).await?)
+        }
+        "list_devin_models" => to_value(crate::devin_cli::list_devin_models(app.clone()).await?),
+        "get_available_devin_versions" => {
+            to_value(crate::devin_cli::get_available_devin_versions(app.clone()).await?)
+        }
+        "check_devin_cli_version_exists" => {
+            let version: String = from_field(&args, "version")?;
+            to_value(crate::devin_cli::check_devin_cli_version_exists(app.clone(), version).await?)
+        }
+        "get_devin_cli_binary_path" => {
+            to_value(crate::devin_cli::get_devin_cli_binary_path(app.clone()).await?)
+        }
+        "get_devin_install_command" => {
+            to_value(crate::devin_cli::get_devin_install_command(app.clone()).await?)
+        }
+        "install_devin_cli" => {
+            let version: Option<String> = from_field_opt(&args, "version")?;
+            crate::devin_cli::install_devin_cli(app.clone(), version).await?;
+            Ok(Value::Null)
+        }
+        "uninstall_devin_cli" => {
+            crate::devin_cli::uninstall_devin_cli(app.clone()).await?;
+            Ok(Value::Null)
+        }
+        "update_devin_cli" => {
+            crate::devin_cli::update_devin_cli(app.clone()).await?;
+            Ok(Value::Null)
+        }
         "check_kimi_cli_installed" => {
             to_value(crate::kimi_cli::check_kimi_cli_installed(app.clone()).await?)
         }
@@ -2940,6 +3077,37 @@ pub async fn dispatch_command(
         }
         "uninstall_gh_cli" => {
             crate::gh_cli::uninstall_gh_cli(app.clone()).await?;
+            Ok(Value::Null)
+        }
+        "check_glab_cli_installed" => {
+            let result = crate::glab_cli::check_glab_cli_installed(app.clone()).await?;
+            to_value(result)
+        }
+        "detect_glab_in_path" => {
+            let result = crate::glab_cli::detect_glab_in_path(app.clone()).await?;
+            to_value(result)
+        }
+        "check_glab_cli_auth" => {
+            let hostname: Option<String> = field_opt(&args, "hostname", "host")?;
+            let result = crate::glab_cli::check_glab_cli_auth(app.clone(), hostname).await?;
+            to_value(result)
+        }
+        "get_available_glab_versions" => {
+            let result = crate::glab_cli::get_available_glab_versions(app.clone()).await?;
+            to_value(result)
+        }
+        "check_glab_cli_version_exists" => {
+            let version: String = from_field(&args, "version")?;
+            let result = crate::glab_cli::check_glab_cli_version_exists(version).await?;
+            to_value(result)
+        }
+        "install_glab_cli" => {
+            let version: Option<String> = from_field_opt(&args, "version")?;
+            crate::glab_cli::install_glab_cli(app.clone(), version).await?;
+            Ok(Value::Null)
+        }
+        "uninstall_glab_cli" => {
+            crate::glab_cli::uninstall_glab_cli(app.clone()).await?;
             Ok(Value::Null)
         }
 
@@ -3328,6 +3496,13 @@ pub async fn dispatch_command(
             crate::chat::steer_pi_turn(app.clone(), worktree_id, session_id, message).await?;
             Ok(Value::Null)
         }
+        "steer_claude_turn" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let message: String = from_field(&args, "message")?;
+            crate::chat::steer_claude_turn(app.clone(), worktree_id, session_id, message).await?;
+            Ok(Value::Null)
+        }
         "steer_grok_turn" => {
             let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
             let session_id: String = field(&args, "sessionId", "session_id")?;
@@ -3461,6 +3636,40 @@ pub async fn dispatch_command(
             )
             .await?;
             emit_cache_invalidation(app, &["sessions"]);
+            Ok(Value::Null)
+        }
+        "set_session_devin_config" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let config_id: String = field(&args, "configId", "config_id")?;
+            let value: String = from_field(&args, "value")?;
+            crate::chat::set_session_devin_config(
+                app.clone(),
+                worktree_id,
+                worktree_path,
+                session_id,
+                config_id,
+                value,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["session", "sessions"]);
+            Ok(Value::Null)
+        }
+        "set_session_devin_location" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let location = from_field(&args, "location")?;
+            crate::chat::set_session_devin_location(
+                app.clone(),
+                worktree_id,
+                worktree_path,
+                session_id,
+                location,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["session", "sessions"]);
             Ok(Value::Null)
         }
         "set_session_backend" => {
@@ -3715,6 +3924,11 @@ pub async fn dispatch_command(
             let result = crate::projects::get_jean_config(project_path).await;
             to_value(result)
         }
+        "get_git_provider" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let result = crate::projects::get_git_provider(project_path).await?;
+            to_value(result)
+        }
         "save_jean_config" => {
             let project_path: String = field(&args, "projectPath", "project_path")?;
             let config = from_field(&args, "config")?;
@@ -3763,11 +3977,30 @@ pub async fn dispatch_command(
             .await?;
             to_value(result)
         }
+        "list_github_issues_by_number" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let issue_number: u32 = field(&args, "issueNumber", "issue_number")?;
+            let result = crate::projects::list_github_issues_by_number(
+                app.clone(),
+                project_path,
+                issue_number,
+            )
+            .await?;
+            to_value(result)
+        }
         "get_github_pr_by_number" => {
             let project_path: String = field(&args, "projectPath", "project_path")?;
             let pr_number: u32 = field(&args, "prNumber", "pr_number")?;
             let result =
                 crate::projects::get_github_pr_by_number(app.clone(), project_path, pr_number)
+                    .await?;
+            to_value(result)
+        }
+        "list_github_prs_by_number" => {
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            let pr_number: u32 = field(&args, "prNumber", "pr_number")?;
+            let result =
+                crate::projects::list_github_prs_by_number(app.clone(), project_path, pr_number)
                     .await?;
             to_value(result)
         }
@@ -4017,13 +4250,38 @@ pub async fn dispatch_command(
         "install_opinionated_plugin" => {
             let plugin_name: String = from_field(&args, "pluginName")?;
             let result =
-                crate::opinionated::install_opinionated_plugin(app.clone(), plugin_name).await?;
+                crate::opinionated::install_opinionated_plugin(app.clone(), plugin_name.clone())
+                    .await?;
+            if plugin_name == "cliproxyapi" {
+                emit_cache_invalidation(app, &["preferences"]);
+            }
             to_value(result)
         }
         "uninstall_opinionated_plugin" => {
             let plugin_name: String = from_field(&args, "pluginName")?;
             let result =
-                crate::opinionated::uninstall_opinionated_plugin(app.clone(), plugin_name).await?;
+                crate::opinionated::uninstall_opinionated_plugin(app.clone(), plugin_name.clone())
+                    .await?;
+            if plugin_name == "cliproxyapi" {
+                emit_cache_invalidation(app, &["preferences"]);
+            }
+            to_value(result)
+        }
+        "start_opinionated_plugin" => {
+            let plugin_name: String = from_field(&args, "pluginName")?;
+            let result =
+                crate::opinionated::start_opinionated_plugin(app.clone(), plugin_name).await?;
+            to_value(result)
+        }
+        "stop_opinionated_plugin" => {
+            let plugin_name: String = from_field(&args, "pluginName")?;
+            let result =
+                crate::opinionated::stop_opinionated_plugin(app.clone(), plugin_name).await?;
+            to_value(result)
+        }
+        "prepare_cliproxyapi_account_login" => {
+            let provider: String = from_field(&args, "provider")?;
+            let result = crate::opinionated::prepare_cliproxyapi_account_login(provider).await?;
             to_value(result)
         }
 
@@ -4033,6 +4291,52 @@ pub async fn dispatch_command(
         // Agents: a separate (boxed) function keeps this function's stack frame small.
         agent_command if AGENT_COMMANDS.contains(&agent_command) => {
             Box::pin(dispatch_agents_command(app, agent_command, &args)).await
+        }
+        muse_command if MUSE_CLI_COMMANDS.contains(&muse_command) => {
+            Box::pin(dispatch_muse_cli_command(app, muse_command, &args)).await
+        }
+        _ => Err(format!("Unknown command: {command}")),
+    }
+}
+
+const MUSE_CLI_COMMANDS: &[&str] = &[
+    "check_muse_cli_installed",
+    "detect_muse_in_path",
+    "check_muse_cli_auth",
+    "list_muse_models",
+    "get_muse_install_command",
+    "install_muse_cli",
+    "uninstall_muse_cli",
+    "update_muse_cli",
+];
+
+async fn dispatch_muse_cli_command(
+    app: &AppHandle,
+    command: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    match command {
+        "check_muse_cli_installed" => {
+            to_value(crate::muse_cli::check_muse_cli_installed(app.clone()).await?)
+        }
+        "detect_muse_in_path" => to_value(crate::muse_cli::detect_muse_in_path(app.clone()).await?),
+        "check_muse_cli_auth" => to_value(crate::muse_cli::check_muse_cli_auth(app.clone()).await?),
+        "list_muse_models" => to_value(crate::muse_cli::list_muse_models(app.clone()).await?),
+        "get_muse_install_command" => {
+            to_value(crate::muse_cli::get_muse_install_command(app.clone()).await?)
+        }
+        "install_muse_cli" => {
+            let version: Option<String> = from_field_opt(args, "version")?;
+            crate::muse_cli::install_muse_cli(app.clone(), version).await?;
+            Ok(Value::Null)
+        }
+        "uninstall_muse_cli" => {
+            crate::muse_cli::uninstall_muse_cli(app.clone()).await?;
+            Ok(Value::Null)
+        }
+        "update_muse_cli" => {
+            crate::muse_cli::update_muse_cli(app.clone()).await?;
+            Ok(Value::Null)
         }
         _ => Err(format!("Unknown command: {command}")),
     }
@@ -4059,15 +4363,30 @@ const AGENT_COMMANDS: &[&str] = &[
     "list_agents",
     "get_agent_details",
     "create_agent",
+    "list_agent_templates",
+    "install_agent_template",
     "update_agent",
     "delete_agent",
     "decide_agent_approval",
     "cancel_agent_schedule",
+    "create_agent_schedule",
+    "update_agent_schedule",
     "save_agent_memory",
+    "search_agent_memory",
     "update_agent_memory",
     "delete_agent_memory",
+    "supersede_agent_memory",
     "export_agent_memory",
+    "save_agent_journal",
+    "search_agent_journal",
     "mark_agent_notifications_read",
+    // Subagent types. Own block so a later rebase can move these names.
+    "list_agent_subagent_types",
+    "save_agent_subagent_type",
+    "delete_agent_subagent_type",
+    "spawn_agent_subagent",
+    "revert_agent_change",
+    "get_agent_connector_catalog",
 ];
 
 /// Agent commands (see `crate::agents::commands`).
@@ -4093,13 +4412,35 @@ async fn dispatch_agents_command(
                 let description: Option<String> = from_field_opt(args, "description")?;
                 let icon: Option<String> = from_field_opt(args, "icon")?;
                 let role_prompt: Option<String> = field_opt(args, "rolePrompt", "role_prompt")?;
-                to_value(crate::agents::commands::create_agent(
-                    app,
-                    &name,
-                    description.as_deref().unwrap_or(""),
-                    icon.as_deref().unwrap_or("blue"),
-                    role_prompt.as_deref().unwrap_or(""),
-                )?)
+                let backend: Option<String> = from_field_opt(args, "backend")?;
+                let model: Option<String> = from_field_opt(args, "model")?;
+                let effort: Option<String> = from_field_opt(args, "effort")?;
+                let thinking_level: Option<String> =
+                    field_opt(args, "thinkingLevel", "thinking_level")?;
+                let skills: Option<Vec<crate::agents::db::AgentSkill>> =
+                    from_field_opt(args, "skills")?;
+                to_value(
+                    crate::agents::commands::create_agent(
+                        app,
+                        &name,
+                        description.as_deref().unwrap_or(""),
+                        icon.as_deref().unwrap_or("blue"),
+                        role_prompt.as_deref().unwrap_or(""),
+                        crate::agents::db::AgentRunConfig {
+                            backend,
+                            model,
+                            effort,
+                            thinking_level,
+                            skills: skills.unwrap_or_default(),
+                        },
+                    )
+                    .await?,
+                )
+            }
+            "list_agent_templates" => to_value(crate::agents::commands::list_agent_templates()?),
+            "install_agent_template" => {
+                let template_id: String = field(args, "templateId", "template_id")?;
+                to_value(crate::agents::commands::install_agent_template(app, &template_id).await?)
             }
             "update_agent" => {
                 let agent_id: String = field(args, "agentId", "agent_id")?;
@@ -4122,19 +4463,70 @@ async fn dispatch_agents_command(
                 crate::agents::commands::cancel_schedule(app, &agent_id, schedule_id)?;
                 Ok(Value::Null)
             }
+            "create_agent_schedule" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let input: crate::agents::commands::ScheduleCommandInput =
+                    serde_json::from_value(args.clone())
+                        .map_err(|e| format!("Invalid schedule: {e}"))?;
+                to_value(crate::agents::commands::create_schedule_for_agent(
+                    app, &agent_id, input,
+                )?)
+            }
+            "update_agent_schedule" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let schedule_id: i64 = field(args, "scheduleId", "schedule_id")?;
+                let patch: crate::agents::commands::ScheduleCommandPatch =
+                    serde_json::from_value(args.clone())
+                        .map_err(|e| format!("Invalid schedule: {e}"))?;
+                to_value(crate::agents::commands::update_schedule_for_agent(
+                    app,
+                    &agent_id,
+                    schedule_id,
+                    patch,
+                )?)
+            }
             "save_agent_memory" => {
                 let agent_id: String = field(args, "agentId", "agent_id")?;
                 let content: String = from_field(args, "content")?;
                 let kind: String = from_field(args, "kind")?;
+                let scope: Option<String> = from_field_opt(args, "scope")?;
                 let shared: Option<bool> = from_field_opt(args, "shared")?;
                 let pinned: Option<bool> = from_field_opt(args, "pinned")?;
+                let project_id: Option<String> = field_opt(args, "projectId", "project_id")?;
                 to_value(crate::agents::commands::save_memory(
                     app,
                     &agent_id,
                     &content,
                     &kind,
+                    scope.as_deref(),
                     shared.unwrap_or(false),
                     pinned.unwrap_or(false),
+                    project_id.as_deref(),
+                )?)
+            }
+            "search_agent_memory" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let query: Option<String> = from_field_opt(args, "query")?;
+                let kind: Option<String> = from_field_opt(args, "kind")?;
+                let scope: Option<String> = from_field_opt(args, "scope")?;
+                let project_id: Option<String> = field_opt(args, "projectId", "project_id")?;
+                let pinned: Option<bool> = from_field_opt(args, "pinned")?;
+                let from: Option<i64> = from_field_opt(args, "from")?;
+                let to: Option<i64> = from_field_opt(args, "to")?;
+                let limit: Option<i64> = from_field_opt(args, "limit")?;
+                to_value(crate::agents::commands::search_memory(
+                    app,
+                    &agent_id,
+                    crate::agents::commands::MemorySearchRequest {
+                        query,
+                        kind,
+                        scope,
+                        project_id,
+                        pinned,
+                        from,
+                        to,
+                        limit,
+                    },
                 )?)
             }
             "update_agent_memory" => {
@@ -4151,6 +4543,42 @@ async fn dispatch_agents_command(
                 crate::agents::commands::delete_memory(app, &agent_id, memory_id)?;
                 Ok(Value::Null)
             }
+            "supersede_agent_memory" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let memory_id: i64 = field(args, "memoryId", "memory_id")?;
+                let content: String = from_field(args, "content")?;
+                to_value(crate::agents::commands::supersede_memory(
+                    app, &agent_id, memory_id, &content,
+                )?)
+            }
+            "save_agent_journal" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let content: String = from_field(args, "content")?;
+                let occurred_at: Option<i64> = field_opt(args, "occurredAt", "occurred_at")?;
+                let project_id: Option<String> = field_opt(args, "projectId", "project_id")?;
+                to_value(crate::agents::commands::save_journal(
+                    app,
+                    &agent_id,
+                    &content,
+                    occurred_at,
+                    project_id.as_deref(),
+                )?)
+            }
+            "search_agent_journal" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let query: Option<String> = from_field_opt(args, "query")?;
+                let from: Option<i64> = from_field_opt(args, "from")?;
+                let to: Option<i64> = from_field_opt(args, "to")?;
+                let limit: Option<i64> = from_field_opt(args, "limit")?;
+                to_value(crate::agents::commands::search_journal(
+                    app,
+                    &agent_id,
+                    query.as_deref(),
+                    from,
+                    to,
+                    limit,
+                )?)
+            }
             "mark_agent_notifications_read" => {
                 let agent_id: String = field(args, "agentId", "agent_id")?;
                 crate::agents::commands::mark_notifications_read(app, &agent_id)?;
@@ -4160,6 +4588,42 @@ async fn dispatch_agents_command(
                 let agent_id: String = field(args, "agentId", "agent_id")?;
                 to_value(crate::agents::commands::export_memory(app, &agent_id)?)
             }
+            // Subagent types. Own arms so a later rebase can move this block.
+            "list_agent_subagent_types" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                to_value(crate::agents::with_db(app, |conn| {
+                    crate::agents::db::list_subagent_types(conn, &agent_id)
+                })?)
+            }
+            "save_agent_subagent_type" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let input: crate::agents::commands::SubagentTypeCommandInput =
+                    serde_json::from_value(args.clone())
+                        .map_err(|error| format!("Invalid subagent type: {error}"))?;
+                to_value(crate::agents::commands::save_subagent_type(
+                    app, &agent_id, input,
+                )?)
+            }
+            "delete_agent_subagent_type" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let id: i64 = field(args, "typeId", "type_id")?;
+                crate::agents::commands::delete_subagent_type(app, &agent_id, id)?;
+                Ok(Value::Null)
+            }
+            "spawn_agent_subagent" => {
+                let agent_id: String = field(args, "agentId", "agent_id")?;
+                let type_name: String = field(args, "typeName", "type_name")?;
+                let task: String = from_field(args, "task")?;
+                to_value(
+                    crate::agents::commands::spawn_subagent(app, &agent_id, &type_name, &task)
+                        .await?,
+                )
+            }
+            "revert_agent_change" => {
+                let change_id: i64 = field(args, "changeId", "change_id")?;
+                to_value(crate::agents::commands::revert_agent_change(app, change_id).await?)
+            }
+            "get_agent_connector_catalog" => to_value(crate::agents::connectors::catalog_payload()),
             _ => Err(format!("Unknown command: {command}")),
         }
     }

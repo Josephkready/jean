@@ -24,6 +24,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { useClaudeCliSetup } from '@/services/claude-cli'
 import { useGhCliSetup } from '@/services/gh-cli'
+import { useGlabCliSetup } from '@/services/glab-cli'
 import { useCodexCliSetup } from '@/services/codex-cli'
 import { useOpenCodeCliSetup } from '@/services/opencode-cli'
 import { usePiCliSetup } from '@/services/pi-cli'
@@ -31,7 +32,10 @@ import { useCodeRabbitCliSetup } from '@/services/coderabbit-cli'
 import { useCommandCodeCliSetup } from '@/services/commandcode-cli'
 import { useGrokCliSetup } from '@/services/grok-cli'
 import { useKimiCliSetup } from '@/services/kimi-cli'
+import { useDevinCliSetup } from '@/services/devin-cli'
 import { logger } from '@/lib/logger'
+import { updateTargetLabel } from '@/lib/environment'
+import { useOptionalSettingsTargetServerId } from '@/lib/settings-target'
 import { useUIStore } from '@/store/ui-store'
 import {
   SetupState,
@@ -102,6 +106,29 @@ function GhCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
     <CliReinstallModalUI
       setup={setup}
       cliType="gh"
+      open={open}
+      onOpenChange={onOpenChange}
+    />
+  )
+}
+
+/**
+ * GitLab CLI specific modal - calls ONLY useGlabCliSetup
+ * This ensures only one event listener is active
+ */
+export function GlabCliReinstallModal({ open, onOpenChange }: ModalProps) {
+  if (!open) return null
+  return (
+    <GlabCliReinstallModalContent open={open} onOpenChange={onOpenChange} />
+  )
+}
+
+function GlabCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
+  const setup = useGlabCliSetup()
+  return (
+    <CliReinstallModalUI
+      setup={setup}
+      cliType="glab"
       open={open}
       onOpenChange={onOpenChange}
     />
@@ -237,6 +264,25 @@ function KimiCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
   )
 }
 
+export function DevinCliReinstallModal({ open, onOpenChange }: ModalProps) {
+  if (!open) return null
+  return (
+    <DevinCliReinstallModalContent open={open} onOpenChange={onOpenChange} />
+  )
+}
+
+function DevinCliReinstallModalContent({ open, onOpenChange }: ModalProps) {
+  const setup = useDevinCliSetup()
+  return (
+    <CliReinstallModalUI
+      setup={setup}
+      cliType="devin"
+      open={open}
+      onOpenChange={onOpenChange}
+    />
+  )
+}
+
 export function CommandCodeCliReinstallModal({
   open,
   onOpenChange,
@@ -273,6 +319,7 @@ interface CliReinstallModalUIProps {
   cliType:
     | 'claude'
     | 'gh'
+    | 'glab'
     | 'codex'
     | 'opencode'
     | 'pi'
@@ -280,6 +327,7 @@ interface CliReinstallModalUIProps {
     | 'commandcode'
     | 'grok'
     | 'kimi'
+    | 'devin'
   open: boolean
   onOpenChange: (open: boolean) => void
 }
@@ -307,7 +355,12 @@ function CliReinstallModalUI({
                   ? 'Grok CLI'
                   : cliType === 'kimi'
                     ? 'Kimi Code CLI'
-                    : 'GitHub CLI'
+                    : cliType === 'devin'
+                      ? 'Devin CLI'
+                      : cliType === 'glab'
+                        ? 'GitLab CLI'
+                        : 'GitHub CLI'
+  const target = updateTargetLabel(useOptionalSettingsTargetServerId())
 
   // Store setup in ref for stable callback reference
   const setupRef = useRef(setup)
@@ -402,7 +455,7 @@ function CliReinstallModalUI({
         setupRef.current.refetchStatus()
         if (minimizedRef.current) {
           toast.success(
-            `${cliName} ${setupRef.current.status?.installed ? 'updated' : 'installed'} successfully`
+            `${cliName} (${target}) ${setupRef.current.status?.installed ? 'updated' : 'installed'} successfully`
           )
           onOpenChange(false)
         } else {
@@ -417,7 +470,7 @@ function CliReinstallModalUI({
         isInstallingRef.current = false
         if (minimizedRef.current) {
           toast.error(
-            `Failed to ${setupRef.current.status?.installed ? 'update' : 'install'} ${cliName}`,
+            `Failed to ${setupRef.current.status?.installed ? 'update' : 'install'} ${cliName} (${target})`,
             {
               description: error.message,
             }
@@ -429,16 +482,17 @@ function CliReinstallModalUI({
         }
       },
     })
-  }, [selectedVersion, cliType, cliName, onOpenChange])
+  }, [selectedVersion, cliType, cliName, target, onOpenChange])
 
   const handleMinimize = useCallback(() => {
     useUIStore.getState().setMinimizedCliUpdate({
       type: cliType,
       name: cliName,
+      target,
       kind: 'reinstall',
       progress: setup.progress?.percent ?? 0,
     })
-  }, [cliType, cliName, setup.progress?.percent])
+  }, [cliType, cliName, target, setup.progress?.percent])
 
   const handleComplete = useCallback(() => {
     onOpenChange(false)

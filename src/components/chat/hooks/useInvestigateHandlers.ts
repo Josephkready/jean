@@ -9,6 +9,7 @@ import { projectsQueryKeys } from '@/services/projects'
 import { buildMcpConfigJson } from '@/services/mcp'
 import { resolveBackend, supportsAdaptiveThinking } from '@/lib/model-utils'
 import { applyYoloInvestigationFixDirective } from '@/lib/investigation-prompt'
+import { routeCurrentSessionMagicPrompt } from '@/lib/magic-prompt-pty'
 import {
   DEFAULT_INVESTIGATE_ISSUE_PROMPT,
   DEFAULT_INVESTIGATE_PR_PROMPT,
@@ -440,6 +441,12 @@ export function useInvestigateHandlers({
       // and strip any anti-fix wording from the template/custom prompt.
       prompt = applyYoloInvestigationFixDirective(prompt, investigateMode)
 
+      // Native CLI sessions have no chat composer. The prompt is already
+      // rendered the same way; write it into the open PTY instead of sendMessage.
+      if (routeCurrentSessionMagicPrompt(activeSessionId, prompt) !== 'chat') {
+        return
+      }
+
       const {
         addSendingSession,
         setLastSentMessage,
@@ -495,6 +502,7 @@ export function useInvestigateHandlers({
         investigateBackend === 'grok' ||
         investigateBackend === 'kimi' ||
         investigateBackend === 'antigravity' ||
+        investigateBackend === 'muse' ||
         investigateUseAdaptive
       const investigateThinkingLevel = usesEffortBackend
         ? undefined
@@ -746,6 +754,7 @@ export function useInvestigateHandlers({
         investigateBackend === 'grok' ||
         investigateBackend === 'kimi' ||
         investigateBackend === 'antigravity' ||
+        investigateBackend === 'muse' ||
         investigateUseAdaptive
       const investigateThinkingLevel = usesEffortBackend
         ? undefined
@@ -908,20 +917,28 @@ export function useInvestigateHandlers({
   const handleReviewComments = useCallback(
     async (
       promptOrPrompts: string | string[],
-      options?: { executionMode?: ExecutionMode }
+      options?: {
+        executionMode?: ExecutionMode
+        override?: InvestigateOverride
+      }
     ) => {
       const worktreeId = activeWorktreeIdRef.current
       const worktreePath = activeWorktreePathRef.current
       if (!worktreeId || !worktreePath) return
 
+      const override = options?.override
       const reviewCommentsModel =
+        override?.model ??
         preferences?.magic_prompt_models?.review_comments_model ??
         selectedModelRef.current
-      const reviewCommentsProvider = resolveMagicPromptProvider(
-        preferences?.magic_prompt_providers,
-        'review_comments_provider',
-        preferences?.default_provider
-      )
+      const reviewCommentsProvider =
+        override?.backend && override.backend !== 'claude'
+          ? null
+          : resolveMagicPromptProvider(
+              preferences?.magic_prompt_providers,
+              'review_comments_provider',
+              preferences?.default_provider
+            )
       const { customProfileName: resolvedProfile } = resolveCustomProfile(
         reviewCommentsModel,
         reviewCommentsProvider
@@ -933,11 +950,13 @@ export function useInvestigateHandlers({
       const useAdaptive =
         !isCustom && supportsAdaptiveThinking(reviewCommentsModel, cliVersion)
       const reviewCommentsBackend =
+        override?.backend ??
         resolveMagicPromptBackend(
           preferences?.magic_prompt_backends,
           'review_comments_backend',
           defaultBackend
-        ) ?? resolveBackend(reviewCommentsModel)
+        ) ??
+        resolveBackend(reviewCommentsModel)
 
       const prompts = Array.isArray(promptOrPrompts)
         ? promptOrPrompts.filter(prompt => prompt.trim().length > 0)

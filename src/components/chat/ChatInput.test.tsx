@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { ChatInput } from './ChatInput'
 import { invoke } from '@/lib/transport'
 import type * as EnvironmentModule from '@/lib/environment'
+import type * as PreferencesModule from '@/services/preferences'
 import { useUIStore } from '@/store/ui-store'
 import {
   appendPromptMetadataToPlainText,
@@ -14,11 +15,13 @@ import {
 
 const processAttachmentFile = vi.fn()
 const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>
-const { mobileState, nativeState, slashPopoverMock } = vi.hoisted(() => ({
-  mobileState: { value: false },
-  nativeState: { value: false },
-  slashPopoverMock: vi.fn(() => null),
-}))
+const { mobileState, nativeState, slashPopoverMock, spellcheckEnabled } =
+  vi.hoisted(() => ({
+    mobileState: { value: false },
+    nativeState: { value: false },
+    slashPopoverMock: vi.fn(() => null),
+    spellcheckEnabled: { value: true },
+  }))
 
 const storeState = {
   inputDrafts: {} as Record<string, string>,
@@ -36,6 +39,16 @@ const storeState = {
 vi.mock('@/hooks/use-mobile', () => ({
   useIsMobile: () => mobileState.value,
 }))
+
+vi.mock('@/services/preferences', async importOriginal => {
+  const actual = await importOriginal<typeof PreferencesModule>()
+  return {
+    ...actual,
+    usePreferences: () => ({
+      data: { spellcheck_enabled: spellcheckEnabled.value },
+    }),
+  }
+})
 
 vi.mock('@/lib/environment', async importOriginal => ({
   ...(await importOriginal<typeof EnvironmentModule>()),
@@ -178,6 +191,7 @@ describe('ChatInput attachments', () => {
   }
 
   beforeEach(() => {
+    spellcheckEnabled.value = true
     mobileState.value = false
     nativeState.value = false
     useUIStore.setState({ zenMode: false })
@@ -195,6 +209,33 @@ describe('ChatInput attachments', () => {
     storeState.addPendingTextFile.mockReset()
     storeState.inputDrafts = {}
     slashPopoverMock.mockClear()
+  })
+
+  it('keeps uploaded attachments when typing but drops unmentioned @files', () => {
+    storeState.getPendingFiles.mockReturnValue([
+      {
+        id: 'upload',
+        relativePath: '/data/pasted-texts/abcd1234/report.docx',
+        extension: 'docx',
+        isDirectory: false,
+        attached: true,
+      },
+      {
+        id: 'mention',
+        relativePath: 'src/main.ts',
+        extension: 'ts',
+        isDirectory: false,
+      },
+    ] as never)
+    const textarea = renderInput('session-1')
+
+    fireEvent.change(textarea, { target: { value: 'summarize this' } })
+
+    expect(storeState.removePendingFile).toHaveBeenCalledTimes(1)
+    expect(storeState.removePendingFile).toHaveBeenCalledWith(
+      'session-1',
+      'mention'
+    )
   })
 
   it('sends the issue investigation prompt after the context loads', async () => {
@@ -838,6 +879,7 @@ describe('ChatInput attachments', () => {
 
 describe('ChatInput IME composition (issue #584)', () => {
   beforeEach(() => {
+    spellcheckEnabled.value = true
     processAttachmentFile.mockReset()
     invokeMock.mockReset()
     storeState.setInputDraft.mockReset()
@@ -1009,5 +1051,41 @@ describe('ChatInput IME composition (issue #584)', () => {
     // Second Enter sends the message
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', keyCode: 13 })
     expect(onSubmit).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ChatInput spellcheck', () => {
+  const renderInput = () => {
+    const formRef = createRef<HTMLFormElement>()
+    const inputRef = createRef<HTMLTextAreaElement>()
+
+    render(
+      <ChatInput
+        activeSessionId="session-1"
+        activeWorktreePath="/tmp/worktree"
+        isSending={false}
+        executionMode="build"
+        focusChatShortcut="⌘K"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        formRef={formRef}
+        inputRef={inputRef}
+      />
+    )
+
+    return screen.getByRole('textbox') as HTMLTextAreaElement
+  }
+
+  beforeEach(() => {
+    spellcheckEnabled.value = true
+  })
+
+  it('enables spellcheck on the chat textarea by default', () => {
+    expect(renderInput()).toHaveAttribute('spellcheck', 'true')
+  })
+
+  it('disables spellcheck when the preference is off', () => {
+    spellcheckEnabled.value = false
+    expect(renderInput()).toHaveAttribute('spellcheck', 'false')
   })
 })

@@ -159,6 +159,31 @@ describe('useToolbarDerivedState', () => {
     expect(result.current.selectedModelLabel).toBe('Configured default')
   })
 
+  it('exposes Devin as an installed backend with its configured default', () => {
+    const { result } = renderHook(() =>
+      useToolbarDerivedState({
+        selectedBackend: 'devin',
+        selectedProvider: null,
+        selectedModel: 'devin/default',
+        customCliProfiles: [],
+        installedBackends: ['devin'],
+        devinModelOptions: [
+          { value: 'devin/default', label: 'Configured default' },
+        ],
+      })
+    )
+
+    expect(result.current.backendModelSections).toEqual([
+      {
+        backend: 'devin',
+        label: 'Devin (Beta)',
+        options: [{ value: 'devin/default', label: 'Configured default' }],
+      },
+    ])
+    expect(result.current.selectedModelLabel).toBe('Configured default')
+    expect(result.current.isDevin).toBe(true)
+  })
+
   it('exposes Antigravity as an installed backend with its static model options', () => {
     const { result } = renderHook(() =>
       useToolbarDerivedState({
@@ -173,10 +198,54 @@ describe('useToolbarDerivedState', () => {
     expect(result.current.backendModelSections).toEqual([
       {
         backend: 'antigravity',
-        label: 'Antigravity CLI',
+        label: 'Antigravity CLI (Beta)',
         options: ANTIGRAVITY_MODEL_OPTIONS,
       },
     ])
+  })
+
+  it('lists Muse models and labels the selected Muse model', () => {
+    const { result } = renderHook(() =>
+      useToolbarDerivedState({
+        selectedBackend: 'muse',
+        selectedProvider: null,
+        selectedModel: 'muse/muse-spark-1.2',
+        customCliProfiles: [],
+        installedBackends: ['claude', 'muse'],
+      })
+    )
+
+    expect(result.current.backendModelSections[1]).toEqual({
+      backend: 'muse',
+      label: 'Muse (Beta)',
+      options: [
+        { value: 'muse/default', label: 'Default' },
+        { value: 'muse/muse-spark-1.2', label: 'Muse Spark 1.2' },
+      ],
+    })
+    expect(result.current.selectedModelLabel).toBe('Muse Spark 1.2')
+  })
+
+  it('prefers CLI-reported Muse models over the static list', () => {
+    const museModelOptions = [
+      { value: 'muse/default', label: 'Default' },
+      { value: 'muse/muse-spark-2', label: 'Muse Spark 2' },
+    ]
+    const { result } = renderHook(() =>
+      useToolbarDerivedState({
+        selectedBackend: 'muse',
+        selectedProvider: null,
+        selectedModel: 'muse/muse-spark-2',
+        museModelOptions,
+        customCliProfiles: [],
+        installedBackends: ['muse'],
+      })
+    )
+
+    expect(result.current.backendModelSections).toEqual([
+      { backend: 'muse', label: 'Muse (Beta)', options: museModelOptions },
+    ])
+    expect(result.current.selectedModelLabel).toBe('Muse Spark 2')
   })
 
   it('counts enabled MCP servers identified by backend-prefixed keys', () => {

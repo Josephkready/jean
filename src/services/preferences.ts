@@ -34,6 +34,19 @@ const MIGRATED_KEYBINDINGS: Partial<
   // Changed so Cmd+1-9 can open Recent sessions and Cmd+Arrow switches tabs.
   next_session: 'mod+alt+arrowright',
   previous_session: 'mod+alt+arrowleft',
+  clear_session_context: 'mod+shift+k', // Now unbound by default
+}
+
+/**
+ * Migrations that run once per client. Re-saving the old chord afterwards is
+ * kept. `MIGRATED_KEYBINDINGS` still rewrites a stored old default on every
+ * load, which clears a re-saved Clear Context chord.
+ */
+export const ONE_SHOT_KEYBINDING_MIGRATIONS: Record<
+  string,
+  { action: string; from: string }
+> = {
+  approve_plan_yolo_mod_y: { action: 'approve_plan_yolo', from: 'mod+y' },
 }
 
 // Migrate keybindings: if a stored value matches an old default, use the new default
@@ -48,12 +61,39 @@ function migrateKeybindings(
     if (oldDefaults.includes(stored[action])) {
       // User had the old default, update to new default
       const newDefault = DEFAULT_KEYBINDINGS[action]
-      if (newDefault) {
+      if (newDefault !== undefined) {
         migrated[action] = newDefault
       }
     }
   }
   return migrated
+}
+
+export function applyOneShotKeybindingMigrations(
+  keybindings: KeybindingsMap,
+  applied: readonly string[] | undefined
+): {
+  keybindings: KeybindingsMap
+  appliedMigrations: string[]
+  persist: boolean
+} {
+  const done = new Set(applied ?? [])
+  let next = keybindings
+  let persist = false
+  for (const [id, migration] of Object.entries(
+    ONE_SHOT_KEYBINDING_MIGRATIONS
+  )) {
+    if (done.has(id)) continue
+    if (next[migration.action] === migration.from) {
+      const replacement = DEFAULT_KEYBINDINGS[migration.action]
+      if (replacement !== undefined && replacement !== migration.from) {
+        next = { ...next, [migration.action]: replacement }
+      }
+    }
+    done.add(id)
+    persist = true
+  }
+  return { keybindings: next, appliedMigrations: [...done], persist }
 }
 
 import { hasBackend, hasBackendTransport } from '@/lib/environment'
@@ -108,7 +148,25 @@ export async function loadPreferencesForServer(
     ),
     keybindings,
   }
-  return { ...normalized, ...readClientPreferences(normalized) }
+  const withClient = {
+    ...normalized,
+    ...readClientPreferences(normalized),
+  }
+  const oneShot = applyOneShotKeybindingMigrations(
+    withClient.keybindings,
+    withClient.applied_keybinding_migrations
+  )
+  if (oneShot.persist) {
+    updateClientPreferences({
+      keybindings: oneShot.keybindings,
+      applied_keybinding_migrations: oneShot.appliedMigrations,
+    })
+  }
+  return {
+    ...withClient,
+    keybindings: oneShot.keybindings,
+    applied_keybinding_migrations: oneShot.appliedMigrations,
+  }
 }
 
 export function useServerPreferences() {

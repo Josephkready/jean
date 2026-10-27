@@ -58,9 +58,9 @@ pub async fn start_terminal(
     let (command_args, signal) = match (command.as_deref(), session_id.as_deref()) {
         (Some(command), Some(session_id)) => {
             let had_args = command_args.is_some();
-            let (args, signal) = super::attention::inject_codex_notify(
+            let (args, signal) = super::attention::inject_lifecycle_hook(
                 &app,
-                session_id,
+                &terminal_id,
                 command,
                 command_args.unwrap_or_default(),
             );
@@ -69,12 +69,16 @@ pub async fn start_terminal(
             } else {
                 None
             };
-            (args, signal.map(|path| (session_id.to_string(), path)))
+            let reports_prompt_submit = super::attention::is_claude_command(command);
+            let signal = signal.map(|path| (session_id.to_string(), path, reports_prompt_submit));
+            (args, signal)
         }
         _ => (command_args, None),
     };
 
-    spawn_terminal(
+    // The tailer owns cleanup of the signal file, so a spawn failure (no
+    // tailer) has to clean up after itself.
+    let spawned = spawn_terminal(
         &app,
         terminal_id.clone(),
         worktree_path,
@@ -83,9 +87,21 @@ pub async fn start_terminal(
         command,
         command_args,
         session_id,
-    )?;
-    if let Some((session_id, signal_path)) = signal {
-        super::attention::spawn_signal_tailer(app, session_id, terminal_id, signal_path);
+    );
+    if spawned.is_err() {
+        if let Some((_, signal_path, _)) = &signal {
+            let _ = std::fs::remove_file(signal_path);
+        }
+    }
+    spawned?;
+    if let Some((session_id, signal_path, reports_prompt_submit)) = signal {
+        super::attention::spawn_signal_tailer(
+            app,
+            session_id,
+            terminal_id,
+            signal_path,
+            reports_prompt_submit,
+        );
     }
     Ok(())
 }
@@ -216,7 +232,18 @@ pub async fn get_run_environments(
 ) -> Result<RunEnvironmentsResult, String> {
     let data = crate::projects::storage::load_projects_data(&app)
         .map_err(|e| format!("load_projects_data: {e}"))?;
-    let ui_state = crate::load_ui_state(app.clone()).await.unwrap_or_default();
+    let terminal_ui = match app.path().app_data_dir() {
+        Ok(dir) => {
+            crate::ui_client_state::aggregated_terminal_snapshot(&dir).unwrap_or_else(|error| {
+                log::warn!("Failed to read per-client terminal UI state: {error}");
+                crate::ui_client_state::AggregatedTerminalUi::default()
+            })
+        }
+        Err(error) => {
+            log::warn!("Failed to resolve app data dir for run environments: {error}");
+            crate::ui_client_state::AggregatedTerminalUi::default()
+        }
+    };
 
     let live: Vec<LiveCommandTerminal> = list_live_terminal_meta()
         .into_iter()
@@ -232,7 +259,7 @@ pub async fn get_run_environments(
         })
         .collect();
 
-    let persisted: Vec<PersistedCommandTerminal> = ui_state
+    let persisted: Vec<PersistedCommandTerminal> = terminal_ui
         .terminal_instances
         .iter()
         .flat_map(|(worktree_id, terminals)| {
@@ -290,7 +317,7 @@ pub async fn get_run_environments(
         &listening,
         &worktrees,
         &projects,
-        &ui_state.active_session_ids,
+        &terminal_ui.active_session_ids,
         &configured_ports,
         &RunEnvironmentFilter {
             worktree_id,

@@ -194,9 +194,7 @@ describe('ContextMentionPopover', () => {
     expect(onSelectContext).not.toHaveBeenCalled()
 
     // Attaching context to the current session is still allowed
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Add #123 to session context' })
-    )
+    fireEvent.click(screen.getByText('Fix login bug'))
     expect(onSelectContext).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'issue:123' }),
       false
@@ -256,7 +254,7 @@ describe('ContextMentionPopover', () => {
     expect(onSelectContext).toHaveBeenLastCalledWith(items[0], false)
   })
 
-  it('offers separate add and investigate actions for issues and PRs', () => {
+  it('adds an item on row click and investigates from the action button', () => {
     const onSelectContext = vi.fn()
     render(
       <ContextMentionPopover
@@ -270,9 +268,7 @@ describe('ContextMentionPopover', () => {
       />
     )
 
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Add #123 to session context' })
-    )
+    fireEvent.click(screen.getByText('Fix login bug'))
     expect(onSelectContext).toHaveBeenCalledWith(items[0], false)
 
     fireEvent.click(
@@ -349,12 +345,88 @@ describe('ContextMentionPopover', () => {
         name: `Add ${items[0].label} and start investigating`,
       })
     ).not.toHaveTextContent('Investigate')
-    expect(screen.queryByText('Attach')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /to session context/ })
+    ).not.toBeInTheDocument()
 
     platform.native = false
     platform.mobile = false
     rerender(<ContextMentionPopover {...props} />)
     expect(screen.queryByText('Shift+Enter')).not.toBeInTheDocument()
+  })
+
+  it('narrows to one tab, and a search switches back to all sections', () => {
+    render(
+      <ContextMentionPopover
+        projectPath="/tmp/repo"
+        projectId="project-1"
+        open
+        onOpenChange={vi.fn()}
+        onSelectContext={vi.fn()}
+        searchQuery=""
+        anchorPosition={{ top: 0, left: 0 }}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('tab', { name: /Issues/ }))
+    expect(screen.getByText('Fix login bug')).toBeInTheDocument()
+    expect(screen.queryByText('Add context mentions')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('Search all sections...'), {
+      target: { value: 'context' },
+    })
+    expect(screen.getByRole('tab', { name: /All/ })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.getByText('Fix login bug')).toBeInTheDocument()
+    expect(screen.getByText('Add context mentions')).toBeInTheDocument()
+  })
+
+  it('loads more discussions and asks for the next GitHub page', () => {
+    const discussions = Array.from(
+      { length: 10 },
+      (_, index): ContextMentionItem => ({
+        id: `discussion:${index + 1}`,
+        type: 'discussion',
+        label: `Discussion #${index + 1}`,
+        title: `Discussion ${index + 1}`,
+      })
+    )
+    const loadMoreDiscussions = vi.fn()
+    useContextMentionDataMock.mockImplementation(
+      ({ discussionLimit }: { discussionLimit: number }) => ({
+        groups: [
+          {
+            id: 'discussion',
+            heading: 'GitHub Discussions',
+            items: discussions.slice(0, discussionLimit),
+            hasMore: true,
+          },
+        ],
+        isFetching: false,
+        loadMoreDiscussions,
+      })
+    )
+
+    render(
+      <ContextMentionPopover
+        projectPath="/tmp/repo"
+        projectId="project-1"
+        open
+        onOpenChange={vi.fn()}
+        onSelectContext={vi.fn()}
+        searchQuery=""
+        anchorPosition={{ top: 0, left: 0 }}
+      />
+    )
+
+    expect(screen.queryByText('Discussion 9')).not.toBeInTheDocument()
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load more discussions' })
+    )
+    expect(screen.getByText('Discussion 9')).toBeInTheDocument()
+    expect(loadMoreDiscussions).toHaveBeenCalledWith(16)
   })
 
   it('loads more issues and PRs independently, then resets for a new search', () => {

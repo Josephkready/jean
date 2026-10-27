@@ -18,14 +18,18 @@ use rand::Rng;
 
 use super::git;
 use super::git::get_repo_identifier;
+use super::github_discussions::{
+    add_discussion_reference, generate_branch_name_from_discussion, DiscussionContext,
+};
 use super::github_issues::{
     add_advisory_reference, add_issue_reference, add_pr_reference, add_security_reference,
-    format_advisory_context_markdown, format_issue_context_markdown, format_pr_context_markdown,
-    format_security_context_markdown, generate_branch_name_from_advisory,
-    generate_branch_name_from_issue, generate_branch_name_from_security_alert,
-    get_github_contexts_dir, get_github_pr, get_github_pr_by_number, get_pr_diff,
-    get_session_context_content, get_session_context_numbers, AdvisoryContext, IssueContext,
-    PullRequestContext, SecurityAlertContext,
+    context_repo_key, format_advisory_context_markdown, format_issue_context_markdown,
+    format_pr_context_markdown, format_security_context_markdown,
+    generate_branch_name_from_advisory, generate_branch_name_from_issue,
+    generate_branch_name_from_security_alert, get_github_contexts_dir, get_github_pr,
+    get_github_pr_by_number, get_pr_diff, get_session_context_content, get_session_context_numbers,
+    remote_name_for_github_repo, AdvisoryContext, IssueContext, PullRequestContext,
+    SecurityAlertContext,
 };
 use super::linear_issues::{
     add_linear_reference, format_linear_issue_context_markdown,
@@ -48,6 +52,11 @@ use super::types::{
     WorktreeDeletingEvent, WorktreeOrigin, WorktreePathExistsEvent,
     WorktreePermanentlyDeletedEvent, WorktreeSetupCompleteEvent, WorktreeUnarchivedEvent,
 };
+use super::unmanaged_worktrees::{
+    blocked_import_paths, list_unmanaged_from_repo, main_checkout_path_from_porcelain,
+    read_worktree_list_porcelain, reserved_checkout_import_error, worktree_path_is_tracked,
+    UnmanagedWorktreeListing,
+};
 use crate::chat::types::{LabelData, Session, SessionMetadata, WorktreeSessions};
 use crate::claude_cli::resolve_cli_binary;
 use crate::coderabbit_cli::resolve_coderabbit_binary;
@@ -56,6 +65,7 @@ use crate::gh_cli::config::resolve_gh_binary;
 use crate::http_server::EmitExt;
 use crate::platform::silent_command;
 use crate::platform::wsl_aware_command;
+use crate::projects::provider::{resolve_git_provider, GitProvider};
 
 fn gh_command(gh: &Path, project_path: &str) -> std::process::Command {
     crate::platform::resolved_cli_command(gh, Some(Path::new(project_path)))
@@ -777,6 +787,7 @@ pub async fn add_project(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -939,6 +950,7 @@ pub async fn init_project(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -999,6 +1011,7 @@ pub async fn clone_project(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -1020,6 +1033,10 @@ pub async fn remove_project(app: AppHandle, project_id: String) -> Result<(), St
     log::trace!("Removing project: {project_id}");
 
     let mut data = load_projects_data(&app)?;
+
+    if data.find_project(&project_id).is_some_and(|p| p.is_folder) {
+        return Err("Cannot remove: this is a folder, not a project.".to_string());
+    }
 
     // Check if project has active (non-archived) worktrees
     let has_active_worktrees = data
@@ -1609,6 +1626,7 @@ fn clear_session_runtime_state(session: &mut Session) {
     session.commandcode_session_id = None;
     session.grok_session_id = None;
     session.kimi_session_id = None;
+    session.muse_session_id = None;
     session.is_reviewing = false;
     if session.status_override.as_deref() == Some("review") {
         session.status_override = None;
@@ -1677,6 +1695,7 @@ fn prepare_forked_metadata(
     metadata.commandcode_session_id = None;
     metadata.grok_session_id = None;
     metadata.kimi_session_id = None;
+    metadata.muse_session_id = None;
     metadata.session_naming_completed = false;
     metadata.archived_at = None;
     metadata.archived_by_base_close = None;
@@ -1745,6 +1764,7 @@ pub async fn create_worktree(
     advisory_context: Option<AdvisoryContext>,
     linear_context: Option<LinearIssueContext>,
     sentry_context: Option<SentryIssueContext>,
+    discussion_context: Option<DiscussionContext>,
     custom_name: Option<String>,
     auto_open_in_jean: Option<bool>,
     origin: Option<String>,
@@ -1885,6 +1905,20 @@ pub async fn create_worktree(
         } else {
             sentry_branch
         }
+    } else if let Some(ref ctx) = discussion_context {
+        let discussion_branch = generate_branch_name_from_discussion(ctx.number, &ctx.title);
+        if data.worktree_name_exists(&project_id, &discussion_branch) {
+            let mut counter = 2;
+            loop {
+                let candidate = format!("{discussion_branch}-{counter}");
+                if !data.worktree_name_exists(&project_id, &candidate) {
+                    break candidate;
+                }
+                counter += 1;
+            }
+        } else {
+            discussion_branch
+        }
     } else if let Some(ref ctx) = issue_context {
         let issue_branch = generate_branch_name_from_issue(ctx.number, &ctx.title);
         // Check if this branch name already exists, if so, add a suffix
@@ -2009,6 +2043,7 @@ pub async fn create_worktree(
     let advisory_context_clone = advisory_context.clone();
     let linear_context_clone = linear_context.clone();
     let sentry_context_clone = sentry_context.clone();
+    let discussion_context_clone = discussion_context.clone();
     let worktree_origin_clone = worktree_origin.clone();
 
     // Spawn background thread for git operations
@@ -2285,18 +2320,27 @@ pub async fn create_worktree(
                     "Background: Branch collision, manual fetch PR #{} into {local_branch_name}",
                     ctx.number
                 );
-                    git::fetch_pr_to_branch(&project_path, ctx.number, &local_branch_name).and_then(
-                        |_| {
-                            git::checkout_branch(&worktree_path_clone, &local_branch_name)?;
-                            Ok(local_branch_name)
-                        },
+                    let fetch_remote = ctx
+                        .repo
+                        .as_deref()
+                        .and_then(|repo| remote_name_for_github_repo(&project_path, repo));
+                    git::fetch_pr_to_branch(
+                        &project_path,
+                        ctx.number,
+                        &local_branch_name,
+                        fetch_remote.as_deref(),
                     )
+                    .and_then(|_| {
+                        git::checkout_branch(&worktree_path_clone, &local_branch_name)?;
+                        Ok(local_branch_name)
+                    })
                 } else {
                     git::gh_pr_checkout(
                         &worktree_path_clone,
                         ctx.number,
                         Some(&local_branch_name),
                         &resolve_gh_binary(&app_clone),
+                        ctx.repo.as_deref(),
                     )
                 };
 
@@ -2352,8 +2396,7 @@ pub async fn create_worktree(
                     "Background: Writing issue context file for issue #{}",
                     ctx.number
                 );
-                if let Ok(repo_id) = get_repo_identifier(&project_path) {
-                    let repo_key = repo_id.to_key();
+                if let Ok(repo_key) = context_repo_key(&project_path, ctx.repo.as_deref()) {
                     if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                         if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
                             log::warn!("Background: Failed to create git-context directory: {e}");
@@ -2388,17 +2431,21 @@ pub async fn create_worktree(
             // Write PR context file if provided (to shared git-context directory)
             if let Some(ctx) = &pr_context_clone {
                 log::trace!("Background: Writing PR context file for PR #{}", ctx.number);
-                if let Ok(repo_id) = get_repo_identifier(&project_path) {
-                    let repo_key = repo_id.to_key();
+                if let Ok(repo_key) = context_repo_key(&project_path, ctx.repo.as_deref()) {
                     if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                         if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
                             log::warn!("Background: Failed to create git-context directory: {e}");
                         } else {
                             // Fetch the diff if not already present
-                            let gh = resolve_gh_binary(&app_clone);
                             let ctx_with_diff = if ctx.diff.is_none() {
                                 log::debug!("Background: Fetching diff for PR #{}", ctx.number);
-                                let diff = get_pr_diff(&project_path, ctx.number, &gh).ok();
+                                let diff = get_pr_diff(
+                                    &app_clone,
+                                    &project_path,
+                                    ctx.number,
+                                    ctx.repo.as_deref(),
+                                )
+                                .ok();
                                 PullRequestContext {
                                     number: ctx.number,
                                     title: ctx.title.clone(),
@@ -2408,6 +2455,7 @@ pub async fn create_worktree(
                                     comments: ctx.comments.clone(),
                                     reviews: ctx.reviews.clone(),
                                     diff,
+                                    repo: ctx.repo.clone(),
                                 }
                             } else {
                                 ctx.clone()
@@ -2580,6 +2628,39 @@ pub async fn create_worktree(
                             log::warn!("Background: Failed to add Sentry reference: {e}");
                         }
                     }
+                }
+            }
+
+            // Write discussion context file if provided (to shared git-context directory)
+            if let Some(ctx) = &discussion_context_clone {
+                log::trace!(
+                    "Background: Writing discussion context file for discussion #{}",
+                    ctx.number
+                );
+                match (
+                    get_repo_identifier(&project_path),
+                    get_github_contexts_dir(&app_clone),
+                ) {
+                    (Ok(repo_id), Ok(contexts_dir)) => {
+                        let repo_key = repo_id.to_key();
+                        let context_file =
+                            contexts_dir.join(format!("{repo_key}-discussion-{}.md", ctx.number));
+                        if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
+                            log::warn!("Background: Failed to create git-context directory: {e}");
+                        } else if let Err(e) = std::fs::write(&context_file, &ctx.content) {
+                            log::warn!("Background: Failed to write discussion context file: {e}");
+                        } else if let Err(e) = add_discussion_reference(
+                            &app_clone,
+                            &repo_key,
+                            ctx.number,
+                            &worktree_id_clone,
+                        ) {
+                            log::warn!("Background: Failed to add discussion reference: {e}");
+                        }
+                    }
+                    _ => log::warn!(
+                        "Background: Could not resolve repo or context dir for discussion context"
+                    ),
                 }
             }
 
@@ -3192,8 +3273,7 @@ pub async fn create_worktree_from_existing_branch(
                     "Background: Writing issue context file for issue #{}",
                     ctx.number
                 );
-                if let Ok(repo_id) = get_repo_identifier(&project_path) {
-                    let repo_key = repo_id.to_key();
+                if let Ok(repo_key) = context_repo_key(&project_path, ctx.repo.as_deref()) {
                     if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                         if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
                             log::warn!("Background: Failed to create git-context directory: {e}");
@@ -3225,17 +3305,21 @@ pub async fn create_worktree_from_existing_branch(
             // Write PR context file if provided
             if let Some(ctx) = &pr_context_clone {
                 log::trace!("Background: Writing PR context file for PR #{}", ctx.number);
-                if let Ok(repo_id) = get_repo_identifier(&project_path) {
-                    let repo_key = repo_id.to_key();
+                if let Ok(repo_key) = context_repo_key(&project_path, ctx.repo.as_deref()) {
                     if let Ok(contexts_dir) = get_github_contexts_dir(&app_clone) {
                         if let Err(e) = std::fs::create_dir_all(&contexts_dir) {
                             log::warn!("Background: Failed to create git-context directory: {e}");
                         } else {
                             // Fetch the diff if not already present
-                            let gh = resolve_gh_binary(&app_clone);
                             let ctx_with_diff = if ctx.diff.is_none() {
                                 log::debug!("Background: Fetching diff for PR #{}", ctx.number);
-                                let diff = get_pr_diff(&project_path, ctx.number, &gh).ok();
+                                let diff = get_pr_diff(
+                                    &app_clone,
+                                    &project_path,
+                                    ctx.number,
+                                    ctx.repo.as_deref(),
+                                )
+                                .ok();
                                 PullRequestContext {
                                     number: ctx.number,
                                     title: ctx.title.clone(),
@@ -3245,6 +3329,7 @@ pub async fn create_worktree_from_existing_branch(
                                     comments: ctx.comments.clone(),
                                     reviews: ctx.reviews.clone(),
                                     diff,
+                                    repo: ctx.repo.clone(),
                                 }
                             } else {
                                 ctx.clone()
@@ -3574,7 +3659,7 @@ pub async fn checkout_pr(
     log::info!("[checkout_pr] No archived worktree found for PR #{pr_number}, creating new");
 
     // Fetch PR details from GitHub (for context and worktree naming)
-    let pr_detail = get_github_pr(app.clone(), project.path.clone(), pr_number).await?;
+    let pr_detail = get_github_pr(app.clone(), project.path.clone(), pr_number, None).await?;
     // Persist the same PR link fields as create/link PR so magic actions
     // (Open/Merge/PR Comments/status polling) work immediately after checkout.
     let pr_url = if pr_detail.url.trim().is_empty() {
@@ -3841,7 +3926,7 @@ pub async fn checkout_pr(
             // Instead, manually fetch the PR into the alt branch name and switch to it.
             let actual_branch = if branch_collision {
                 log::trace!("Background: Branch collision detected, using manual fetch for PR #{pr_number} into {local_branch_name}");
-                match git::fetch_pr_to_branch(&project_path, pr_number, &local_branch_name)
+                match git::fetch_pr_to_branch(&project_path, pr_number, &local_branch_name, None)
                     .and_then(|_| {
                         git::checkout_branch(&worktree_path_clone, &local_branch_name)?;
                         Ok(local_branch_name.clone())
@@ -3882,6 +3967,7 @@ pub async fn checkout_pr(
                     pr_number,
                     Some(&local_branch_name),
                     &resolve_gh_binary(&app_clone),
+                    None,
                 ) {
                     Ok(branch) => {
                         log::trace!("Background: gh pr checkout succeeded, branch: {branch}");
@@ -3980,12 +4066,8 @@ pub async fn checkout_pr(
                                     submitted_at: r.submitted_at,
                                 })
                                 .collect(),
-                            diff: get_pr_diff(
-                                &project_path,
-                                pr_number,
-                                &resolve_gh_binary(&app_clone),
-                            )
-                            .ok(),
+                            diff: get_pr_diff(&app_clone, &project_path, pr_number, None).ok(),
+                            repo: None,
                         };
 
                         let context_file =
@@ -4763,9 +4845,6 @@ pub async fn import_worktree(
         return Err(format!("Path is not a git worktree or repository: {path}"));
     }
 
-    // Get the current branch name from git
-    let branch = git::get_current_branch(&path)?;
-
     // Extract the worktree name from the path (last component)
     let name = worktree_path
         .file_name()
@@ -4776,16 +4855,35 @@ pub async fn import_worktree(
     let mut data = load_projects_data(&app)?;
 
     // Verify project exists
-    let _ = data
+    let project = data
         .find_project(&project_id)
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+        .ok_or_else(|| format!("Project not found: {project_id}"))?
+        .clone();
 
-    // Check if a worktree with this path already exists
-    if data.worktrees.iter().any(|w| w.path == path) {
+    let main_checkout = read_worktree_list_porcelain(&project.path)
+        .ok()
+        .and_then(|porcelain| main_checkout_path_from_porcelain(&porcelain));
+    let blocked = blocked_import_paths(&project.path, main_checkout.as_deref());
+    if let Some(error) = reserved_checkout_import_error(&path, &blocked) {
+        return Err(error);
+    }
+
+    // Any project, including archived worktrees. Path comparison matches the
+    // unmanaged list (canonical path, trailing separators).
+    let tracked_paths: Vec<String> = data
+        .worktrees
+        .iter()
+        .map(|worktree| worktree.path.clone())
+        .collect();
+    if worktree_path_is_tracked(&path, &tracked_paths) {
         return Err(format!(
             "A worktree with this path is already tracked: {path}"
         ));
     }
+
+    // Detached HEAD stores the short commit id. `get_current_branch` returns
+    // the literal "HEAD", which is not a branch name.
+    let branch = git::checkout_branch_label(&path)?;
 
     // Get max order for worktrees in this project
     let max_order = data
@@ -4855,6 +4953,38 @@ pub async fn import_worktree(
 
     log::trace!("Successfully imported worktree: {}", worktree.id);
     Ok(worktree)
+}
+
+/// List git worktrees for a project that Jean is not already tracking.
+///
+/// Read-only. Nothing is imported. The main checkout and the project path are
+/// omitted (and returned in `blocked_paths` so the dialog can reject them).
+/// Paths Jean stores for any project are omitted, including archived
+/// worktrees: `archived_at` marks those, and `list_worktrees` hides them from
+/// the canvas, but they must not be offered for import again.
+pub async fn list_unmanaged_worktrees(
+    app: AppHandle,
+    project_id: String,
+) -> Result<UnmanagedWorktreeListing, String> {
+    log::trace!("Listing unmanaged worktrees for project {project_id}");
+
+    let data = load_projects_data(&app)?;
+    let project = data
+        .find_project(&project_id)
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    if project.is_folder {
+        return Err("Folders do not have git worktrees to import".to_string());
+    }
+
+    let project_path = project.path.clone();
+    let tracked_paths: Vec<String> = data
+        .worktrees
+        .iter()
+        .map(|worktree| worktree.path.clone())
+        .collect();
+
+    list_unmanaged_from_repo(&project_path, &tracked_paths)
 }
 
 /// Permanently delete an archived worktree (removes git worktree/branch from disk)
@@ -5136,6 +5266,162 @@ fn format_open_error(app_name: &str, error: &std::io::Error) -> String {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn spawn_external_terminal(
+    program: &str,
+    args: &[String],
+    current_dir: Option<&str>,
+) -> Result<(), std::io::Error> {
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    if let Some(dir) = current_dir {
+        command.current_dir(dir);
+    }
+    command.spawn().map(|_| ())
+}
+
+/// PowerShell single-quoted strings escape `'` by doubling it.
+#[cfg(any(windows, test))]
+fn powershell_set_location_command(worktree_path: &str) -> String {
+    let escaped = worktree_path.replace('\'', "''");
+    format!("Set-Location -LiteralPath '{escaped}'")
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+struct WindowsExternalTerminalLaunch {
+    program: String,
+    args: Vec<String>,
+    current_dir: Option<String>,
+}
+
+/// Launch plan for the Windows "Open in terminal" preference.
+///
+/// PowerShell is the default. Windows Terminal and Warp are explicit choices.
+/// `warp_program` is the resolved Warp executable when the caller found one.
+#[cfg(any(windows, test))]
+fn windows_external_terminal_launch(
+    terminal: &str,
+    worktree_path: &str,
+    warp_program: Option<&str>,
+) -> Result<WindowsExternalTerminalLaunch, String> {
+    match terminal {
+        "warp" => {
+            let Some(program) = warp_program.filter(|program| !program.is_empty()) else {
+                return Err(
+                    "Warp not found. Install Warp or choose PowerShell or Windows Terminal."
+                        .to_string(),
+                );
+            };
+            Ok(WindowsExternalTerminalLaunch {
+                program: program.to_string(),
+                args: Vec::new(),
+                current_dir: Some(worktree_path.to_string()),
+            })
+        }
+        "windows-terminal" => Ok(WindowsExternalTerminalLaunch {
+            program: "wt".to_string(),
+            args: vec!["-d".to_string(), worktree_path.to_string()],
+            current_dir: None,
+        }),
+        _ => Ok(WindowsExternalTerminalLaunch {
+            program: "powershell.exe".to_string(),
+            args: vec![
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                powershell_set_location_command(worktree_path),
+            ],
+            current_dir: None,
+        }),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn posix_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct LinuxExternalTerminalCandidate {
+    program: &'static str,
+    args: Vec<String>,
+    current_dir: Option<String>,
+}
+
+/// Terminals to try on Linux, preferred app first.
+///
+/// The saved choice (`kitty`, `ghostty`) is tried before the generic list.
+/// `x-terminal-emulator` is the Debian/Ubuntu alternative and is missing on
+/// Arch, Fedora, and many other desktops, so the rest of the list still runs.
+#[cfg(any(target_os = "linux", test))]
+fn linux_external_terminal_candidates(
+    terminal: &str,
+    worktree_path: &str,
+) -> Vec<LinuxExternalTerminalCandidate> {
+    let path = worktree_path.to_string();
+    let quoted = posix_single_quote(worktree_path);
+    let mut candidates = vec![
+        LinuxExternalTerminalCandidate {
+            program: "x-terminal-emulator",
+            args: Vec::new(),
+            current_dir: Some(path.clone()),
+        },
+        LinuxExternalTerminalCandidate {
+            program: "gnome-terminal",
+            args: vec!["--working-directory".into(), path.clone()],
+            current_dir: None,
+        },
+        LinuxExternalTerminalCandidate {
+            program: "konsole",
+            args: vec!["--workdir".into(), path.clone()],
+            current_dir: None,
+        },
+        LinuxExternalTerminalCandidate {
+            program: "alacritty",
+            args: vec!["--working-directory".into(), path.clone()],
+            current_dir: None,
+        },
+        LinuxExternalTerminalCandidate {
+            program: "kitty",
+            args: vec!["--directory".into(), path.clone()],
+            current_dir: None,
+        },
+        LinuxExternalTerminalCandidate {
+            program: "ghostty",
+            args: Vec::new(),
+            current_dir: Some(path.clone()),
+        },
+        LinuxExternalTerminalCandidate {
+            program: "xterm",
+            args: vec![
+                "-e".into(),
+                "bash".into(),
+                "-c".into(),
+                format!("cd {quoted}; exec bash"),
+            ],
+            current_dir: None,
+        },
+    ];
+
+    let preferred = match terminal {
+        "kitty" => Some("kitty"),
+        "ghostty" => Some("ghostty"),
+        _ => None,
+    };
+    if let Some(program) = preferred {
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.program == program)
+        {
+            let candidate = candidates.remove(index);
+            candidates.insert(0, candidate);
+        }
+    }
+
+    candidates
+}
+
 /// Open a worktree path in the configured terminal app
 pub async fn open_worktree_in_terminal(
     worktree_path: String,
@@ -5212,88 +5498,64 @@ pub async fn open_worktree_in_terminal(
 
     #[cfg(target_os = "linux")]
     {
-        // Try common Linux terminal emulators in order of preference
-        // Use owned Strings to avoid borrowing temporaries.
-        let terminals: Vec<(&str, Vec<String>)> = vec![
-            (
-                "gnome-terminal",
-                vec!["--working-directory".into(), worktree_path.clone()],
-            ),
-            ("konsole", vec!["--workdir".into(), worktree_path.clone()]),
-            (
-                "alacritty",
-                vec!["--working-directory".into(), worktree_path.clone()],
-            ),
-            ("kitty", vec!["--directory".into(), worktree_path.clone()]),
-            (
-                "xterm",
-                vec![
-                    "-e".into(),
-                    "bash".into(),
-                    "-c".into(),
-                    format!("cd '{}'; exec bash", worktree_path),
-                ],
-            ),
-        ];
-
+        // Honor Kitty/Ghostty when selected, then fall back through the
+        // terminals a desktop session is likely to have. `x-terminal-emulator`
+        // covers Debian alternatives; it is absent on Arch and Fedora.
+        let candidates = linux_external_terminal_candidates(&terminal_app, &worktree_path);
         let mut opened = false;
-        for (term, args) in terminals {
-            if crate::platform::executable_exists(term) {
-                match std::process::Command::new(term).args(args).spawn() {
-                    Ok(_) => {
-                        log::trace!("Opened terminal with {term}");
-                        opened = true;
-                        break;
-                    }
-                    Err(e) => {
-                        log::trace!("Failed to open {term}: {e}");
-                    }
+        for candidate in &candidates {
+            if !crate::platform::executable_exists(candidate.program) {
+                continue;
+            }
+            match spawn_external_terminal(
+                candidate.program,
+                &candidate.args,
+                candidate.current_dir.as_deref(),
+            ) {
+                Ok(()) => {
+                    log::trace!("Opened terminal with {}", candidate.program);
+                    opened = true;
+                    break;
+                }
+                Err(e) => {
+                    log::trace!("Failed to open {}: {e}", candidate.program);
                 }
             }
         }
 
         if !opened {
-            return Err("No supported terminal emulator found. Install gnome-terminal, konsole, alacritty, kitty, or xterm.".to_string());
+            return Err("No supported terminal emulator found. Install x-terminal-emulator, gnome-terminal, konsole, alacritty, kitty, ghostty, or xterm.".to_string());
         }
     }
 
     #[cfg(target_os = "windows")]
     {
-        let result = match terminal_app.as_str() {
-            "warp" => {
-                // Try known install path first, then fall back to PATH
-                let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-                let known_path = format!("{local}\\Programs\\Warp\\warp.exe");
-                let warp_exe = if std::path::Path::new(&known_path).exists() {
-                    known_path
-                } else if crate::platform::executable_exists("warp") {
-                    "warp".to_string()
-                } else {
-                    return Err(format!("Warp not found. Checked: {known_path} and PATH"));
-                };
-                log::trace!("Using Warp at: {warp_exe}");
-                std::process::Command::new(&warp_exe)
-                    .current_dir(&worktree_path)
-                    .spawn()
+        let warp_program = if terminal_app == "warp" {
+            let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            let known_path = format!("{local}\\Programs\\Warp\\warp.exe");
+            if std::path::Path::new(&known_path).exists() {
+                Some(known_path)
+            } else if crate::platform::executable_exists("warp") {
+                Some("warp".to_string())
+            } else {
+                return Err(format!("Warp not found. Checked: {known_path} and PATH"));
             }
-            "windows-terminal" => std::process::Command::new("wt")
-                .args(["-d", &worktree_path])
-                .spawn(),
-            _ => {
-                // Default: PowerShell
-                std::process::Command::new("powershell")
-                    .args([
-                        "-NoExit",
-                        "-Command",
-                        &format!("Set-Location '{worktree_path}'"),
-                    ])
-                    .spawn()
-            }
+        } else {
+            None
         };
-
-        match result {
-            Ok(_) => log::trace!("Opened {terminal_app} in {worktree_path}"),
-            Err(e) => return Err(format!("Failed to open {terminal_app}: {e}")),
+        let plan = windows_external_terminal_launch(
+            &terminal_app,
+            &worktree_path,
+            warp_program.as_deref(),
+        )?;
+        log::trace!(
+            "Opening {terminal_app} via {} in {worktree_path}",
+            plan.program
+        );
+        if let Err(e) =
+            spawn_external_terminal(&plan.program, &plan.args, plan.current_dir.as_deref())
+        {
+            return Err(format!("Failed to open {terminal_app}: {e}"));
         }
     }
 
@@ -5518,9 +5780,10 @@ pub async fn get_github_remotes(repo_path: String) -> Result<Vec<git::GitHubRemo
 
 /// Get the GitHub URL for a branch (for frontend to open)
 pub async fn get_github_branch_url(repo_path: String, branch: String) -> Result<String, String> {
-    log::trace!("Getting GitHub branch URL: {branch} in {repo_path}");
-    let github_url = git::get_github_url(&repo_path)?;
-    Ok(format!("{github_url}/tree/{branch}"))
+    log::trace!("Getting branch URL: {branch} in {repo_path}");
+    let web_url = git::get_github_url(&repo_path)?;
+    let gitlab = resolve_git_provider(&repo_path).0 == GitProvider::Gitlab;
+    Ok(git::branch_web_url(&web_url, &branch, gitlab))
 }
 
 /// Get the GitHub URL for a repository (for frontend to open)
@@ -5531,12 +5794,13 @@ pub async fn get_github_repo_url(repo_path: String) -> Result<String, String> {
 
 /// Open a branch on GitHub in the browser (native only)
 pub async fn open_branch_on_github(repo_path: String, branch: String) -> Result<(), String> {
-    log::trace!("Opening branch on GitHub: {branch} in {repo_path}");
+    log::trace!("Opening branch in the browser: {branch} in {repo_path}");
 
-    let github_url = git::get_github_url(&repo_path)?;
-    let url = format!("{github_url}/tree/{branch}");
+    let web_url = git::get_github_url(&repo_path)?;
+    let gitlab = resolve_git_provider(&repo_path).0 == GitProvider::Gitlab;
+    let url = git::branch_web_url(&web_url, &branch, gitlab);
 
-    log::trace!("Opening GitHub branch URL: {url}");
+    log::trace!("Opening branch URL: {url}");
     crate::platform::open_url_in_browser(&url)
 }
 
@@ -5717,15 +5981,24 @@ pub async fn open_pull_request(
 
     // Use the worktree path for the PR creation; open against the worktree base
     // (not only the project default) so stacked branches target the right base.
-    let gh = resolve_gh_binary(&app);
-    let result = git::open_pull_request(
-        &worktree.path,
-        title.as_deref(),
-        body.as_deref(),
-        draft.unwrap_or(false),
-        Some(&base_branch),
-        &gh,
-    )?;
+    let result = if resolve_git_provider(&worktree.path).0 == GitProvider::Gitlab {
+        crate::projects::gitlab_issues::open_mr_web(
+            &app,
+            &worktree.path,
+            draft.unwrap_or(false),
+            Some(&base_branch),
+        )?
+    } else {
+        let gh = resolve_gh_binary(&app);
+        git::open_pull_request(
+            &worktree.path,
+            title.as_deref(),
+            body.as_deref(),
+            draft.unwrap_or(false),
+            Some(&base_branch),
+            &gh,
+        )?
+    };
 
     log::trace!(
         "Successfully opened pull request for worktree: {}",
@@ -5931,8 +6204,8 @@ pub async fn get_project_branches(
         .find_project(&project_id)
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-    // Fetch from origin to get latest branches (best effort)
-    let _ = git::fetch_origin(&project.path);
+    // Fetch every configured remote so non-origin branches are not stale.
+    let _ = git::fetch_all_remotes(&project.path);
 
     // Try to get remote branches first
     let remote_branches = git::get_remote_branches(&project.path)?;
@@ -5962,6 +6235,36 @@ pub async fn get_project_branches(
     Ok(branches)
 }
 
+/// Remote-tracking branches for the New Worktree dialog.
+///
+/// Fetches every configured remote, then returns each branch with its remote so
+/// the same name on `origin` and `upstream` stays distinct.
+pub async fn list_worktree_branches(
+    app: AppHandle,
+    project_id: String,
+) -> Result<Vec<git::RemoteBranch>, String> {
+    log::trace!("Listing worktree branches for project: {project_id}");
+
+    let data = load_projects_data(&app)?;
+    let project = data
+        .find_project(&project_id)
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    let _ = git::fetch_all_remotes(&project.path);
+    let mut branches = git::list_remote_branches(&project.path)?;
+    if branches.is_empty() {
+        branches = git::get_branches(&project.path)?
+            .into_iter()
+            .map(|name| git::RemoteBranch {
+                qualified: name.clone(),
+                remote: String::new(),
+                name,
+            })
+            .collect();
+    }
+    Ok(branches)
+}
+
 /// Update project settings
 fn checkout_project_default_branch(project_path: &str, branch: &str) -> Result<(), String> {
     git::checkout_branch(project_path, branch)
@@ -5984,6 +6287,7 @@ pub async fn update_project_settings(
     sentry_auth_token: Option<String>,
     sentry_organization_slug: Option<String>,
     sentry_project_slug: Option<String>,
+    sentry_projects: Option<Vec<crate::projects::types::SentryProjectLink>>,
     linked_project_ids: Option<Vec<String>>,
     auto_fix_settings: Option<Option<ProjectAutoFixSettings>>,
 ) -> Result<Project, String> {
@@ -6076,16 +6380,20 @@ pub async fn update_project_settings(
         project.sentry_base_url = None;
     }
 
-    if let Some(slug) = sentry_organization_slug {
-        let slug = slug.trim().to_string();
-        project.sentry_organization_slug = if slug.is_empty() { None } else { Some(slug) };
-        project.sentry_base_url = None;
-    }
-
-    if let Some(slug) = sentry_project_slug {
-        let slug = slug.trim().to_string();
-        project.sentry_project_slug = if slug.is_empty() { None } else { Some(slug) };
-        project.sentry_base_url = None;
+    if let Some(links) = sentry_projects {
+        project.set_sentry_project_links(links);
+    } else if sentry_organization_slug.is_some() || sentry_project_slug.is_some() {
+        if let Some(slug) = sentry_organization_slug {
+            let slug = slug.trim().to_string();
+            project.sentry_organization_slug = if slug.is_empty() { None } else { Some(slug) };
+        }
+        if let Some(slug) = sentry_project_slug {
+            let slug = slug.trim().to_string();
+            project.sentry_project_slug = if slug.is_empty() { None } else { Some(slug) };
+        }
+        project.sentry_projects.clear();
+        let legacy = project.effective_sentry_links();
+        project.set_sentry_project_links(legacy);
     }
 
     if let Some(settings) = auto_fix_settings {
@@ -6607,6 +6915,20 @@ fn find_open_pr_for_branch(
     worktree_path: &str,
 ) -> Result<Option<DetectPrResponse>, String> {
     let current_branch = git::get_current_branch(worktree_path)?;
+
+    if resolve_git_provider(worktree_path).0 == GitProvider::Gitlab {
+        return Ok(crate::projects::gitlab_issues::view_open_mr_for_branch(
+            app,
+            worktree_path,
+            &current_branch,
+        )?
+        .map(|(pr_number, pr_url, title)| DetectPrResponse {
+            pr_number,
+            pr_url,
+            title,
+        }));
+    }
+
     let gh = resolve_gh_binary(app);
     let output = gh_command(&gh, worktree_path)
         .args([
@@ -6658,34 +6980,41 @@ pub async fn link_worktree_pr(
 
     log::trace!("Linking PR #{pr_number} to worktree {worktree_id}");
 
-    let gh = resolve_gh_binary(&app);
-    let output = gh_command(&gh, &worktree_path)
-        .args([
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "number,url,title",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
+    let (viewed_pr_number, pr_url, title) = if resolve_git_provider(&worktree_path).0
+        == GitProvider::Gitlab
+    {
+        crate::projects::gitlab_issues::get_mr_brief(&app, &worktree_path, pr_number)?
+    } else {
+        let gh = resolve_gh_binary(&app);
+        let output = gh_command(&gh, &worktree_path)
+            .args([
+                "pr",
+                "view",
+                &pr_number.to_string(),
+                "--json",
+                "number,url,title",
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("gh auth login") || stderr.contains("authentication") {
-            return Err("GitHub CLI not authenticated. Run 'gh auth login' first.".to_string());
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("gh auth login") || stderr.contains("authentication") {
+                return Err("GitHub CLI not authenticated. Run 'gh auth login' first.".to_string());
+            }
+            if stderr.contains("Could not resolve") || stderr.contains("not found") {
+                return Err(format!("PR #{pr_number} not found"));
+            }
+            return Err(format!("Failed to load PR #{pr_number}: {stderr}"));
         }
-        if stderr.contains("Could not resolve") || stderr.contains("not found") {
-            return Err(format!("PR #{pr_number} not found"));
-        }
-        return Err(format!("Failed to load PR #{pr_number}: {stderr}"));
-    }
 
-    let view_json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Failed to parse PR #{pr_number}: {e}"))?;
-    let viewed_pr_number = view_json["number"].as_u64().unwrap_or(0) as u32;
-    let pr_url = view_json["url"].as_str().unwrap_or("").to_string();
-    let title = view_json["title"].as_str().unwrap_or("").to_string();
+        let view_json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("Failed to parse PR #{pr_number}: {e}"))?;
+        let n = view_json["number"].as_u64().unwrap_or(0) as u32;
+        let u = view_json["url"].as_str().unwrap_or("").to_string();
+        let t = view_json["title"].as_str().unwrap_or("").to_string();
+        (n, u, t)
+    };
 
     if viewed_pr_number == 0 || pr_url.is_empty() {
         return Err(format!("PR #{pr_number} did not return a valid URL"));
@@ -6741,12 +7070,26 @@ fn parse_pr_view_link(output: &[u8]) -> Result<Option<DetectPrResponse>, String>
     }))
 }
 
-/// Resolve PR number/url/title via `gh pr view <number>`.
+/// Resolve PR/MR number/url/title by number (via `gh pr view` or the GitLab API).
 fn view_pr_link_by_number(
     app: &AppHandle,
     worktree_path: &str,
     pr_number: u32,
 ) -> Result<Option<DetectPrResponse>, String> {
+    if resolve_git_provider(worktree_path).0 == GitProvider::Gitlab {
+        return match crate::projects::gitlab_issues::get_mr_brief(app, worktree_path, pr_number) {
+            Ok((num, url, title)) => Ok(Some(DetectPrResponse {
+                pr_number: num,
+                pr_url: url,
+                title,
+            })),
+            Err(e) => {
+                log::warn!("glab MR !{pr_number} lookup failed: {e}");
+                Ok(None)
+            }
+        };
+    }
+
     let gh = resolve_gh_binary(app);
     let output = gh_command(&gh, worktree_path)
         .args([
@@ -6951,6 +7294,12 @@ pub async fn trigger_coderabbit_pr_review(
     pr_number: Option<u32>,
 ) -> Result<TriggerCodeRabbitPrReviewResponse, String> {
     log::trace!("Triggering CodeRabbit PR review for: {worktree_path}");
+
+    if resolve_git_provider(&worktree_path).0 == GitProvider::Gitlab {
+        return Err(
+            "Triggering a CodeRabbit review from Jean isn't supported on GitLab yet.".to_string(),
+        );
+    }
 
     let gh = resolve_gh_binary(&app);
     let target_pr_number =
@@ -8048,6 +8397,23 @@ fn parse_pr_output(output: &str) -> Result<(u32, String), String> {
     Ok((pr_number, url))
 }
 
+/// Persist a PR/MR link (`number` + `url`) onto the worktree matching `path`.
+/// Best-effort: logs on failure and never returns an error to the caller.
+fn save_worktree_pr_link_by_path(
+    app: &AppHandle,
+    worktree_path: &str,
+    pr_number: u32,
+    pr_url: &str,
+) {
+    if let Ok(mut data) = load_projects_data(app) {
+        if let Some(wt) = data.worktrees.iter_mut().find(|w| w.path == worktree_path) {
+            wt.pr_number = Some(pr_number);
+            wt.pr_url = Some(pr_url.to_string());
+            let _ = save_projects_data(app, &data);
+        }
+    }
+}
+
 /// Create a PR with AI-generated title and body
 ///
 /// This command:
@@ -8180,42 +8546,51 @@ pub async fn create_pr_with_ai_content(
     }
     check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
-    // Check if a PR already exists for this branch before spending time/tokens on AI generation
+    // Which git host does this project use? (GitHub via gh / GitLab via glab)
+    let git_provider = resolve_git_provider(&worktree_path).0;
     let gh = resolve_gh_binary(&app);
-    let view_output = gh_command(&gh, &worktree_path)
-        .args(["pr", "view", "--json", "number,url,title"])
-        .output();
 
-    if let Ok(view_out) = view_output {
-        if view_out.status.success() {
-            if let Ok(view_json) = serde_json::from_slice::<serde_json::Value>(&view_out.stdout) {
-                let pr_number = view_json["number"].as_u64().unwrap_or(0) as u32;
-                let pr_url = view_json["url"].as_str().unwrap_or("").to_string();
-                let title = view_json["title"].as_str().unwrap_or("").to_string();
+    // Check if a PR/MR already exists for this branch before spending time/tokens on AI generation
+    let existing_pr: Option<(u32, String, String)> = if git_provider == GitProvider::Gitlab {
+        crate::projects::gitlab_issues::view_open_mr_for_branch(
+            &app,
+            &worktree_path,
+            &current_branch,
+        )
+        .unwrap_or(None)
+    } else {
+        gh_command(&gh, &worktree_path)
+            .args(["pr", "view", "--json", "number,url,title"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+            .and_then(|j| {
+                let n = j["number"].as_u64().unwrap_or(0) as u32;
+                let u = j["url"].as_str().unwrap_or("").to_string();
+                let t = j["title"].as_str().unwrap_or("").to_string();
+                (n > 0 && !u.is_empty()).then_some((n, u, t))
+            })
+    };
 
-                if pr_number > 0 && !pr_url.is_empty() {
-                    log::trace!("Found existing PR #{pr_number}, skipping AI generation");
+    if let Some((pr_number, pr_url, title)) = existing_pr {
+        log::trace!("Found existing PR/MR #{pr_number}, skipping AI generation");
 
-                    // Save PR info to worktree
-                    if let Ok(mut data) = load_projects_data(&app) {
-                        if let Some(wt) =
-                            data.worktrees.iter_mut().find(|w| w.path == worktree_path)
-                        {
-                            wt.pr_number = Some(pr_number);
-                            wt.pr_url = Some(pr_url.clone());
-                            let _ = save_projects_data(&app, &data);
-                        }
-                    }
-
-                    return Ok(CreatePrResponse {
-                        pr_number,
-                        pr_url,
-                        title,
-                        existing: true,
-                    });
-                }
+        // Save PR info to worktree
+        if let Ok(mut data) = load_projects_data(&app) {
+            if let Some(wt) = data.worktrees.iter_mut().find(|w| w.path == worktree_path) {
+                wt.pr_number = Some(pr_number);
+                wt.pr_url = Some(pr_url.clone());
+                let _ = save_projects_data(&app, &data);
             }
         }
+
+        return Ok(CreatePrResponse {
+            pr_number,
+            pr_url,
+            title,
+            existing: true,
+        });
     }
 
     // Session issue/PR attachments replace worktree attachments of the same type.
@@ -8290,6 +8665,53 @@ pub async fn create_pr_with_ai_content(
 
     log::trace!("Generated PR title: {}", pr_content.title);
     check_pr_creation_cancelled(&pr_creation.cancelled)?;
+
+    // GitLab: create the MR via glab and return early.
+    if git_provider == GitProvider::Gitlab {
+        log::trace!("Creating merge request with glab");
+        let result = crate::projects::gitlab_issues::create_mr(
+            &app,
+            &worktree_path,
+            &current_branch,
+            &target_branch,
+            &pr_content.title,
+            &pr_content.body,
+        );
+        check_pr_creation_cancelled(&pr_creation.cancelled)?;
+
+        let (pr_number, pr_url) = match result {
+            Ok(created) => created,
+            Err(e) if e.contains("already exists") || e.contains("409") => {
+                // Race/edge: an open MR appeared — link it instead of failing.
+                match crate::projects::gitlab_issues::view_open_mr_for_branch(
+                    &app,
+                    &worktree_path,
+                    &current_branch,
+                ) {
+                    Ok(Some((num, url, title))) => {
+                        save_worktree_pr_link_by_path(&app, &worktree_path, num, &url);
+                        return Ok(CreatePrResponse {
+                            pr_number: num,
+                            pr_url: url,
+                            title,
+                            existing: true,
+                        });
+                    }
+                    _ => return Err("A merge request for this branch already exists".to_string()),
+                }
+            }
+            Err(e) => return Err(format!("Failed to create merge request: {e}")),
+        };
+
+        log::trace!("Successfully created MR !{pr_number}: {pr_url}");
+        save_worktree_pr_link_by_path(&app, &worktree_path, pr_number, &pr_url);
+        return Ok(CreatePrResponse {
+            pr_number,
+            pr_url,
+            title: pr_content.title,
+            existing: false,
+        });
+    }
 
     // Create the PR using gh CLI (base = worktree base branch when set)
     log::trace!("Creating PR with gh CLI against base branch: {target_branch}");
@@ -8475,6 +8897,27 @@ pub async fn merge_github_pr(
     app: AppHandle,
     worktree_path: String,
 ) -> Result<MergePrResponse, String> {
+    // GitLab: find the current branch's MR and merge it via glab. GitLab's merge
+    // endpoint enforces mergeability (conflicts / unmet approvals) server-side.
+    if resolve_git_provider(&worktree_path).0 == GitProvider::Gitlab {
+        let branch = git::get_current_branch(&worktree_path)?;
+        let (mr_number, _url, title) =
+            match crate::projects::gitlab_issues::view_open_mr_for_branch(
+                &app,
+                &worktree_path,
+                &branch,
+            )? {
+                Some(mr) => mr,
+                None => return Err("No open merge request found for this branch".to_string()),
+            };
+        crate::projects::gitlab_issues::merge_mr(&app, &worktree_path, mr_number)?;
+        log::info!("Merged MR: {title}");
+        return Ok(MergePrResponse {
+            merged: true,
+            message: format!("Merged: {title}"),
+        });
+    }
+
     let gh = resolve_gh_binary(&app);
 
     // 1. Check PR status and mergeability
@@ -8694,6 +9137,19 @@ fn generate_pr_content_from_inputs(
         )?;
         let mut response: PrContentResponse = serde_json::from_str(&json_str)
             .map_err(|error| format!("Failed to parse Antigravity PR content: {error}"))?;
+        response.body = augment_pr_references_in_body(&response.body, related_pr_issue_refs);
+        return Ok(response);
+    }
+    if backend == crate::chat::types::Backend::Muse {
+        let json_str = crate::chat::muse::execute_one_shot_muse(
+            app,
+            &prompt,
+            model_str,
+            Some(PR_CONTENT_SCHEMA),
+            Some(std::path::Path::new(repo_path)),
+        )?;
+        let mut response: PrContentResponse = serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Muse PR content: {error}"))?;
         response.body = augment_pr_references_in_body(&response.body, related_pr_issue_refs);
         return Ok(response);
     }
@@ -9315,7 +9771,7 @@ fn generate_commit_message(
         reasoning_effort,
     )?;
 
-    match validate_commit_message(&response.message, prompt, prompt) {
+    let result = match validate_commit_message(&response.message, prompt, prompt) {
         Ok(()) => Ok(response),
         Err(first_reason) => {
             log::warn!(
@@ -9346,7 +9802,27 @@ fn generate_commit_message(
                 }
             }
         }
-    }
+    };
+    result.map(|response| CommitMessageResponse {
+        message: strip_co_authored_by_trailers(&response.message),
+    })
+}
+
+/// Jean commits never carry `Co-Authored-By:` trailers, even when the model
+/// copies them from recent commits or a backend default.
+fn strip_co_authored_by_trailers(message: &str) -> String {
+    message
+        .lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("co-authored-by:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
 }
 
 /// Choose a usable commit message when validation failed but we still want to
@@ -9501,6 +9977,17 @@ fn generate_commit_message_once(
         )?;
         return serde_json::from_str(&json_str)
             .map_err(|error| format!("Failed to parse Antigravity commit message: {error}"));
+    }
+    if backend == crate::chat::types::Backend::Muse {
+        let json_str = crate::chat::muse::execute_one_shot_muse(
+            app,
+            prompt,
+            model_str,
+            Some(COMMIT_MESSAGE_SCHEMA),
+            working_dir,
+        )?;
+        return serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Muse commit message: {error}"));
     }
 
     log::trace!("Generating commit message with Claude CLI (JSON schema)");
@@ -9782,6 +10269,7 @@ fn review_backend_allows_repository_investigation(backend: &crate::chat::types::
             | crate::chat::types::Backend::Codex
             | crate::chat::types::Backend::Cursor
             | crate::chat::types::Backend::Antigravity
+            | crate::chat::types::Backend::Muse
     )
 }
 
@@ -10292,6 +10780,18 @@ fn generate_review(
         )?;
         let response = serde_json::from_str(&json_str)
             .map_err(|error| format!("Failed to parse Antigravity review: {error}"))?;
+        return validate_review_response(response, working_dir);
+    }
+    if backend == crate::chat::types::Backend::Muse {
+        let json_str = crate::chat::muse::execute_one_shot_muse(
+            app,
+            prompt,
+            model_str,
+            Some(REVIEW_SCHEMA),
+            review_working_dir,
+        )?;
+        let response = serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Muse review: {error}"))?;
         return validate_review_response(response, working_dir);
     }
 
@@ -11874,6 +12374,20 @@ fn generate_release_notes_content(
             augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
         return Ok(response);
     }
+    if backend == crate::chat::types::Backend::Muse {
+        let json_str = crate::chat::muse::execute_one_shot_muse(
+            app,
+            &prompt,
+            model_str,
+            Some(RELEASE_NOTES_SCHEMA),
+            Some(std::path::Path::new(project_path)),
+        )?;
+        let mut response: ReleaseNotesResponse = serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Muse release notes: {error}"))?;
+        response.body =
+            augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
+        return Ok(response);
+    }
 
     let cli_path = resolve_cli_binary(app);
     if !cli_path.exists() {
@@ -12950,6 +13464,7 @@ pub async fn create_folder(
         sentry_auth_token: None,
         sentry_organization_slug: None,
         sentry_project_slug: None,
+        sentry_projects: Vec::new(),
         sentry_base_url: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
@@ -14970,6 +15485,103 @@ mod tests {
     }
 
     #[test]
+    fn windows_terminal_preference_opens_powershell_by_default() {
+        let path = r"C:\Users\O'Brien\repo";
+        for terminal in ["powershell", "terminal", ""] {
+            let plan =
+                windows_external_terminal_launch(terminal, path, None).expect("powershell plan");
+            assert_eq!(plan.program, "powershell.exe");
+            assert_eq!(
+                plan.args,
+                vec![
+                    "-NoExit".to_string(),
+                    "-Command".to_string(),
+                    "Set-Location -LiteralPath 'C:\\Users\\O''Brien\\repo'".to_string(),
+                ]
+            );
+            assert_eq!(plan.current_dir, None);
+        }
+    }
+
+    #[test]
+    fn windows_terminal_preference_can_select_windows_terminal_or_warp() {
+        let path = r"C:\work\repo";
+        let wt = windows_external_terminal_launch("windows-terminal", path, None)
+            .expect("windows terminal plan");
+        assert_eq!(wt.program, "wt");
+        assert_eq!(wt.args, vec!["-d".to_string(), path.to_string()]);
+
+        let warp = windows_external_terminal_launch("warp", path, Some(r"C:\Warp\warp.exe"))
+            .expect("warp plan");
+        assert_eq!(warp.program, r"C:\Warp\warp.exe");
+        assert_eq!(warp.current_dir.as_deref(), Some(path));
+
+        let missing = windows_external_terminal_launch("warp", path, None);
+        assert!(missing.is_err());
+    }
+
+    #[test]
+    fn linux_terminal_candidates_try_a_fallback_chain() {
+        let candidates = linux_external_terminal_candidates("terminal", "/home/user/project");
+        let programs: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.program)
+            .collect();
+        assert_eq!(
+            programs,
+            vec![
+                "x-terminal-emulator",
+                "gnome-terminal",
+                "konsole",
+                "alacritty",
+                "kitty",
+                "ghostty",
+                "xterm",
+            ]
+        );
+        assert_eq!(
+            candidates[1].args,
+            vec![
+                "--working-directory".to_string(),
+                "/home/user/project".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_terminal_candidates_prefer_kitty_and_quote_paths() {
+        let candidates = linux_external_terminal_candidates("kitty", "/home/user/o'brien/project");
+        assert_eq!(candidates[0].program, "kitty");
+        assert_eq!(
+            candidates[0].args,
+            vec![
+                "--directory".to_string(),
+                "/home/user/o'brien/project".to_string()
+            ]
+        );
+        let xterm = candidates
+            .iter()
+            .find(|candidate| candidate.program == "xterm")
+            .expect("xterm candidate");
+        assert_eq!(
+            xterm.args,
+            vec![
+                "-e".to_string(),
+                "bash".to_string(),
+                "-c".to_string(),
+                "cd '/home/user/o'\\''brien/project'; exec bash".to_string(),
+            ]
+        );
+
+        let ghostty = linux_external_terminal_candidates("ghostty", "/home/user/project");
+        assert_eq!(ghostty[0].program, "ghostty");
+        assert_eq!(
+            ghostty[0].current_dir.as_deref(),
+            Some("/home/user/project")
+        );
+    }
+
+    #[test]
     fn parse_worktree_origin_preserves_manual_origin() {
         assert_eq!(
             parse_worktree_origin(Some("manual")),
@@ -15113,6 +15725,9 @@ mod tests {
         ));
         assert!(review_backend_allows_repository_investigation(
             &Backend::Antigravity
+        ));
+        assert!(review_backend_allows_repository_investigation(
+            &Backend::Muse
         ));
         assert!(!review_backend_allows_repository_investigation(
             &Backend::Opencode
@@ -15588,6 +16203,7 @@ mod tests {
             sentry_auth_token: None,
             sentry_organization_slug: None,
             sentry_project_slug: None,
+            sentry_projects: Vec::new(),
             sentry_base_url: None,
             linked_project_ids: Vec::new(),
             auto_fix_settings: None,
@@ -15608,6 +16224,48 @@ mod tests {
         assert!(is_project_avatar_file(&first, "project-1"));
         assert!(is_project_avatar_file("project-1.png", "project-1"));
         assert!(!is_project_avatar_file(&first, "project-10"));
+    }
+
+    #[tokio::test]
+    async fn remove_project_keeps_files_on_disk_and_rejects_folders() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+        let app = crate::RuntimeContext::new(temp.path().join("data"), temp.path().into()).unwrap();
+        let data: ProjectsData = serde_json::from_value(serde_json::json!({
+            "projects": [
+                {"id": "folder", "name": "Folder", "path": "", "default_branch": "",
+                 "added_at": 0, "is_folder": true},
+                {"id": "project", "name": "Test", "path": repo, "default_branch": "main",
+                 "added_at": 0, "parent_id": "folder"}
+            ],
+            "worktrees": []
+        }))
+        .unwrap();
+        save_projects_data(&app, &data).unwrap();
+
+        let err = remove_project(app.clone(), "folder".into())
+            .await
+            .unwrap_err();
+        assert!(err.contains("folder"));
+        assert!(load_projects_data(&app)
+            .unwrap()
+            .find_project("folder")
+            .is_some());
+
+        crate::http_server::dispatch::dispatch_command(
+            &app,
+            "remove_project",
+            serde_json::json!({"projectId": "project"}),
+        )
+        .await
+        .unwrap();
+        assert!(load_projects_data(&app)
+            .unwrap()
+            .find_project("project")
+            .is_none());
+        assert!(repo.join("keep.txt").exists());
     }
 
     #[tokio::test]
@@ -15730,6 +16388,7 @@ mod tests {
             sentry_base_url: None,
             sentry_organization_slug: None,
             sentry_project_slug: None,
+            sentry_projects: Vec::new(),
             linked_project_ids: Vec::new(),
             auto_fix_settings: None,
             server: None,
@@ -15912,6 +16571,19 @@ Body
 
         let custom = add_commit_prompt_rule("Custom prompt", "New rule");
         assert_eq!(custom, "Custom prompt\n\nAdditional rule:\n- New rule");
+    }
+
+    #[test]
+    fn strip_co_authored_by_trailers_removes_only_trailer_lines() {
+        let message = "feat(chat): add steering\n\nKeep body line.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nco-authored-by: Bot <bot@example.com>\n";
+        assert_eq!(
+            strip_co_authored_by_trailers(message),
+            "feat(chat): add steering\n\nKeep body line."
+        );
+        assert_eq!(
+            strip_co_authored_by_trailers("fix: keep me"),
+            "fix: keep me"
+        );
     }
 
     #[test]
@@ -16186,5 +16858,308 @@ Body
 
         wt.base_branch = Some("  ".into());
         assert_eq!(resolve_worktree_status_base(&wt, "next"), "next");
+    }
+}
+
+#[cfg(test)]
+mod import_worktree_tests {
+    use super::{import_worktree, list_unmanaged_worktrees};
+    use crate::projects::storage::save_projects_data;
+    use crate::projects::types::{Project, ProjectsData, Worktree};
+    use crate::projects::unmanaged_worktrees::BlockedImportKind;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tauri::AppHandle;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(future)
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_repo(path: &Path) {
+        std::fs::create_dir_all(path).expect("repo dir");
+        git(path, &["init", "--initial-branch", "main"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(path, &["config", "user.name", "Test"]);
+        git(path, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(path.join("README"), "hi\n").expect("readme");
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "init"]);
+    }
+
+    fn short_head(path: &Path) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("rev-parse");
+        assert!(output.status.success());
+        let oid = String::from_utf8_lossy(&output.stdout);
+        oid.trim()[..7].to_string()
+    }
+
+    fn test_app(root: &Path) -> AppHandle {
+        AppHandle::new(root.join("data"), root.join("resources")).expect("app")
+    }
+
+    fn project_json(id: &str, path: &Path) -> Project {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "path": path.to_string_lossy(),
+            "default_branch": "main",
+            "added_at": 1
+        }))
+        .expect("project")
+    }
+
+    fn worktree_json(id: &str, project_id: &str, path: &str, archived: bool) -> Worktree {
+        let mut value = serde_json::json!({
+            "id": id,
+            "project_id": project_id,
+            "name": id,
+            "path": path,
+            "branch": "stored",
+            "created_at": 1,
+            "setup_output": null,
+            "setup_script": null,
+            "order": 1
+        });
+        if archived {
+            value["archived_at"] = serde_json::json!(10);
+        }
+        serde_json::from_value(value).expect("worktree")
+    }
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        app: AppHandle,
+        repo: PathBuf,
+        feature: PathBuf,
+        detached: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = root.path().join("repo");
+        let feature = root.path().join("feature");
+        let detached = root.path().join("detached");
+        init_repo(&repo);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repo,
+            &["worktree", "add", "--detach", detached.to_str().unwrap()],
+        );
+        let app = test_app(root.path());
+        Fixture {
+            _root: root,
+            app,
+            repo,
+            feature,
+            detached,
+        }
+    }
+
+    fn save(app: &AppHandle, projects: Vec<Project>, worktrees: Vec<Worktree>) {
+        save_projects_data(
+            app,
+            &ProjectsData {
+                projects,
+                worktrees,
+            },
+        )
+        .expect("save projects");
+    }
+
+    #[test]
+    fn import_stores_branch_name_and_short_oid_for_detached_head() {
+        let fixture = fixture();
+        save(
+            &fixture.app,
+            vec![project_json("project-a", &fixture.repo)],
+            Vec::new(),
+        );
+
+        let imported = block_on(import_worktree(
+            fixture.app.clone(),
+            "project-a".to_string(),
+            fixture.feature.to_string_lossy().into_owned(),
+        ))
+        .expect("import feature");
+        assert_eq!(imported.branch, "feature");
+        assert_ne!(imported.branch, "HEAD");
+
+        let detached = block_on(import_worktree(
+            fixture.app.clone(),
+            "project-a".to_string(),
+            fixture.detached.to_string_lossy().into_owned(),
+        ))
+        .expect("import detached");
+        assert_eq!(detached.branch, short_head(&fixture.detached));
+        assert_ne!(detached.branch, "HEAD");
+    }
+
+    #[test]
+    fn import_rejects_project_checkout_main_checkout_and_tracked_paths() {
+        let fixture = fixture();
+        let tracked = format!("{}/", fixture.feature.to_string_lossy());
+        save(
+            &fixture.app,
+            vec![
+                project_json("project-a", &fixture.detached),
+                project_json("project-b", &fixture.repo),
+            ],
+            vec![worktree_json("other", "project-b", &tracked, true)],
+        );
+
+        let project_checkout = block_on(import_worktree(
+            fixture.app.clone(),
+            "project-a".to_string(),
+            fixture.detached.to_string_lossy().into_owned(),
+        ))
+        .expect_err("project checkout");
+        assert!(
+            project_checkout.starts_with("Cannot import the project checkout:"),
+            "{project_checkout}"
+        );
+
+        let main_checkout = block_on(import_worktree(
+            fixture.app.clone(),
+            "project-a".to_string(),
+            format!("{}/", fixture.repo.to_string_lossy()),
+        ))
+        .expect_err("main checkout");
+        assert!(
+            main_checkout.starts_with("Cannot import the repository's main checkout:"),
+            "{main_checkout}"
+        );
+
+        let tracked_import = block_on(import_worktree(
+            fixture.app.clone(),
+            "project-a".to_string(),
+            fixture.feature.to_string_lossy().into_owned(),
+        ))
+        .expect_err("tracked path");
+        assert!(
+            tracked_import.starts_with("A worktree with this path is already tracked:"),
+            "{tracked_import}"
+        );
+    }
+
+    #[test]
+    fn list_hides_paths_tracked_by_other_projects_and_reports_blocked_checkouts() {
+        let fixture = fixture();
+        let archived = root_join(&fixture, "archived");
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "archived-feature",
+                archived.to_str().unwrap(),
+            ],
+        );
+        let free = root_join(&fixture, "free");
+        git(
+            &fixture.repo,
+            &["worktree", "add", "-b", "free", free.to_str().unwrap()],
+        );
+
+        save(
+            &fixture.app,
+            vec![
+                project_json("project-a", &fixture.repo),
+                project_json("project-b", &fixture.feature),
+            ],
+            vec![
+                worktree_json(
+                    "shared",
+                    "project-b",
+                    &fixture.feature.to_string_lossy(),
+                    false,
+                ),
+                worktree_json(
+                    "old",
+                    "project-b",
+                    &format!("{}/", archived.to_string_lossy()),
+                    true,
+                ),
+            ],
+        );
+
+        let listing = block_on(list_unmanaged_worktrees(
+            fixture.app.clone(),
+            "project-a".to_string(),
+        ))
+        .expect("list");
+
+        let paths: Vec<&str> = listing
+            .worktrees
+            .iter()
+            .map(|worktree| worktree.path.as_str())
+            .collect();
+        let same = |path: &str, expected: &Path| {
+            crate::projects::unmanaged_worktrees::comparable_worktree_path(path)
+                == crate::projects::unmanaged_worktrees::comparable_worktree_path(
+                    &expected.to_string_lossy(),
+                )
+        };
+        assert!(
+            paths.iter().any(|path| same(path, &free)),
+            "free worktree missing from {paths:?}"
+        );
+        assert!(
+            paths.iter().all(|path| !same(path, &fixture.feature)),
+            "other project's worktree was listed: {paths:?}"
+        );
+        assert!(
+            paths.iter().all(|path| !same(path, &archived)),
+            "archived worktree was listed: {paths:?}"
+        );
+        assert!(
+            paths.iter().all(|path| !same(path, &fixture.repo)),
+            "main checkout was listed: {paths:?}"
+        );
+        assert!(listing.worktrees.iter().any(|worktree| worktree.detached));
+        assert_eq!(listing.blocked_paths.len(), 1);
+        assert_eq!(listing.blocked_paths[0].kind, BlockedImportKind::Project);
+        assert_eq!(
+            crate::projects::unmanaged_worktrees::comparable_worktree_path(
+                &listing.blocked_paths[0].path
+            ),
+            crate::projects::unmanaged_worktrees::comparable_worktree_path(
+                &fixture.repo.to_string_lossy()
+            )
+        );
+    }
+
+    fn root_join(fixture: &Fixture, name: &str) -> PathBuf {
+        fixture.repo.parent().expect("parent").join(name)
     }
 }

@@ -10,7 +10,6 @@ import {
   Wand2,
   Eye,
   MoreHorizontal,
-  MessageSquarePlus,
 } from '@/components/icons/reicon'
 import {
   Tooltip,
@@ -81,17 +80,17 @@ export function SessionTabBar({
 }
 
 /** GitHub-style list row wrapper shared by issue and PR rows. */
-const githubRowClass = (
+export const githubRowClass = (
   isSelected: boolean,
   isChecked: boolean,
   busy: boolean
 ) =>
   cn(
-    'group w-full flex items-start gap-2.5 px-4 py-2 text-left transition-colors border-b border-border/60 last:border-b-0',
+    'group w-full flex items-start gap-2.5 px-4 py-2 text-left transition-colors cursor-pointer border-b border-border/60 last:border-b-0',
     'hover:bg-accent/60',
     isSelected && 'bg-accent',
     isChecked && !isSelected && 'bg-accent/50',
-    busy && 'opacity-50'
+    busy && 'opacity-50 cursor-not-allowed'
   )
 
 function LabelPills({
@@ -122,19 +121,26 @@ function LabelPills({
   ))
 }
 
-/** "#123 opened 3d ago by octocat" */
+/** "owner/name #123 opened 3d ago by octocat" */
 function OpenedMeta({
   number,
   createdAt,
   author,
+  source,
 }: {
   number: number
   createdAt: string
   author?: string
+  source?: string
 }) {
   const time = Date.parse(createdAt)
   return (
     <>
+      {source && (
+        <>
+          <span className="text-foreground/70">{source}</span>{' '}
+        </>
+      )}
       #{number}
       {!Number.isNaN(time) && ` opened ${formatRelative(time / 1000)}`}
       {author && (
@@ -158,9 +164,9 @@ export interface IssueItemProps {
   onMouseEnter: () => void
   onClick: (background: boolean) => void
   onInvestigate: (background: boolean) => void
-  onInvestigateInNewSession?: () => void
   onPreview: () => void
   onLabelClick?: (label: string) => void
+  showSource?: boolean
 }
 
 export function IssueItem({
@@ -174,21 +180,24 @@ export function IssueItem({
   onMouseEnter,
   onClick,
   onInvestigate,
-  onInvestigateInNewSession,
   onPreview,
   onLabelClick,
+  showSource = false,
 }: IssueItemProps) {
   return (
     <div
       data-item-index={index}
       onMouseEnter={onMouseEnter}
+      onClick={e => !isCreating && onClick(e.metaKey || e.ctrlKey)}
       className={githubRowClass(isSelected, isChecked, isCreating)}
     >
       {onCheckedChange && (
         <ItemSelectCheckbox
           checked={isChecked}
           disabled={isCreating}
-          ariaLabel={`Select issue #${issue.number}`}
+          ariaLabel={`Select issue #${issue.number}${
+            showSource && issue.repo ? ` from ${issue.repo}` : ''
+          }`}
           onCheckedChange={onCheckedChange}
         />
       )}
@@ -208,7 +217,6 @@ export function IssueItem({
         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
           <button
             type="button"
-            onClick={e => onClick(e.metaKey || e.ctrlKey)}
             disabled={isCreating}
             className="min-w-0 text-left text-sm font-semibold leading-5 hover:text-primary focus:outline-none disabled:cursor-not-allowed"
           >
@@ -226,11 +234,15 @@ export function IssueItem({
             number={issue.number}
             createdAt={issue.created_at}
             author={issue.author?.login}
+            source={showSource ? issue.repo : undefined}
           />
         </div>
       </div>
       <ContextLinkBadge matches={contextMatches} />
-      <div className="shrink-0 flex items-center gap-1 self-center">
+      <div
+        className="shrink-0 flex items-center gap-1 self-center"
+        onClick={e => e.stopPropagation()}
+      >
         <ItemActions
           label="Issue"
           previewLabel="Preview issue"
@@ -238,7 +250,6 @@ export function IssueItem({
           isCreating={isCreating}
           onPreview={onPreview}
           onInvestigate={onInvestigate}
-          onInvestigateInNewSession={onInvestigateInNewSession}
         />
       </div>
     </div>
@@ -260,6 +271,7 @@ export interface PRItemProps {
   onStack: (background: boolean) => void
   onPreview: () => void
   onLabelClick?: (label: string) => void
+  showSource?: boolean
 }
 
 export function PRItem({
@@ -277,19 +289,23 @@ export function PRItem({
   onStack,
   onPreview,
   onLabelClick,
+  showSource = false,
 }: PRItemProps) {
   const busy = isCreating || isStacking
   return (
     <div
       data-item-index={index}
       onMouseEnter={onMouseEnter}
+      onClick={e => !busy && onClick(e.metaKey || e.ctrlKey)}
       className={githubRowClass(isSelected, isChecked, busy)}
     >
       {onCheckedChange && (
         <ItemSelectCheckbox
           checked={isChecked}
           disabled={busy}
-          ariaLabel={`Select PR #${pr.number}`}
+          ariaLabel={`Select PR #${pr.number}${
+            showSource && pr.repo ? ` from ${pr.repo}` : ''
+          }`}
           onCheckedChange={onCheckedChange}
         />
       )}
@@ -313,7 +329,6 @@ export function PRItem({
         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
           <button
             type="button"
-            onClick={e => onClick(e.metaKey || e.ctrlKey)}
             disabled={busy}
             className="min-w-0 text-left text-sm font-semibold leading-5 hover:text-primary focus:outline-none disabled:cursor-not-allowed"
           >
@@ -331,11 +346,15 @@ export function PRItem({
             number={pr.number}
             createdAt={pr.created_at}
             author={pr.author?.login}
+            source={showSource ? pr.repo : undefined}
           />
         </div>
       </div>
       <ContextLinkBadge matches={contextMatches} />
-      <div className="shrink-0 flex items-center gap-1 self-center">
+      <div
+        className="shrink-0 flex items-center gap-1 self-center"
+        onClick={e => e.stopPropagation()}
+      >
         <ItemActions
           label="PR"
           previewLabel="Preview PR"
@@ -375,6 +394,7 @@ export function PRItem({
 
 export interface BranchItemProps {
   branch: string
+  remote?: string
   index: number
   isSelected: boolean
   isCreating: boolean
@@ -384,6 +404,7 @@ export interface BranchItemProps {
 
 export function BranchItem({
   branch,
+  remote,
   index,
   isSelected,
   isCreating,
@@ -414,6 +435,11 @@ export function BranchItem({
       >
         <span className="text-sm truncate">{branch}</span>
       </button>
+      {remote && (
+        <span className="shrink-0 rounded-full border border-border px-1.5 py-px text-[11px] font-medium text-muted-foreground">
+          {remote}
+        </span>
+      )}
     </div>
   )
 }
@@ -436,7 +462,6 @@ function ItemActions({
   isCreating,
   onPreview,
   onInvestigate,
-  onInvestigateInNewSession,
 }: {
   label: string
   previewLabel: string
@@ -444,7 +469,6 @@ function ItemActions({
   isCreating: boolean
   onPreview: () => void
   onInvestigate: (background: boolean) => void
-  onInvestigateInNewSession?: () => void
 }) {
   const isMobile = useIsMobile()
 
@@ -470,12 +494,6 @@ function ItemActions({
             <Wand2 className="h-4 w-4 text-current" />
             Investigate
           </DropdownMenuItem>
-          {onInvestigateInNewSession && (
-            <DropdownMenuItem onClick={onInvestigateInNewSession}>
-              <Wand2 className="h-4 w-4 text-current" />
-              Investigate in the Current Worktree
-            </DropdownMenuItem>
-          )}
           <DropdownMenuItem onClick={() => onInvestigate(true)}>
             <Wand2 className="h-4 w-4 text-current" />
             Investigate in Background
@@ -505,25 +523,6 @@ function ItemActions({
           {previewLabel} ({getModifierSymbol()}O)
         </TooltipContent>
       </Tooltip>
-      {onInvestigateInNewSession && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label={`${investigateLabel} in the current worktree`}
-              onClick={e => {
-                e.stopPropagation()
-                onInvestigateInNewSession()
-              }}
-              disabled={isCreating}
-              className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
-            >
-              <MessageSquarePlus className="h-3.5 w-3.5" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Investigate in the current worktree</TooltipContent>
-        </Tooltip>
-      )}
       <Tooltip>
         <TooltipTrigger asChild>
           <button

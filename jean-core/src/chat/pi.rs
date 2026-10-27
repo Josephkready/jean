@@ -530,6 +530,20 @@ fn append_system_prompt_arg(args: &mut Vec<String>, system_prompt: Option<&str>)
     }
 }
 
+fn append_pi_agent_policy_args(
+    args: &mut Vec<String>,
+    execution_mode: Option<&str>,
+    system_prompt: Option<&str>,
+    pi_agent_owns_policy: bool,
+) {
+    if pi_agent_owns_policy {
+        return;
+    }
+    args.push("--tools".to_string());
+    args.push(pi_tools_for_mode(execution_mode.unwrap_or("build")).to_string());
+    append_system_prompt_arg(args, system_prompt);
+}
+
 fn usable_pi_session_id<'a>(
     existing_pi_session_id: Option<&'a str>,
     jean_session_id: &str,
@@ -551,6 +565,7 @@ fn build_pi_rpc_args(
     effort_level: Option<&super::types::EffortLevel>,
     system_prompt: Option<&str>,
     existing_pi_session_id: Option<&str>,
+    pi_agent_owns_policy: bool,
 ) -> Vec<String> {
     let mut args = vec!["--mode".to_string(), "rpc".to_string()];
     if let Some(id) = usable_pi_session_id(existing_pi_session_id, jean_session_id) {
@@ -565,9 +580,12 @@ fn build_pi_rpc_args(
         args.push("--thinking".to_string());
         args.push(thinking.to_string());
     }
-    args.push("--tools".to_string());
-    args.push(pi_tools_for_mode(execution_mode.unwrap_or("plan")).to_string());
-    append_system_prompt_arg(&mut args, system_prompt);
+    append_pi_agent_policy_args(
+        &mut args,
+        execution_mode,
+        system_prompt,
+        pi_agent_owns_policy,
+    );
     args
 }
 
@@ -615,6 +633,19 @@ pub(crate) fn run_id_from_output_file(output_file: &Path) -> String {
 
 #[cfg(unix)]
 pub(crate) fn pi_rpc_socket_path(app_data_dir: &Path, session_id: &str, run_id: &str) -> PathBuf {
+    host_socket_path(app_data_dir, 'p', session_id, run_id)
+}
+
+/// Short socket path `<app_data>/r/<prefix><8 sid chars><8 run chars>.sock`
+/// for detached host processes. Kept short for the ~104-byte macOS
+/// `sun_path` limit.
+#[cfg(unix)]
+pub(crate) fn host_socket_path(
+    app_data_dir: &Path,
+    prefix: char,
+    session_id: &str,
+    run_id: &str,
+) -> PathBuf {
     fn short_id(value: &str) -> String {
         let short = value
             .chars()
@@ -629,14 +660,20 @@ pub(crate) fn pi_rpc_socket_path(app_data_dir: &Path, session_id: &str, run_id: 
     }
 
     app_data_dir.join("r").join(format!(
-        "p{}{}.sock",
+        "{prefix}{}{}.sock",
         short_id(session_id),
         short_id(run_id)
     ))
 }
 
+/// Wait until a detached host accepts connections on `socket_path`.
+/// Fails early when the host process `pid` exits first.
 #[cfg(unix)]
-fn wait_for_pi_rpc_socket(socket_path: &Path, pid: u32) -> Result<(), String> {
+pub(crate) fn wait_for_host_socket(
+    socket_path: &Path,
+    pid: u32,
+    label: &str,
+) -> Result<(), String> {
     use crate::platform::is_process_alive;
     use std::os::unix::net::UnixStream;
 
@@ -648,13 +685,13 @@ fn wait_for_pi_rpc_socket(socket_path: &Path, pid: u32) -> Result<(), String> {
         }
         if !is_process_alive(pid) {
             return Err(format!(
-                "PI RPC host exited before socket became ready: {}",
+                "{label} exited before socket became ready: {}",
                 socket_path.display()
             ));
         }
         if started.elapsed() > timeout {
             return Err(format!(
-                "Timed out waiting for PI RPC host socket at {}",
+                "Timed out waiting for {label} socket at {}",
                 socket_path.display()
             ));
         }
@@ -722,7 +759,7 @@ fn spawn_pi_rpc_host(
     }
 
     let pid = super::detached::spawn_detached_process(&exe, &args, &log_file, &app_data)?;
-    wait_for_pi_rpc_socket(&socket_path, pid)?;
+    wait_for_host_socket(&socket_path, pid, "PI RPC host")?;
     Ok((pid, socket_path))
 }
 
@@ -1283,6 +1320,7 @@ pub fn execute_pi(
     effort_level: Option<&super::types::EffortLevel>,
     message: &str,
     system_prompt: Option<&str>,
+    pi_agent_owns_policy: bool,
     pid_callback: Option<Box<dyn FnOnce(u32) + Send>>,
 ) -> Result<PiResponse, String> {
     let cli_path = crate::pi_cli::resolve_cli_binary(app);
@@ -1301,12 +1339,13 @@ pub fn execute_pi(
             effort_level,
             system_prompt,
             existing_pi_session_id,
+            pi_agent_owns_policy,
         );
         log::info!(
-            "[PI] spawning RPC host session={session_id} worktree={worktree_id} model={:?} mode={:?} tools={}",
+            "[PI] spawning RPC host session={session_id} worktree={worktree_id} model={:?} mode={:?} policy={}",
             raw_pi_model(model),
             execution_mode,
-            pi_tools_for_mode(execution_mode.unwrap_or("plan"))
+            if pi_agent_owns_policy { "pi" } else { "jean" }
         );
         let (pid, socket_path) = spawn_pi_rpc_host(
             app,
@@ -1380,17 +1419,20 @@ pub fn execute_pi(
             args.push("--thinking".to_string());
             args.push(thinking.to_string());
         }
-        args.push("--tools".to_string());
-        args.push(pi_tools_for_mode(execution_mode.unwrap_or("plan")).to_string());
-        append_system_prompt_arg(&mut args, system_prompt);
+        append_pi_agent_policy_args(
+            &mut args,
+            execution_mode,
+            system_prompt,
+            pi_agent_owns_policy,
+        );
         args.push(message.to_string());
 
         log::info!(
-        "[PI] spawning session={session_id} worktree={worktree_id} model={:?} mode={:?} thinking={:?} tools={}",
+        "[PI] spawning session={session_id} worktree={worktree_id} model={:?} mode={:?} thinking={:?} policy={}",
         raw_pi_model(model),
         execution_mode,
         pi_thinking,
-        pi_tools_for_mode(execution_mode.unwrap_or("plan"))
+        if pi_agent_owns_policy { "pi" } else { "jean" }
     );
 
         let mut child = crate::platform::wsl_resolved_cli_command(
@@ -1791,6 +1833,7 @@ mod tests {
             status: super::super::types::RunStatus::Completed,
             assistant_message_id: Some("assistant-pi".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -1800,7 +1843,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -1897,6 +1942,7 @@ mod tests {
             Some(&super::super::types::EffortLevel::High),
             Some("System instructions"),
             Some("pi-session-123"),
+            false,
         );
 
         assert!(args.windows(2).any(|w| w == ["--mode", "rpc"]));
@@ -1914,6 +1960,25 @@ mod tests {
             .any(|w| w == ["--append-system-prompt", "System instructions"]));
         assert_eq!(args.first().map(String::as_str), Some("--mode"));
         assert_eq!(args.get(1).map(String::as_str), Some("rpc"));
+    }
+
+    #[test]
+    fn pi_owned_policy_keeps_native_tools_extensions_and_instructions() {
+        let args = build_pi_rpc_args(
+            "jean-session-123",
+            Some("pi/openai-codex/gpt-5.4"),
+            Some("plan"),
+            None,
+            Some("Jean system instructions"),
+            None,
+            true,
+        );
+
+        assert!(!args.iter().any(|arg| arg == "--tools"));
+        assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--model", "openai-codex/gpt-5.4"]));
     }
 
     #[test]
@@ -1938,6 +2003,7 @@ mod tests {
             None,
             None,
             Some("a8200218-d1ae-47c2-b69e-9943c5b6baa6"),
+            false,
         );
 
         assert!(!args.iter().any(|arg| arg == "--session"));

@@ -53,7 +53,9 @@ mod coderabbit_cli;
 mod codex_cli;
 mod commandcode_cli;
 mod cursor_cli;
+mod devin_cli;
 mod gh_cli;
+mod glab_cli;
 mod grok_cli;
 pub mod http_server;
 pub mod jean_mcp_config;
@@ -61,6 +63,7 @@ pub mod jean_mcp_core;
 pub mod jean_mcp_socket;
 pub mod jean_mcp_stdio;
 mod kimi_cli;
+mod muse_cli;
 mod opencode_cli;
 mod opencode_server;
 mod opinionated;
@@ -70,6 +73,7 @@ mod prerequisites;
 mod projects;
 mod server_update;
 mod terminal;
+mod ui_client_state;
 mod version;
 
 pub use prerequisites::*;
@@ -79,11 +83,17 @@ pub use version::{app_version, set_app_version};
 // launch logic stays shared and complete: binary mapping, -g goto args,
 // macOS app fallbacks, Windows .cmd wrappers).
 pub use chat::open_file_in_default_app;
+pub use platform::kill_and_reap;
 pub use platform::open_url_in_browser;
+pub use platform::silent_command;
 pub use projects::open_worktree_in_editor;
+pub use projects::open_worktree_in_finder;
+pub use projects::open_worktree_in_terminal;
 
 // Process startup helper shared by the desktop and headless entry points.
 pub use platform::add_fnm_node_to_path;
+#[cfg(target_os = "linux")]
+pub use platform::fix_linux_path;
 pub use platform::raise_fd_limit;
 
 // Validation functions
@@ -180,7 +190,7 @@ pub struct AppPreferences {
     #[serde(default = "default_effort_level")]
     pub default_effort_level: String, // Effort level for Opus adaptive thinking: low, medium, high, xhigh, max, ultracode
     #[serde(default = "default_terminal")]
-    pub terminal: String, // Terminal app: terminal, warp, ghostty, iterm2, powershell, windows-terminal
+    pub terminal: String, // Terminal app: terminal, warp, ghostty, kitty, iterm2, powershell, windows-terminal
     #[serde(default = "default_terminal_renderer")]
     pub terminal_renderer: String, // Embedded terminal renderer: "xterm" or "ghostty-web" (experimental)
     #[serde(default = "default_terminal_font")]
@@ -211,6 +221,10 @@ pub struct AppPreferences {
     pub font_weight: String, // Overall font weight: light, normal, medium
     #[serde(default = "default_keybindings")]
     pub keybindings: std::collections::HashMap<String, String>, // User-configurable keyboard shortcuts
+    /// One-shot keybinding migrations already applied. Client-local; kept here
+    /// so a preferences round-trip does not drop the marker.
+    #[serde(default)]
+    pub applied_keybinding_migrations: Vec<String>,
     #[serde(default = "default_archive_retention_days")]
     pub archive_retention_days: u32, // Days to keep archived items before auto-cleanup (0 = disabled)
     #[serde(default = "default_syntax_theme_dark")]
@@ -219,8 +233,8 @@ pub struct AppPreferences {
     pub syntax_theme_light: String, // Syntax highlighting theme for light mode
     #[serde(default = "default_compact_chat_view_enabled")]
     pub compact_chat_view_enabled: bool, // Collapse intermediate tool calls into single ticker line
-    #[serde(default = "default_auto_recaps_enabled")]
-    pub auto_recaps_enabled: bool, // Ask agents to end multi-step turns with a recap block
+    #[serde(default = "default_sidebar_hover_open_enabled")]
+    pub sidebar_hover_open_enabled: bool, // Temporarily reveal collapsed sidebar from left edge
     #[serde(default = "default_keep_ai_servers_warm")]
     pub keep_ai_servers_warm: bool, // Keep Codex/OpenCode servers alive briefly after a request
     #[serde(default)]
@@ -291,6 +305,10 @@ pub struct AppPreferences {
     pub has_seen_jean_mcp_intro: bool, // Whether user has seen the Jean MCP server announcement
     #[serde(default)]
     pub has_seen_external_display_zoom_tip: bool, // Soft-text tip on 1× displays when zoom ≠ 100%
+    #[serde(default)]
+    pub show_full_file_path: bool, // Show full relative path in file mention badges
+    #[serde(default = "default_spellcheck_enabled")]
+    pub spellcheck_enabled: bool, // Enable spellcheck in the chat input
     #[serde(default = "default_chrome_enabled")]
     pub chrome_enabled: bool, // Enable browser automation via Chrome extension
     #[serde(default = "default_zoom_level")]
@@ -321,6 +339,8 @@ pub struct AppPreferences {
     pub canvas_layout: String, // Canvas display mode: grid or list
     #[serde(default = "default_confirm_session_close")]
     pub confirm_session_close: bool, // Show confirmation dialog before closing sessions/worktrees
+    #[serde(default = "default_close_confirm_bypass_modifier")]
+    pub close_confirm_bypass_modifier: String, // Modifier that skips the close confirmation ("none" disables)
     #[serde(default = "default_execution_mode")]
     pub default_execution_mode: String, // Default workflow/permission policy for new sessions
     #[serde(default = "default_backend")]
@@ -341,8 +361,12 @@ pub struct AppPreferences {
     pub selected_grok_model: String, // Default Grok model
     #[serde(default = "default_kimi_model")]
     pub selected_kimi_model: String, // Default Kimi Code model
+    #[serde(default = "default_devin_model")]
+    pub selected_devin_model: String, // Default Devin CLI model
     #[serde(default = "default_antigravity_model", alias = "selected_gemini_model")]
     pub selected_antigravity_model: String, // Default Antigravity CLI model
+    #[serde(default = "default_muse_model")]
+    pub selected_muse_model: String, // Default Muse Code model
     #[serde(default = "default_codex_reasoning_effort")]
     pub default_codex_reasoning_effort: String, // Codex reasoning effort: low, medium, high, xhigh
     #[serde(default = "default_codex_model_verbosity")]
@@ -355,8 +379,12 @@ pub struct AppPreferences {
     pub codex_auto_steer_enabled: bool, // Steer prompts into a running Codex turn instead of queueing (default: false)
     #[serde(default = "default_opencode_auto_steer")]
     pub opencode_auto_steer_enabled: bool, // Steer prompts into a running OpenCode session instead of queueing (default: false)
+    #[serde(default = "default_claude_auto_steer")]
+    pub claude_auto_steer_enabled: bool, // Steer prompts into a running Claude turn (detached host, Unix only) instead of queueing (default: false)
     #[serde(default = "default_pi_auto_steer")]
     pub pi_auto_steer_enabled: bool, // Steer prompts into a running PI turn instead of queueing (default: false)
+    #[serde(default)]
+    pub pi_agent_owns_policy: bool, // Let PI own tools, extensions, and system/project instructions
     #[serde(default = "default_grok_auto_steer")]
     pub grok_auto_steer_enabled: bool, // Steer prompts into a running Grok turn instead of queueing (default: false)
     #[serde(default)]
@@ -395,10 +423,16 @@ pub struct AppPreferences {
     pub grok_cli_source: String, // Grok CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source")]
     pub kimi_cli_source: String, // Kimi Code CLI source: "jean" (managed) or "path" (system PATH)
+    #[serde(default = "default_devin_cli_source")]
+    pub devin_cli_source: String, // Devin CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source", alias = "gemini_cli_source")]
     pub antigravity_cli_source: String, // Antigravity CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source")]
+    pub muse_cli_source: String, // Muse Code CLI source: "jean" (managed) or "path" (system PATH)
+    #[serde(default = "default_cli_source")]
     pub gh_cli_source: String, // GitHub CLI source: "jean" (managed) or "path" (system PATH)
+    #[serde(default = "default_cli_source")]
+    pub glab_cli_source: String, // GitLab CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default)]
     pub wsl_mode_chosen: bool, // Whether WSL mode selection has been made (prevents re-asking)
     #[serde(default)]
@@ -431,6 +465,11 @@ pub struct AppPreferences {
     pub jean_mcp_rate_limit_per_minute: u32, // Per-source rate limit for session-spawning tools (default 20)
     #[serde(default)]
     pub agent_browser_enabled: bool, // Install agent-browser and add its MCP server to CLI configs (default false)
+    /// Hostname for new browser tabs and port open buttons when a jean.json
+    /// port omits `host`. Unset means localhost. Every client attached to this
+    /// server uses the same value. Jean MCP is unrelated and stays enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_default_host: Option<String>,
 }
 
 fn default_finished_session_animation_enabled() -> bool {
@@ -458,6 +497,10 @@ fn default_codex_auto_steer() -> bool {
 }
 
 fn default_opencode_auto_steer() -> bool {
+    false
+}
+
+fn default_claude_auto_steer() -> bool {
     false
 }
 
@@ -651,12 +694,16 @@ fn default_compact_chat_view_enabled() -> bool {
     true // Enabled by default
 }
 
-fn default_auto_recaps_enabled() -> bool {
-    true // Enabled by default
+fn default_sidebar_hover_open_enabled() -> bool {
+    false // Opt-in for new and existing installs
 }
 
 fn default_keep_ai_servers_warm() -> bool {
     true // Enabled by default to make follow-up requests start faster
+}
+
+fn default_spellcheck_enabled() -> bool {
+    true // Enabled by default
 }
 
 fn default_chrome_enabled() -> bool {
@@ -675,8 +722,22 @@ fn default_confirm_session_close() -> bool {
     true // Enabled by default
 }
 
+fn default_close_confirm_bypass_modifier() -> String {
+    "none".to_string() // Off by default — closing stays behind the confirmation dialog
+}
+
 fn default_execution_mode() -> String {
     "yolo".to_string()
+}
+
+/// Plan is opt-in per session. A saved "always plan" preference would put
+/// every new session into Plan, so rewrite it to Build on load.
+fn migrate_plan_default_execution_mode(preferences: &mut AppPreferences) -> bool {
+    if preferences.default_execution_mode == "plan" {
+        preferences.default_execution_mode = "build".to_string();
+        return true;
+    }
+    false
 }
 
 fn default_backend() -> String {
@@ -794,11 +855,23 @@ fn default_kimi_model() -> String {
     "kimi/default".to_string()
 }
 
+fn default_devin_model() -> String {
+    "devin/default".to_string()
+}
+
 fn default_antigravity_model() -> String {
     "antigravity/auto".to_string()
 }
 
+fn default_muse_model() -> String {
+    muse_cli::DEFAULT_MODEL_ID.to_string()
+}
+
 fn default_grok_cli_source() -> String {
+    default_cli_source()
+}
+
+fn default_devin_cli_source() -> String {
     default_cli_source()
 }
 
@@ -857,6 +930,68 @@ fn normalize_http_bind_host(bind_host: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Canonical browser preview hostname, or `None` when the server default is unset.
+/// Loopback names stay loopback so remote preview forwarding can still apply.
+/// Any other hostname is stored as written (lowercased).
+fn normalize_browser_default_host(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > 253 {
+        return Err("Browser default hostname is too long".to_string());
+    }
+    if trimmed.contains("://")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('@')
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains(char::is_whitespace)
+    {
+        return Err("Enter a hostname or IP address, without a scheme, port, or path".to_string());
+    }
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    if unbracketed.is_empty() {
+        return Err("Enter a hostname or IP address".to_string());
+    }
+    if unbracketed.contains(':') {
+        let ip: std::net::Ipv6Addr = unbracketed
+            .parse()
+            .map_err(|_| "Enter a hostname or IP address, without a port".to_string())?;
+        return Ok(Some(ip.to_string()));
+    }
+    if let Ok(ip) = unbracketed.parse::<std::net::Ipv4Addr>() {
+        return Ok(Some(ip.to_string()));
+    }
+    if !is_browser_hostname(unbracketed) {
+        return Err("Enter a hostname or IP address".to_string());
+    }
+    Ok(Some(unbracketed.to_ascii_lowercase()))
+}
+
+fn is_browser_hostname(host: &str) -> bool {
+    if host.len() > 253 || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    host.split('.').all(|label| {
+        let bytes = label.as_bytes();
+        !bytes.is_empty()
+            && bytes.len() <= 63
+            && bytes[0].is_ascii_alphanumeric()
+            && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    })
+}
+
 fn resolve_http_server_bind_host(prefs: &AppPreferences) -> String {
     normalize_http_bind_host(prefs.http_server_bind_host.as_deref()).unwrap_or_else(|| {
         if prefs.http_server_localhost_only {
@@ -870,10 +1005,16 @@ fn resolve_http_server_bind_host(prefs: &AppPreferences) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_global_system_prompt, default_model, parse_cli_args_from,
-        resolve_headless_bind_host, resolve_headless_token_required, resolve_http_server_bind_host,
-        server_preferences_value, should_auto_select_cli_source, validate_headless_security,
-        AppPreferences,
+        default_global_system_prompt, default_global_system_prompt_with_legacy_ui_verification,
+        default_global_system_prompt_without_branch_rule, default_model,
+        default_parallel_execution_prompt, effective_global_system_prompt,
+        is_legacy_default_global_system_prompt,
+        legacy_parallel_execution_prompt_before_subagent_strategy, normalize_browser_default_host,
+        parse_cli_args_from, resolve_headless_bind_host, resolve_headless_token_required,
+        resolve_http_server_bind_host, resolve_stored_parallel_execution_prompt,
+        server_preferences_value, should_auto_select_cli_source,
+        upgrade_legacy_parallel_execution_prompt, validate_headless_security, AppPreferences,
+        MagicPrompts,
     };
     use serde_json::json;
 
@@ -913,13 +1054,71 @@ mod tests {
     }
 
     #[test]
+    fn browser_default_host_is_a_server_preference_and_leaves_jean_mcp_on() {
+        let mut preferences = AppPreferences::default();
+        assert!(preferences.browser_default_host.is_none());
+        assert!(preferences.jean_mcp_enabled);
+
+        preferences.browser_default_host = Some("dev.example.com".to_string());
+        let value = server_preferences_value(&preferences).unwrap();
+
+        assert_eq!(value["browser_default_host"], json!("dev.example.com"));
+        assert_eq!(value["jean_mcp_enabled"], json!(true));
+        assert!(value.get("theme").is_none());
+    }
+
+    #[test]
+    fn browser_default_host_missing_field_stays_unset() {
+        let mut value = serde_json::to_value(AppPreferences::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("browser_default_host");
+
+        let prefs: AppPreferences = serde_json::from_value(value).unwrap();
+
+        assert!(prefs.browser_default_host.is_none());
+        assert!(prefs.jean_mcp_enabled);
+    }
+
+    #[test]
+    fn normalize_browser_default_host_preserves_loopback_and_custom_hosts() {
+        assert_eq!(normalize_browser_default_host(None).unwrap(), None);
+        assert_eq!(
+            normalize_browser_default_host(Some("   ".to_string())).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_browser_default_host(Some(" LocalHost ".to_string())).unwrap(),
+            Some("localhost".to_string())
+        );
+        assert_eq!(
+            normalize_browser_default_host(Some("127.0.0.1".to_string())).unwrap(),
+            Some("127.0.0.1".to_string())
+        );
+        assert_eq!(
+            normalize_browser_default_host(Some("[::1]".to_string())).unwrap(),
+            Some("::1".to_string())
+        );
+        assert_eq!(
+            normalize_browser_default_host(Some("Dev.Example.COM".to_string())).unwrap(),
+            Some("dev.example.com".to_string())
+        );
+        assert!(
+            normalize_browser_default_host(Some("http://dev.example.com".to_string())).is_err()
+        );
+        assert!(normalize_browser_default_host(Some("dev.example.com:3000".to_string())).is_err());
+    }
+
+    #[test]
     fn agent_browser_prompt_lines_follow_preference() {
         let prompt = default_global_system_prompt();
         let mut prefs = AppPreferences::default();
 
         let off = crate::apply_agent_browser_preference(prompt.clone(), Some(&prefs));
         assert!(!off.to_ascii_lowercase().contains("agent browser"));
-        assert!(off.contains("Verify UI changes in the running app instead."));
+        assert!(off.contains("ALWAYS use a browser when the user asks for it"));
+        assert!(off.contains("Not tested in browser"));
         assert!(
             !crate::apply_agent_browser_preference(prompt.clone(), None).contains("Agent Browser")
         );
@@ -929,6 +1128,14 @@ mod tests {
             crate::apply_agent_browser_preference(prompt.clone(), Some(&prefs)),
             prompt
         );
+    }
+
+    #[test]
+    fn default_global_system_prompt_forbids_branch_changes() {
+        let prompt = default_global_system_prompt();
+        assert!(prompt.contains("Do NOT change the branch of the current worktree"));
+        assert!(!default_global_system_prompt_without_branch_rule()
+            .contains("Do NOT change the branch of the current worktree"));
     }
 
     #[test]
@@ -970,6 +1177,161 @@ mod tests {
             .contains("Do not add feature-specific, bug-fix-specific, or small/local lessons"));
         assert!(prompt.contains("Remove narrow or specific entries when you detect them"));
         assert!(!prompt.contains("After ANY correction from the user"));
+        assert!(!prompt.contains("Subagent Strategy"));
+        assert!(!prompt.contains("throw more compute at it via subagents"));
+        assert!(prompt.contains("### 3. Self-Improvement Loop"));
+        assert!(prompt.contains("### 4. Verification Before Done"));
+        assert!(prompt.contains("### 5. Demand Elegance (Balanced)"));
+        assert!(prompt.contains("### 6. Autonomous Bug Fixing"));
+        assert!(!prompt.contains("### 7. Autonomous Bug Fixing"));
+    }
+
+    fn previous_global_system_prompt() -> String {
+        let bumped = default_global_system_prompt_without_branch_rule()
+            .replace(
+                "### 6. Autonomous Bug Fixing",
+                "### 7. Autonomous Bug Fixing",
+            )
+            .replace(
+                "### 5. Demand Elegance (Balanced)",
+                "### 6. Demand Elegance (Balanced)",
+            )
+            .replace(
+                "### 4. Verification Before Done",
+                "### 5. Verification Before Done",
+            )
+            .replace(
+                "### 3. Self-Improvement Loop",
+                "### 4. Self-Improvement Loop",
+            );
+        bumped.replacen(
+            "### 4. Self-Improvement Loop",
+            "### 3. Subagent Strategy to keep main context window clean\n\
+- Offload research, exploration, and parallel analysis to subagents\n\
+- For complex problems, throw more compute at it via subagents\n\
+- One task per subagent for focused execution\n\
+\n\
+### 4. Self-Improvement Loop",
+            1,
+        )
+    }
+
+    #[test]
+    fn subagent_strategy_lives_in_the_parallel_execution_prompt() {
+        let parallel = default_parallel_execution_prompt();
+        assert!(parallel.contains("### Subagent Strategy to keep main context window clean"));
+        assert!(parallel.contains("throw more compute at it via subagents"));
+        assert!(parallel
+            .contains("In plan mode, structure plans so subagents can work simultaneously."));
+        assert!(!default_global_system_prompt().contains("Subagent Strategy"));
+    }
+
+    #[test]
+    fn cleared_parallel_prompt_is_off_and_null_uses_the_default() {
+        assert!(resolve_stored_parallel_execution_prompt(None)
+            .unwrap()
+            .contains("Subagent Strategy"));
+        assert!(resolve_stored_parallel_execution_prompt(Some("")).is_none());
+        assert!(resolve_stored_parallel_execution_prompt(Some("  \n")).is_none());
+        assert_eq!(
+            resolve_stored_parallel_execution_prompt(Some("Custom parallel rule.")).as_deref(),
+            Some("Custom parallel rule.")
+        );
+        assert_eq!(
+            resolve_stored_parallel_execution_prompt(Some(
+                legacy_parallel_execution_prompt_before_subagent_strategy()
+            ))
+            .as_deref(),
+            Some(default_parallel_execution_prompt().as_str())
+        );
+        assert!(upgrade_legacy_parallel_execution_prompt(None).is_none());
+        assert_eq!(
+            upgrade_legacy_parallel_execution_prompt(Some("leave this".to_string())).as_deref(),
+            Some("leave this")
+        );
+    }
+
+    #[test]
+    fn default_prompt_before_browser_rule_change_migrates() {
+        let legacy = default_global_system_prompt_with_legacy_ui_verification();
+        assert!(legacy.contains("Verify UI changes in the running app instead."));
+        assert!(!legacy.contains("Not tested in browser"));
+        assert!(legacy.contains("### 5. Demand Elegance (Balanced)"));
+        assert!(is_legacy_default_global_system_prompt(&legacy));
+        assert_eq!(
+            effective_global_system_prompt(Some(&legacy)),
+            default_global_system_prompt()
+        );
+
+        let custom = format!("{legacy}\nExtra user rule.");
+        assert!(!is_legacy_default_global_system_prompt(&custom));
+        assert!(!is_legacy_default_global_system_prompt(
+            &default_global_system_prompt()
+        ));
+    }
+
+    #[test]
+    fn legacy_default_global_prompt_migrates_and_custom_text_is_kept() {
+        let legacy = previous_global_system_prompt();
+        assert!(is_legacy_default_global_system_prompt(&legacy));
+        assert_eq!(
+            effective_global_system_prompt(Some(&legacy)),
+            default_global_system_prompt()
+        );
+
+        let custom = format!("{legacy}\n\nExtra user rule: keep my wording.");
+        assert!(!is_legacy_default_global_system_prompt(&custom));
+        assert_eq!(effective_global_system_prompt(Some(&custom)), custom.trim());
+        assert_eq!(
+            effective_global_system_prompt(Some("  My global prompt.  ")),
+            "My global prompt."
+        );
+
+        let mut prompts = MagicPrompts {
+            global_system_prompt: Some(legacy),
+            parallel_execution: Some(
+                legacy_parallel_execution_prompt_before_subagent_strategy().to_string(),
+            ),
+            ..MagicPrompts::default()
+        };
+        assert!(prompts.migrate_defaults());
+        assert!(prompts.global_system_prompt.is_none());
+        assert!(prompts.parallel_execution.is_none());
+
+        let mut custom_prompts = MagicPrompts {
+            global_system_prompt: Some("Custom global prompt with subagents.".to_string()),
+            parallel_execution: Some("Custom parallel prompt.".to_string()),
+            ..MagicPrompts::default()
+        };
+        assert!(!custom_prompts.migrate_defaults());
+        assert_eq!(
+            custom_prompts.global_system_prompt.as_deref(),
+            Some("Custom global prompt with subagents.")
+        );
+        assert_eq!(
+            custom_prompts.parallel_execution.as_deref(),
+            Some("Custom parallel prompt.")
+        );
+    }
+
+    #[test]
+    fn sidebar_hover_open_defaults_off() {
+        let prefs = AppPreferences::default();
+
+        assert!(!prefs.sidebar_hover_open_enabled);
+    }
+
+    #[test]
+    fn sidebar_hover_open_defaults_off_for_existing_preferences() {
+        let mut value = serde_json::to_value(AppPreferences::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("sidebar_hover_open_enabled");
+
+        let prefs: AppPreferences = serde_json::from_value(value).unwrap();
+
+        assert!(!prefs.sidebar_hover_open_enabled);
     }
 
     #[test]
@@ -1220,6 +1582,21 @@ mod tests {
     }
 
     #[test]
+    fn app_preferences_chat_display_defaults_for_existing_prefs() {
+        assert!(!AppPreferences::default().show_full_file_path);
+        assert!(AppPreferences::default().spellcheck_enabled);
+
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        let object = prefs_json.as_object_mut().unwrap();
+        object.remove("show_full_file_path");
+        object.remove("spellcheck_enabled");
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(!prefs.show_full_file_path);
+        assert!(prefs.spellcheck_enabled);
+    }
+
+    #[test]
     fn app_preferences_default_font_weight_for_new_and_missing_prefs() {
         assert_eq!(AppPreferences::default().font_weight, "normal");
 
@@ -1237,6 +1614,7 @@ mod tests {
         assert!(!preferences.codex_auto_steer_enabled);
         assert!(!preferences.opencode_auto_steer_enabled);
         assert!(!preferences.pi_auto_steer_enabled);
+        assert!(!preferences.claude_auto_steer_enabled);
         assert!(!preferences.grok_auto_steer_enabled);
 
         let mut prefs_json = serde_json::to_value(preferences).unwrap();
@@ -1244,12 +1622,14 @@ mod tests {
         prefs.remove("codex_auto_steer_enabled");
         prefs.remove("opencode_auto_steer_enabled");
         prefs.remove("pi_auto_steer_enabled");
+        prefs.remove("claude_auto_steer_enabled");
         prefs.remove("grok_auto_steer_enabled");
 
         let preferences: AppPreferences = serde_json::from_value(prefs_json).unwrap();
         assert!(!preferences.codex_auto_steer_enabled);
         assert!(!preferences.opencode_auto_steer_enabled);
         assert!(!preferences.pi_auto_steer_enabled);
+        assert!(!preferences.claude_auto_steer_enabled);
         assert!(!preferences.grok_auto_steer_enabled);
     }
 
@@ -1315,6 +1695,31 @@ mod tests {
 
         let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
         assert!(!prefs.jean_mcp_enabled);
+    }
+
+    #[test]
+    fn app_preferences_ignore_obsolete_provider_account_fields() {
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        let object = prefs_json.as_object_mut().unwrap();
+        object.insert(
+            "provider_accounts".to_string(),
+            json!([{ "id": "acct-1", "backend": "claude", "label": "Work" }]),
+        );
+        object.insert(
+            "default_provider_accounts".to_string(),
+            json!({ "claude": "acct-1", "codex": "acct-2" }),
+        );
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(prefs.jean_mcp_enabled);
+        assert!(prefs.custom_cli_profiles.is_empty());
+        assert!(prefs.custom_codex_providers.is_empty());
+        assert!(prefs.custom_pi_providers.is_empty());
+
+        let saved = serde_json::to_value(&prefs).unwrap();
+        assert!(saved.get("provider_accounts").is_none());
+        assert!(saved.get("default_provider_accounts").is_none());
+        assert_eq!(saved["jean_mcp_enabled"], json!(true));
     }
 
     #[test]
@@ -2127,7 +2532,10 @@ Address the following review comments from PR #{prNumber}
         .to_string()
 }
 
-pub(crate) fn default_parallel_execution_prompt() -> String {
+/// Previous parallel-execution default, before the sub-agent strategy section
+/// moved here from the global system prompt. Stored copies of this exact text
+/// are still "use the default", not a user customization.
+pub(crate) fn legacy_parallel_execution_prompt_before_subagent_strategy() -> &'static str {
     r#"In plan mode, structure plans so subagents can work simultaneously. In build/execute mode, use subagents in parallel for faster implementation.
 
 When launching multiple Task subagents, prefer sending them in a single message rather than sequentially. Group independent work items (e.g., editing separate files, researching unrelated questions) into parallel Task calls. Only sequence Tasks when one depends on another's output.
@@ -2135,7 +2543,44 @@ When launching multiple Task subagents, prefer sending them in a single message 
 Instruct each sub-agent to briefly outline its approach before implementing, so it can course-correct early without formal plan mode overhead.
 
 When specifying subagent_type for Task tool calls, always use the fully qualified name exactly as listed in the system prompt (e.g., "code-simplifier:code-simplifier", not just "code-simplifier"). If the agent type contains a colon, include the full namespace:name string."#
-        .to_string()
+}
+
+pub(crate) fn default_parallel_execution_prompt() -> String {
+    format!(
+        "{}\n\n{}",
+        r#"### Subagent Strategy to keep main context window clean
+- Offload research, exploration, and parallel analysis to subagents
+- For complex problems, throw more compute at it via subagents
+- One task per subagent for focused execution"#,
+        legacy_parallel_execution_prompt_before_subagent_strategy()
+    )
+}
+
+/// `None` uses the current default (fan-out on). Empty text means the user
+/// cleared the parallel-execution magic prompt (fan-out off).
+pub(crate) fn resolve_stored_parallel_execution_prompt(stored: Option<&str>) -> Option<String> {
+    let Some(stored) = stored else {
+        return Some(default_parallel_execution_prompt());
+    };
+    let trimmed = stored.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == legacy_parallel_execution_prompt_before_subagent_strategy().trim() {
+        return Some(default_parallel_execution_prompt());
+    }
+    Some(trimmed.to_string())
+}
+
+/// Upgrade a prompt that was already resolved to text. `None` stays off.
+pub(crate) fn upgrade_legacy_parallel_execution_prompt(prompt: Option<String>) -> Option<String> {
+    prompt.map(|prompt| {
+        if prompt.trim() == legacy_parallel_execution_prompt_before_subagent_strategy().trim() {
+            default_parallel_execution_prompt()
+        } else {
+            prompt
+        }
+    })
 }
 
 /// Drop Agent Browser instructions from a system prompt when the integration
@@ -2167,7 +2612,7 @@ fn default_global_system_prompt() -> String {
 - Write detailed specs upfront to reduce ambiguity
 - Keep plans concise but complete enough for zero-context handoff (Full access/Build in a new worktree must not require re-scanning the repo). Prefer short wording over thin checklists.
 - When the current execution mode is plan, use the backend's native plan tool/UI call when available (Claude ExitPlanMode, Codex `<proposed_plan>` / collaboration Plan mode, Cursor/OpenCode equivalent), not plain text only.
-- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline as a short numbered list of options (1, 2, 3...) and tell the user to reply with a number.
+- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline in this exact format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options, one option per line. Jean shows these options as buttons. If you end with a `## Recap`, put this question at the end of the recap, not before it.
 - For Codex specifically, when the current execution mode is plan: do not write plan files or code; when the plan is ready wrap it in `<proposed_plan>...</proposed_plan>` so Jean can show the approval UI. Do not use the `update_plan` checklist tool in plan mode.
 - Every Codex response that contains or revises a plan while the current execution mode is plan must use a complete `<proposed_plan>` block (or a native plan item); do not provide plain-text-only plans, and do not attempt file writes.
 - Use a plain-text Unresolved Questions section only for non-actionable notes or when the backend cannot ask interactively.
@@ -2179,19 +2624,14 @@ fn default_global_system_prompt() -> String {
 - Skip only for trivial edits to code already read this session.
 - Do NOT use Context7 — WebSearch only.
 
-### 3. Subagent Strategy to keep main context window clean
-- Offload research, exploration, and parallel analysis to subagents
-- For complex problems, throw more compute at it via subagents
-- One task per subagent for focused execution
-
-### 4. Self-Improvement Loop
+### 3. Self-Improvement Loop
 - Only update '.ai/lessons.md' for general, project-wide learning that applies across features
 - Do not add feature-specific, bug-fix-specific, or small/local lessons
 - Remove narrow or specific entries when you detect them
 - Review lessons at session start for relevant project
 - Keep '.ai/lessons.md' concise by merging duplicate rules and removing obsolete entries
 
-### 5. Verification Before Done
+### 4. Verification Before Done
 - Never mark a task complete without proving it works
 - Diff behavior between main and your changes when relevant
 - Ask yourself: "Would a staff engineer approve this?"
@@ -2200,16 +2640,20 @@ fn default_global_system_prompt() -> String {
 - Skip tests for docs, copy, comments, styling-only, and prompt/config text changes; say that you skipped them.
 - Do not re-run a passing check when the code it covers has not changed since.
 - Write new tests only for behavior that can break silently: business logic, parsing/serialization, state transitions, persistence, and a regression test for each fixed bug.
-- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called. Verify UI changes in the running app instead.
-- If a UI check needs a browser and no other browser tool is available, use the Agent Browser.
+- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called.
+- ALWAYS use a browser when the user asks for it, or when the task is visual: copy or match a style from a reference, compare with another page or screenshot, or fix a layout or visual bug.
+- Also use a browser when the change has runtime UI behavior that typecheck, lint, or tests cannot prove: new or changed user flows, or state/interaction logic.
+- In all other cases, do NOT open a browser. Examples: small copy/text edits, small class or prop tweaks that you did not have to match to a reference, refactors with no behavior change, backend-only changes. For these, a typecheck or the narrowest test is enough. Say "Not tested in browser" in the recap.
+- Before you open a browser on your own decision (not a user request), state in one line why a cheaper check is not enough.
+- If a UI check needs a browser and no other browser tool is available, use the Agent Browser. Check only the changed area, not the full app.
 
-### 6. Demand Elegance (Balanced)
+### 5. Demand Elegance (Balanced)
 - For non-trivial changes: pause and ask "is there a more elegant way?"
 - If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
 - Skip this for simple, obvious fixes - don't over-engineer
 - Challenge your own work before presenting it
 
-### 7. Autonomous Bug Fixing
+### 6. Autonomous Bug Fixing
 - When given a bug report: just fix it. Don't ask for hand-holding
 - Point at logs, errors, failing tests -> then resolve them
 - Zero context switching required from the user
@@ -2240,6 +2684,7 @@ fn default_global_system_prompt() -> String {
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.
 - If already in a Jean worktree or base/main workspace, continue in the current workspace.
+- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.
 
 ## Jean Run Environment
 - When you need to test a running app (UI, HTTP, browser, smoke, e2e), call Jean MCP `get_run_environments` first (pass this worktreeId when known).
@@ -2251,6 +2696,98 @@ fn default_global_system_prompt() -> String {
 
 - After each finished task, please write a few bullet points on how to test the changes."#
         .to_string()
+}
+
+const LEGACY_SUBAGENT_STRATEGY_SECTION: &str = "\
+### 3. Subagent Strategy to keep main context window clean
+- Offload research, exploration, and parallel analysis to subagents
+- For complex problems, throw more compute at it via subagents
+- One task per subagent for focused execution
+
+";
+
+/// UI verification rules before they said when to skip the browser.
+const LEGACY_UI_VERIFICATION_RULES: &str = "\
+- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called. Verify UI changes in the running app instead.
+- If a UI check needs a browser and no other browser tool is available, use the Agent Browser.
+";
+
+const UI_VERIFICATION_RULES_START: &str = "- Do NOT write tests that only check DOM markup";
+const UI_VERIFICATION_RULES_END: &str =
+    "use the Agent Browser. Check only the changed area, not the full app.\n";
+
+/// The current default global prompt with the legacy UI verification rules.
+fn default_global_system_prompt_with_legacy_ui_verification() -> String {
+    let prompt = default_global_system_prompt();
+    let start = prompt
+        .find(UI_VERIFICATION_RULES_START)
+        .expect("default prompt has UI verification rules");
+    let end = prompt
+        .find(UI_VERIFICATION_RULES_END)
+        .expect("default prompt has Agent Browser rule")
+        + UI_VERIFICATION_RULES_END.len();
+    format!(
+        "{}{LEGACY_UI_VERIFICATION_RULES}{}",
+        &prompt[..start],
+        &prompt[end..]
+    )
+}
+
+/// True only when `prompt` is a previous built-in global prompt: the one
+/// before the browser rules changed, or the older one whose sub-agent section
+/// now lives in the parallel-execution prompt. Any other text, including a
+/// customized prompt, is kept.
+pub(crate) fn is_legacy_default_global_system_prompt(prompt: &str) -> bool {
+    let normalized = prompt.replace("\r\n", "\n");
+    if normalized.trim() == default_global_system_prompt_with_legacy_ui_verification().trim() {
+        return true;
+    }
+    let Some(start) = normalized.find(LEGACY_SUBAGENT_STRATEGY_SECTION) else {
+        return false;
+    };
+    if normalized[start + LEGACY_SUBAGENT_STRATEGY_SECTION.len()..]
+        .contains("### 3. Subagent Strategy to keep main context window clean")
+    {
+        return false;
+    }
+    let mut stripped = String::new();
+    stripped.push_str(&normalized[..start]);
+    stripped.push_str(&normalized[start + LEGACY_SUBAGENT_STRATEGY_SECTION.len()..]);
+    let renumbered = stripped
+        .replace(
+            "### 7. Autonomous Bug Fixing",
+            "### 6. Autonomous Bug Fixing",
+        )
+        .replace(
+            "### 6. Demand Elegance (Balanced)",
+            "### 5. Demand Elegance (Balanced)",
+        )
+        .replace(
+            "### 5. Verification Before Done",
+            "### 4. Verification Before Done",
+        )
+        .replace(
+            "### 4. Self-Improvement Loop",
+            "### 3. Self-Improvement Loop",
+        );
+    renumbered.trim() == default_global_system_prompt_without_branch_rule().trim()
+}
+
+/// The branch rule was added after the sub-agent section moved out, so legacy
+/// stored prompts never contain it.
+const BRANCH_RULE_LINE: &str = "- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.\n";
+
+fn default_global_system_prompt_without_branch_rule() -> String {
+    default_global_system_prompt_with_legacy_ui_verification().replacen(BRANCH_RULE_LINE, "", 1)
+}
+
+/// Stored `None`/empty/legacy-default text uses the current global prompt.
+/// Any other stored text is returned unchanged.
+pub(crate) fn effective_global_system_prompt(stored: Option<&str>) -> String {
+    match stored.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        Some(prompt) if !is_legacy_default_global_system_prompt(prompt) => prompt.to_string(),
+        _ => default_global_system_prompt(),
+    }
 }
 
 pub(crate) fn default_provider_switch_handoff_prompt() -> String {
@@ -2404,10 +2941,19 @@ pub fn is_kimi_model(model: &str) -> bool {
     model.starts_with("kimi/")
 }
 
+pub fn is_devin_model(model: &str) -> bool {
+    model.starts_with("devin/")
+}
+
 /// Returns true if the given model string identifies an Antigravity model.
 /// Antigravity model IDs are prefixed with "antigravity/" (e.g. "antigravity/auto").
 pub fn is_antigravity_model(model: &str) -> bool {
     model.starts_with("antigravity/")
+}
+
+/// Muse Code model IDs are prefixed with "muse/" (e.g. "muse/default").
+pub fn is_muse_model(model: &str) -> bool {
+    model.starts_with("muse/")
 }
 
 /// Returns true if the given model string identifies a Codex model.
@@ -2417,6 +2963,8 @@ pub fn is_codex_model(model: &str) -> bool {
         && !is_cursor_model(model)
         && !is_pi_model(model)
         && !is_grok_model(model)
+        && !is_kimi_model(model)
+        && !is_devin_model(model)
         && (model.contains("codex") || model.starts_with("gpt-"))
 }
 
@@ -2594,7 +3142,9 @@ fn magic_prompt_model_matches_backend(model: &str, backend: &str) -> bool {
         "commandcode" => model.starts_with("commandcode/"),
         "grok" => is_grok_model(model),
         "kimi" => is_kimi_model(model),
+        "devin" => is_devin_model(model),
         "antigravity" => is_antigravity_model(model),
+        "muse" => is_muse_model(model),
         "claude" => {
             !is_codex_model(model)
                 && !is_opencode_model(model)
@@ -2602,7 +3152,9 @@ fn magic_prompt_model_matches_backend(model: &str, backend: &str) -> bool {
                 && !is_pi_model(model)
                 && !is_grok_model(model)
                 && !is_kimi_model(model)
+                && !is_devin_model(model)
                 && !is_antigravity_model(model)
+                && !is_muse_model(model)
                 && !model.starts_with("commandcode/")
         }
         _ => true,
@@ -2618,7 +3170,9 @@ fn selected_model_for_backend(preferences: &AppPreferences, backend: &str) -> St
         "commandcode" => preferences.selected_commandcode_model.clone(),
         "grok" => preferences.selected_grok_model.clone(),
         "kimi" => preferences.selected_kimi_model.clone(),
+        "devin" => preferences.selected_devin_model.clone(),
         "antigravity" => preferences.selected_antigravity_model.clone(),
+        "muse" => preferences.selected_muse_model.clone(),
         _ => preferences.selected_model.clone(),
     }
 }
@@ -2652,7 +3206,9 @@ fn migrate_final_review_preferences(
 impl MagicPrompts {
     /// Migrate prompts that match the current default to None.
     /// This ensures users who never customized a prompt get auto-updated defaults.
-    fn migrate_defaults(&mut self) {
+    /// Returns true when a stored prompt was cleared.
+    fn migrate_defaults(&mut self) -> bool {
+        let mut changed = false;
         type DefaultEntry<'a> = (fn() -> String, &'a mut Option<String>);
         let defaults: [DefaultEntry; 19] = [
             (
@@ -2710,6 +3266,7 @@ impl MagicPrompts {
             if let Some(ref value) = field {
                 if value == &default_fn() {
                     *field = None;
+                    changed = true;
                 }
             }
         }
@@ -2720,8 +3277,25 @@ impl MagicPrompts {
                 .any(|legacy| value == legacy)
             {
                 self.commit_message = None;
+                changed = true;
             }
         }
+
+        if self
+            .global_system_prompt
+            .as_deref()
+            .is_some_and(is_legacy_default_global_system_prompt)
+        {
+            self.global_system_prompt = None;
+            changed = true;
+        }
+        if self.parallel_execution.as_deref().is_some_and(|value| {
+            value.trim() == legacy_parallel_execution_prompt_before_subagent_strategy().trim()
+        }) {
+            self.parallel_execution = None;
+            changed = true;
+        }
+        changed
     }
 }
 
@@ -2747,11 +3321,12 @@ impl Default for AppPreferences {
             chat_font: default_chat_font(),
             font_weight: default_font_weight(),
             keybindings: default_keybindings(),
+            applied_keybinding_migrations: Vec::new(),
             archive_retention_days: default_archive_retention_days(),
             syntax_theme_dark: default_syntax_theme_dark(),
             syntax_theme_light: default_syntax_theme_light(),
             compact_chat_view_enabled: default_compact_chat_view_enabled(),
-            auto_recaps_enabled: default_auto_recaps_enabled(),
+            sidebar_hover_open_enabled: default_sidebar_hover_open_enabled(),
             keep_ai_servers_warm: default_keep_ai_servers_warm(),
             magic_prompts: MagicPrompts::default(),
             magic_prompt_models: MagicPromptModels::default(),
@@ -2788,6 +3363,8 @@ impl Default for AppPreferences {
             has_seen_jean_config_wizard: false,
             has_seen_jean_mcp_intro: false,
             has_seen_external_display_zoom_tip: false,
+            show_full_file_path: false,
+            spellcheck_enabled: default_spellcheck_enabled(),
             chrome_enabled: default_chrome_enabled(),
             zoom_level: default_zoom_level(),
             mobile_zoom_level: default_zoom_level(),
@@ -2803,6 +3380,7 @@ impl Default for AppPreferences {
             fast_mode_models: Vec::new(),
             canvas_layout: default_canvas_layout(),
             confirm_session_close: default_confirm_session_close(),
+            close_confirm_bypass_modifier: default_close_confirm_bypass_modifier(),
             default_execution_mode: default_execution_mode(),
             default_backend: default_backend(),
             default_new_session_kind: default_new_session_kind(),
@@ -2813,14 +3391,18 @@ impl Default for AppPreferences {
             selected_commandcode_model: default_commandcode_model(),
             selected_grok_model: default_grok_model(),
             selected_kimi_model: default_kimi_model(),
+            selected_devin_model: default_devin_model(),
             selected_antigravity_model: default_antigravity_model(),
+            selected_muse_model: default_muse_model(),
             default_codex_reasoning_effort: default_codex_reasoning_effort(),
             default_codex_model_verbosity: default_codex_model_verbosity(),
             default_grok_reasoning_effort: default_grok_reasoning_effort(),
             codex_goal_execution_mode: default_codex_goal_execution_mode(),
             codex_auto_steer_enabled: default_codex_auto_steer(),
             opencode_auto_steer_enabled: default_opencode_auto_steer(),
+            claude_auto_steer_enabled: default_claude_auto_steer(),
             pi_auto_steer_enabled: default_pi_auto_steer(),
+            pi_agent_owns_policy: false,
             grok_auto_steer_enabled: default_grok_auto_steer(),
             kimi_auto_steer_enabled: false,
             antigravity_auto_steer_enabled: false,
@@ -2840,8 +3422,11 @@ impl Default for AppPreferences {
             opencode_cli_source: default_cli_source(),
             grok_cli_source: default_grok_cli_source(),
             kimi_cli_source: default_cli_source(),
+            devin_cli_source: default_devin_cli_source(),
             antigravity_cli_source: default_cli_source(),
+            muse_cli_source: default_cli_source(),
             gh_cli_source: default_cli_source(),
+            glab_cli_source: default_cli_source(),
             wsl_mode_chosen: false,
             wsl_enabled: false,
             wsl_distro: String::new(),
@@ -2858,15 +3443,19 @@ impl Default for AppPreferences {
             jean_mcp_max_depth: default_jean_mcp_max_depth(),
             jean_mcp_rate_limit_per_minute: default_jean_mcp_rate_limit(),
             agent_browser_enabled: false,
+            browser_default_host: None,
         }
     }
 }
 
-// UI State data structure
-// Contains ephemeral UI state that should be restored on app restart
+// UI navigation snapshot restored when a client reconnects.
+//
+// Each client has its own file under `ui-clients/<client-id>.json`. The shared
+// `ui-state.json` keeps pinned recent sessions and pinned canvas labels only.
+// The installation's native client claims a pre-existing shared snapshot once.
 //
 // NOTE: Durable session-specific state is stored in Session files. Lightweight
-// unsent input drafts stay here so textareas survive full UI reloads.
+// unsent input drafts stay in the client snapshot so textareas survive reloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UIState {
     /// Last opened worktree ID (to restore active worktree)
@@ -2940,6 +3529,10 @@ pub struct UIState {
     /// Worktree IDs whose setup-script status card was dismissed
     #[serde(default)]
     pub dismissed_setup_scripts: Vec<String>,
+
+    /// Session IDs whose Queued prompts panel is collapsed
+    #[serde(default)]
+    pub collapsed_queued_prompts_sessions: Vec<String>,
 
     /// Whether the review sidebar is visible
     #[serde(default)]
@@ -3058,6 +3651,18 @@ pub struct UIState {
     #[serde(default)]
     pub seen_failed_workflow_run_ids: Vec<u64>,
 
+    /// Agent ID → newest agent update time (Unix seconds) the user has seen
+    #[serde(default)]
+    pub agent_updates_seen_at: std::collections::HashMap<String, u64>,
+
+    /// Sessions armed for auto-continue after a usage limit resets
+    #[serde(default)]
+    pub auto_resume: Vec<AutoResumeEntry>,
+
+    /// Git diff modal file list view mode: "list" or "tree"
+    #[serde(default)]
+    pub git_diff_view_mode: Option<String>,
+
     /// Version for future migration support
     #[serde(default = "default_ui_state_version")]
     pub version: u32,
@@ -3065,6 +3670,16 @@ pub struct UIState {
 
 fn default_ui_state_version() -> u32 {
     1
+}
+
+/// A session armed for auto-continue after a usage limit resets. `send_args`
+/// is the opaque frontend `SendMessageArgs` payload, replayed verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoResumeEntry {
+    pub session_id: String,
+    #[serde(default)]
+    pub resume_at_ms: Option<f64>,
+    pub send_args: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3113,6 +3728,18 @@ pub struct PendingTextFileDraft {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Set when the chip holds rows picked from a chat table
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_rows: Option<PendingTableRowsDraft>,
+}
+
+/// Table rows referenced by a pasted-text chip (body row indices + per-row notes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingTableRowsDraft {
+    pub table_key: String,
+    pub rows: Vec<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub notes: std::collections::HashMap<u32, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3127,6 +3754,8 @@ pub struct PendingFileDraft {
     pub source_project_name: Option<String>,
     pub extension: String,
     pub is_directory: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attached: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3165,6 +3794,7 @@ impl Default for UIState {
             pending_files: std::collections::HashMap::new(),
             pending_skills: std::collections::HashMap::new(),
             dismissed_setup_scripts: Vec::new(),
+            collapsed_queued_prompts_sessions: Vec::new(),
             review_sidebar_visible: None,
             modal_terminal_open: std::collections::HashMap::new(),
             modal_terminal_dock_mode: None,
@@ -3194,6 +3824,9 @@ impl Default for UIState {
             pinned_recent_session_ids: Vec::new(),
             last_opened_per_project: std::collections::HashMap::new(),
             seen_failed_workflow_run_ids: Vec::new(),
+            agent_updates_seen_at: std::collections::HashMap::new(),
+            auto_resume: Vec::new(),
+            git_diff_view_mode: None,
             version: default_ui_state_version(),
         }
     }
@@ -3229,6 +3862,8 @@ pub fn load_preferences_sync(app: &AppHandle) -> Result<AppPreferences, String> 
     // Jean MCP is a required runtime service. Keep the legacy field for
     // preference-file compatibility, but never honor an old disabled value.
     preferences.jean_mcp_enabled = true;
+    preferences.magic_prompts.migrate_defaults();
+    migrate_plan_default_execution_mode(&mut preferences);
     migrate_final_review_preferences(&mut preferences, &raw_preferences);
     maybe_auto_select_system_cli_preferences(app, &mut preferences, Some(&raw_preferences));
     Ok(preferences)
@@ -3267,15 +3902,27 @@ async fn load_preferences(app: AppHandle) -> Result<AppPreferences, String> {
 
     // Migrate magic prompts: convert prompts matching current defaults to None
     // so they auto-update when new defaults are shipped
-    preferences.magic_prompts.migrate_defaults();
+    let mut needs_resave = preferences.magic_prompts.migrate_defaults();
 
     // Migrate legacy default Claude model names to the 1M variants where
     // available so hidden non-1M defaults do not render blank in settings.
-    let mut needs_resave = migrate_final_review_preferences(&mut preferences, &raw_preferences);
+    needs_resave |= migrate_final_review_preferences(&mut preferences, &raw_preferences);
     if !preferences.jean_mcp_enabled {
         preferences.jean_mcp_enabled = true;
         needs_resave = true;
     }
+    match normalize_browser_default_host(preferences.browser_default_host.clone()) {
+        Ok(host) if host != preferences.browser_default_host => {
+            preferences.browser_default_host = host;
+            needs_resave = true;
+        }
+        Err(_) => {
+            preferences.browser_default_host = None;
+            needs_resave = true;
+        }
+        Ok(_) => {}
+    }
+    needs_resave |= migrate_plan_default_execution_mode(&mut preferences);
     if let Some(new_model) = migrate_default_claude_model(&preferences.selected_model) {
         preferences.selected_model = new_model.to_string();
         needs_resave = true;
@@ -3348,9 +3995,11 @@ async fn load_preferences(app: AppHandle) -> Result<AppPreferences, String> {
     Ok(preferences)
 }
 
-async fn save_preferences(app: AppHandle, preferences: AppPreferences) -> Result<(), String> {
+async fn save_preferences(app: AppHandle, mut preferences: AppPreferences) -> Result<(), String> {
     // Validate before this command changes any related persisted state.
     validate_theme(&preferences.theme)?;
+    preferences.browser_default_host =
+        normalize_browser_default_host(preferences.browser_default_host.take())?;
 
     // Keep per-project Sentry region caches consistent with the global token:
     // a global set/change/remove invalidates the cached region host on projects that
@@ -3464,6 +4113,7 @@ const CLIENT_ONLY_PREFERENCE_KEYS: &[&str] = &[
     "chat_font",
     "font_weight",
     "keybindings",
+    "applied_keybinding_migrations",
     "syntax_theme_dark",
     "syntax_theme_light",
     "compact_chat_view_enabled",
@@ -3479,6 +4129,7 @@ const CLIENT_ONLY_PREFERENCE_KEYS: &[&str] = &[
     "mobile_zoom_level",
     "sync_zoom_levels",
     "confirm_session_close",
+    "close_confirm_bypass_modifier",
     "expand_tool_calls_by_default",
     "window_vibrancy",
     "finished_session_animation_enabled",
@@ -3656,17 +4307,56 @@ async fn delete_cli_profile(name: String) -> Result<(), String> {
     Ok(())
 }
 
-fn get_ui_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+/// Add or refresh the CLIProxyAPI Claude settings file and Codex provider.
+/// Does not switch the user's default provider.
+pub(crate) async fn upsert_cliproxyapi_provider_profiles(
+    app: &AppHandle,
+    client_key: &str,
+) -> Result<(), String> {
+    let mut preferences = load_preferences(app.clone()).await?;
+    opinionated::cliproxyapi::upsert_provider_profiles(
+        &mut preferences.custom_cli_profiles,
+        &mut preferences.custom_codex_providers,
+        client_key,
+    );
+    save_preferences(app.clone(), preferences).await
+}
+
+/// Remove CLIProxyAPI provider profiles and the Claude settings file they use.
+pub(crate) async fn remove_cliproxyapi_provider_profiles(app: &AppHandle) -> Result<(), String> {
+    let mut preferences = load_preferences(app.clone()).await?;
+    let changed = opinionated::cliproxyapi::detach_provider_profiles(
+        &mut preferences.custom_cli_profiles,
+        &mut preferences.custom_codex_providers,
+        &mut preferences.default_provider,
+        &mut preferences.default_codex_provider,
+    );
+    if let Ok(path) = get_cli_profile_path(opinionated::cliproxyapi::PROFILE_NAME) {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("Failed to delete CLIProxyAPI Claude profile: {error}"))?;
+        }
+    }
+    if changed {
+        save_preferences(app.clone(), preferences).await?;
+    }
+    Ok(())
+}
+
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {e}"))?;
 
-    // Ensure the directory exists
     std::fs::create_dir_all(&app_data_dir)
         .map_err(|e| format!("Failed to create app data directory: {e}"))?;
 
-    Ok(app_data_dir.join("ui-state.json"))
+    Ok(app_data_dir)
+}
+
+fn get_ui_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(ui_client_state::shared_ui_state_path(&app_data_dir(app)?))
 }
 
 /// Serializes read-modify-write cycles on `ui-state.json` within this process.
@@ -3712,25 +4402,6 @@ fn write_ui_state_file(path: &Path, ui_state: &UIState) -> Result<(), String> {
     })
 }
 
-/// Writes a full UI state snapshot but keeps the pinned recent sessions that are on disk.
-///
-/// Pins change only through `set_recent_session_pinned`, so concurrent clients
-/// (native desktop, Web Access) cannot overwrite each other's pins with a stale
-/// full-state save. If the existing file cannot be parsed, the incoming pins are
-/// kept so the rewrite does not silently drop them.
-fn write_ui_state_keeping_pins(path: &Path, mut ui_state: UIState) -> Result<(), String> {
-    let _guard = lock_ui_state_writes();
-
-    match read_ui_state_file(path) {
-        Ok(existing) => ui_state.pinned_recent_session_ids = existing.pinned_recent_session_ids,
-        Err(e) => log::warn!(
-            "Keeping incoming pinned recent sessions, existing UI state is unreadable: {e}"
-        ),
-    }
-
-    write_ui_state_file(path, &ui_state)
-}
-
 /// Adds (appended at the end, no duplicates) or removes one pinned recent session.
 /// Returns the resulting pins and whether the file changed. A corrupt file is
 /// reported as an error and left untouched.
@@ -3771,21 +4442,51 @@ fn emit_ui_state_invalidation(app: &AppHandle) {
     }
 }
 
-async fn load_ui_state(app: AppHandle) -> Result<UIState, String> {
-    log::trace!("Loading UI state from disk");
-    let state_path = get_ui_state_path(&app)?;
-    let ui_state = read_ui_state_file(&state_path)?;
-    log::trace!("Successfully loaded UI state");
+async fn get_native_client_id(app: AppHandle) -> Result<String, String> {
+    let dir = app_data_dir(&app)?;
+    ui_client_state::ensure_native_ui_client(&dir)
+}
+
+async fn load_ui_state(app: AppHandle, client_id: String) -> Result<UIState, String> {
+    log::trace!("Loading UI state for client {client_id}");
+    let dir = app_data_dir(&app)?;
+    let ui_state = ui_client_state::load_client_ui_state(&dir, &client_id)?;
+    log::trace!("Successfully loaded UI state for client {client_id}");
     Ok(ui_state)
 }
 
-async fn save_ui_state(app: AppHandle, ui_state: UIState) -> Result<(), String> {
-    log::trace!("Saving UI state to disk: {ui_state:?}");
-    let state_path = get_ui_state_path(&app)?;
+/// Init payload for a browser that did not send a client id, or sent one we
+/// cannot use. Navigation stays empty so this request cannot inherit another
+/// client's place in the app. Shared pins and labels still apply.
+async fn load_ui_state_for_init(
+    app: AppHandle,
+    client_id: Option<String>,
+) -> Result<UIState, String> {
+    let Some(client_id) = client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        let dir = app_data_dir(&app)?;
+        return ui_client_state::load_shared_navigation_defaults(&dir);
+    };
 
-    write_ui_state_keeping_pins(&state_path, ui_state)?;
+    match load_ui_state(app.clone(), client_id.to_string()).await {
+        Ok(ui_state) => Ok(ui_state),
+        Err(error) if error == ui_client_state::INVALID_CLIENT_ID => {
+            log::warn!("Ignoring invalid UI client id while building /api/init");
+            let dir = app_data_dir(&app)?;
+            ui_client_state::load_shared_navigation_defaults(&dir)
+        }
+        Err(error) => Err(error),
+    }
+}
 
-    log::trace!("Saved UI state to {state_path:?}");
+async fn save_ui_state(app: AppHandle, client_id: String, ui_state: UIState) -> Result<(), String> {
+    log::trace!("Saving UI state for client {client_id}");
+    let dir = app_data_dir(&app)?;
+    ui_client_state::save_client_ui_state(&dir, &client_id, ui_state)?;
+    log::trace!("Saved UI state for client {client_id}");
     emit_ui_state_invalidation(&app);
     Ok(())
 }
@@ -3819,9 +4520,7 @@ async fn set_recent_session_pinned(
 
 #[cfg(test)]
 mod ui_state_pin_tests {
-    use super::{
-        read_ui_state_file, set_pinned_session_in_file, write_ui_state_keeping_pins, UIState,
-    };
+    use super::{read_ui_state_file, set_pinned_session_in_file, UIState};
 
     fn pins(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|id| id.to_string()).collect()
@@ -3829,68 +4528,6 @@ mod ui_state_pin_tests {
 
     fn write_state(path: &std::path::Path, ui_state: &UIState) {
         std::fs::write(path, serde_json::to_string_pretty(ui_state).unwrap()).unwrap();
-    }
-
-    #[test]
-    fn save_keeps_pins_on_disk_and_ignores_incoming_pins() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ui-state.json");
-        write_state(
-            &path,
-            &UIState {
-                pinned_recent_session_ids: pins(&["pinned-by-other-client"]),
-                ..UIState::default()
-            },
-        );
-
-        let incoming = UIState {
-            active_worktree_id: Some("worktree-1".to_string()),
-            seen_failed_workflow_run_ids: vec![42],
-            pinned_recent_session_ids: pins(&["stale-pin"]),
-            ..UIState::default()
-        };
-        write_ui_state_keeping_pins(&path, incoming).unwrap();
-
-        let saved = read_ui_state_file(&path).unwrap();
-        assert_eq!(
-            saved.pinned_recent_session_ids,
-            pins(&["pinned-by-other-client"])
-        );
-        assert_eq!(saved.active_worktree_id.as_deref(), Some("worktree-1"));
-        assert_eq!(saved.seen_failed_workflow_run_ids, vec![42]);
-    }
-
-    #[test]
-    fn save_without_existing_file_writes_empty_pins() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ui-state.json");
-
-        let incoming = UIState {
-            active_worktree_id: Some("worktree-1".to_string()),
-            pinned_recent_session_ids: pins(&["stale-pin"]),
-            ..UIState::default()
-        };
-        write_ui_state_keeping_pins(&path, incoming).unwrap();
-
-        let saved = read_ui_state_file(&path).unwrap();
-        assert!(saved.pinned_recent_session_ids.is_empty());
-        assert_eq!(saved.active_worktree_id.as_deref(), Some("worktree-1"));
-    }
-
-    #[test]
-    fn save_over_corrupt_file_keeps_incoming_pins() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ui-state.json");
-        std::fs::write(&path, "{ not json").unwrap();
-
-        let incoming = UIState {
-            pinned_recent_session_ids: pins(&["incoming-pin"]),
-            ..UIState::default()
-        };
-        write_ui_state_keeping_pins(&path, incoming).unwrap();
-
-        let saved = read_ui_state_file(&path).unwrap();
-        assert_eq!(saved.pinned_recent_session_ids, pins(&["incoming-pin"]));
     }
 
     #[test]
@@ -4418,6 +5055,7 @@ pub struct JeanMcpSnippet {
     pub codex_toml: Option<String>,
     pub grok_toml: Option<String>,
     pub kimi: Option<String>,
+    pub muse: Option<String>,
     pub opencode_json: Option<String>,
 }
 
@@ -4443,6 +5081,7 @@ async fn get_jean_mcp_config_snippet(app: AppHandle) -> Result<JeanMcpSnippet, S
     let codex_toml = entry.as_ref().map(|entry| entry.codex_snippet());
     let grok_toml = entry.as_ref().map(|entry| entry.grok_snippet());
     let kimi = entry.as_ref().map(|entry| entry.kimi_snippet());
+    let muse = entry.as_ref().map(|entry| entry.muse_snippet());
     let opencode_json = entry.as_ref().map(|entry| entry.opencode_snippet());
 
     Ok(JeanMcpSnippet {
@@ -4457,6 +5096,7 @@ async fn get_jean_mcp_config_snippet(app: AppHandle) -> Result<JeanMcpSnippet, S
         codex_toml,
         grok_toml,
         kimi,
+        muse,
         opencode_json,
     })
 }
@@ -4748,6 +5388,12 @@ pub fn build_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 
 /// Initialize the shared runtime used by both transport adapters.
 pub fn initialize_runtime(context: &RuntimeContext) -> Result<(), String> {
+    if let Ok(dir) = context.path().app_data_dir() {
+        if let Err(error) = ui_client_state::ensure_native_ui_client(&dir) {
+            log::warn!("Failed to isolate legacy UI state for this installation: {error}");
+        }
+    }
+
     let (broadcaster, _) = http_server::WsBroadcaster::new();
     context.manage(broadcaster);
     context.manage(std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -4786,6 +5432,8 @@ pub fn initialize_runtime(context: &RuntimeContext) -> Result<(), String> {
         if let Err(error) = opinionated::sync_native_backend_skills_on_startup() {
             log::warn!("Failed to sync native backend skills: {error}");
         }
+        opinionated::cliproxyapi::export_client_key_to_process();
+        opinionated::cliproxyapi::resume_if_enabled();
     });
     Ok(())
 }
@@ -4913,6 +5561,11 @@ fn repair_managed_cli_links(context: &RuntimeContext, preferences: &AppPreferenc
                 preferences.gh_cli_source.as_str(),
                 format!("{home}/.local/share/jean/gh-cli/gh"),
             ),
+            (
+                "glab",
+                preferences.glab_cli_source.as_str(),
+                format!("{home}/.local/share/jean/glab-cli/glab"),
+            ),
         ];
         for (tool, source, managed_binary) in entries {
             if source == "jean" {
@@ -4988,11 +5641,25 @@ fn repair_managed_cli_links(context: &RuntimeContext, preferences: &AppPreferenc
                 .join(executable("kimi", "kimi.cmd")),
         ),
         (
+            "devin",
+            preferences.devin_cli_source.as_str(),
+            app_data
+                .join(devin_cli::config::CLI_DIR_NAME)
+                .join(devin_cli::config::MANAGED_CLI_BINARY_NAME),
+        ),
+        (
             "agy",
             preferences.antigravity_cli_source.as_str(),
             app_data
                 .join("antigravity-cli")
                 .join(executable("agy", "agy.exe")),
+        ),
+        (
+            "muse",
+            preferences.muse_cli_source.as_str(),
+            app_data
+                .join(muse_cli::CLI_DIR_NAME)
+                .join(muse_cli::MANAGED_CLI_BINARY_NAME),
         ),
         (
             "cmdc",
@@ -5014,6 +5681,13 @@ fn repair_managed_cli_links(context: &RuntimeContext, preferences: &AppPreferenc
             "gh",
             preferences.gh_cli_source.as_str(),
             app_data.join("gh-cli").join(executable("gh", "gh.exe")),
+        ),
+        (
+            "glab",
+            preferences.glab_cli_source.as_str(),
+            app_data
+                .join("glab-cli")
+                .join(executable("glab", "glab.exe")),
         ),
     ];
 
@@ -5098,12 +5772,16 @@ async fn wait_for_shutdown_signal() -> Result<(), String> {
 
 /// Run the standalone Axum adapter until it receives a shutdown signal.
 pub async fn run_server() -> Result<(), String> {
-    // Host modes (MCP stdio, PI RPC, Grok/Kimi ACP) return before the rest of
+    // Host modes (MCP stdio, PI RPC, Grok/Kimi ACP, Muse MSP) return before the rest of
     // startup. Raise the limit first so those processes get it when launched
     // via jean-server rather than the desktop binary (which also raises in run()).
     platform::raise_fd_limit();
     if std::env::args().any(|argument| argument == jean_mcp_core::JEAN_MCP_STDIO_ARG) {
         jean_mcp_stdio::run_stdio_server()?;
+        return Ok(());
+    }
+    if std::env::args().any(|argument| argument == chat::claude_host::CLAUDE_HOST_ARG) {
+        chat::claude_host::run_claude_host_from_args()?;
         return Ok(());
     }
     if std::env::args().any(|argument| argument == chat::pi::PI_RPC_HOST_ARG) {
@@ -5118,9 +5796,13 @@ pub async fn run_server() -> Result<(), String> {
         chat::kimi::run_kimi_acp_host_from_args()?;
         return Ok(());
     }
+    if std::env::args().any(|argument| argument == chat::muse::MUSE_MSP_HOST_ARG) {
+        chat::muse::run_muse_msp_host_from_args()?;
+        return Ok(());
+    }
     async_runtime::set(tokio::runtime::Handle::current());
     #[cfg(target_os = "linux")]
-    platform::fix_headless_path();
+    platform::fix_linux_path();
     platform::add_fnm_node_to_path();
     let cli = parse_cli_args();
     // WSL headless auto-allows native open; explicit flag covers non-WSL local servers.
@@ -5175,4 +5857,38 @@ pub async fn run_server() -> Result<(), String> {
     let _ = opencode_server::shutdown_managed_server();
     chat::codex_server::shutdown_server();
     Ok(())
+}
+
+#[cfg(test)]
+mod ui_state_pending_text_tests {
+    use super::UIState;
+
+    #[test]
+    fn pending_text_table_rows_round_trip() {
+        let input = serde_json::json!({
+            "pending_text_files": {
+                "s1": [{
+                    "id": "t1",
+                    "path": "/tmp/pasted-texts/t1.txt",
+                    "filename": "t1.txt",
+                    "size": 10,
+                    "table_rows": {
+                        "table_key": "msg-1:0",
+                        "rows": [0, 2],
+                        "notes": { "2": "check this" }
+                    }
+                }]
+            }
+        });
+        let ui_state: UIState = serde_json::from_value(input).unwrap();
+        let output = serde_json::to_value(&ui_state).unwrap();
+        assert_eq!(
+            output["pending_text_files"]["s1"][0]["table_rows"],
+            serde_json::json!({
+                "table_key": "msg-1:0",
+                "rows": [0, 2],
+                "notes": { "2": "check this" }
+            })
+        );
+    }
 }

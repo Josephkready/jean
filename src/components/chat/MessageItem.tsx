@@ -1,6 +1,12 @@
 import { memo, useCallback, useMemo } from 'react'
+import { AgentMessageFromRow } from '@/components/agents/AgentMessageLink'
+import { parseAgentSentMessage } from '@/components/agents/agent-messages'
 import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
+import { PILL_BUBBLE_CLASS, ReplyBubble } from './ReplyBubble'
+import { ChatContinuedNotice } from './ChatContinuedNotice'
+import { parseInlineNumberedQuestion } from './inline-question-utils'
+import { InlineQuestionOptions } from './InlineQuestionOptions'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -45,7 +51,7 @@ import { ThinkingBlock } from './ThinkingBlock'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { logger } from '@/lib/logger'
-import { formatDuration } from './time-utils'
+import { MessageTiming } from './MessageTiming'
 import {
   parseReviewFindings,
   hasReviewFindings,
@@ -59,6 +65,8 @@ import {
   extractDirectoryMentionPaths,
   extractSkillPaths,
   stripAllMarkers,
+  isAgentUpdateMessage,
+  isChatContinuedMessage,
 } from './message-content-utils'
 import {
   getAskUserQuestions,
@@ -167,6 +175,12 @@ interface MessageItemProps {
   hideEditedFiles?: boolean
   /** Duration of this assistant message in ms (computed from user→assistant timestamp delta) */
   durationMs?: number | null
+  /** Render the assistant reply in a bubble (agent chat) */
+  bubble?: boolean
+  /** Agent chat: hide backend, model, mode, and effort under the user prompt and show it as a pill */
+  hideSettingsBadges?: boolean
+  /** Sends a user message (answers to inline numbered questions) */
+  onSendAnswer?: (text: string) => void
 }
 
 /**
@@ -209,6 +223,9 @@ export const MessageItem = memo(function MessageItem({
   hideCancelledIndicator,
   hideEditedFiles = false,
   durationMs,
+  bubble = false,
+  hideSettingsBadges = false,
+  onSendAnswer,
 }: MessageItemProps) {
   const zenMode = useUIStore(state => state.zenMode)
   // Only show Approve button for the last message with ExitPlanMode
@@ -255,6 +272,14 @@ export const MessageItem = memo(function MessageItem({
             .trim()
         : '',
     [message.role, message.content, message.content_blocks]
+  )
+  // Numbered question asked as text: answerable until the user replies
+  const inlineQuestion = useMemo(
+    () =>
+      isLastMessage && !hasFollowUpMessage && onSendAnswer
+        ? parseInlineNumberedQuestion(assistantResponse)
+        : null,
+    [isLastMessage, hasFollowUpMessage, onSendAnswer, assistantResponse]
   )
   // Show content if it's not empty
   const showContent = displayContent.trim()
@@ -493,7 +518,7 @@ export const MessageItem = memo(function MessageItem({
   const durationBadge =
     message.role === 'assistant' && durationMs != null && durationMs > 0 ? (
       <span className="mt-1 block min-h-4 text-xs leading-4 text-muted-foreground/40 tabular-nums font-mono">
-        {formatDuration(durationMs)}
+        <MessageTiming durationMs={durationMs} timestamp={message.timestamp} />
       </span>
     ) : null
 
@@ -501,7 +526,7 @@ export const MessageItem = memo(function MessageItem({
     <>
       {/* Show attached images for user messages */}
       {imagePaths.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {imagePaths.map((path, idx) => (
             <ImageLightbox
               key={`${message.id}-img-${idx}`}
@@ -518,7 +543,7 @@ export const MessageItem = memo(function MessageItem({
 
       {/* Show attached text files for user messages */}
       {textFilePaths.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {textFilePaths.map((path, idx) => (
             <TextFileLightbox
               key={`${message.id}-txt-${idx}`}
@@ -533,7 +558,7 @@ export const MessageItem = memo(function MessageItem({
 
       {/* Show attached file and directory mentions (@ mentions) for user messages */}
       {(fileMentionPaths.length > 0 || directoryMentionPaths.length > 0) && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {directoryMentionPaths.map((path, idx) => (
             <FileMentionBadge
               key={`${message.id}-dir-${idx}`}
@@ -547,6 +572,9 @@ export const MessageItem = memo(function MessageItem({
               key={`${message.id}-file-${idx}`}
               path={path}
               worktreePath={worktreePath}
+              serverId={
+                messageServerId === 'local' ? undefined : messageServerId
+              }
             />
           ))}
         </div>
@@ -554,7 +582,7 @@ export const MessageItem = memo(function MessageItem({
 
       {/* Show attached skills (/ mentions) for user messages */}
       {skillPaths.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div data-attachments className="flex flex-wrap gap-2 mb-2">
           {skillPaths.map((path, idx) => {
             // Extract skill name from path (e.g., /Users/.../skills/react/SKILL.md -> react)
             const parts = normalizePath(path).split('/')
@@ -965,6 +993,14 @@ export const MessageItem = memo(function MessageItem({
         </>
       )}
 
+      {inlineQuestion && onSendAnswer && !skipToolCalls && (
+        <InlineQuestionOptions
+          options={inlineQuestion.options}
+          disabled={isSending}
+          onSend={onSendAnswer}
+        />
+      )}
+
       {/* Show edited files at the bottom of assistant messages */}
       {message.role === 'assistant' &&
         ((message.tool_calls?.length ?? 0) > 0 || turnUserMessageId) &&
@@ -998,9 +1034,23 @@ export const MessageItem = memo(function MessageItem({
     >
       {message.role === 'user' ? (
         <div className="group flex max-w-[85%] min-w-0 flex-col items-end gap-1 sm:max-w-[70%]">
-          <div className="min-w-0 max-w-full break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground">
+          <div
+            className={cn(
+              'max-w-full',
+              hideSettingsBadges
+                ? cn(
+                    PILL_BUBBLE_CLASS,
+                    '[--bubble-bg:var(--agent-accent,var(--muted))] bg-(--bubble-bg)',
+                    // Agent-colored bubbles are strong shades: use white text
+                    '[--bubble-fg:var(--agent-accent-fg,var(--foreground))] text-(--bubble-fg) [&_a]:text-inherit',
+                    // Attachments: the bubble color, a bit darker
+                    '[&_[data-attachments]>*]:border-transparent [&_[data-attachments]>*]:bg-[color-mix(in_oklab,var(--bubble-bg)_80%,black)]'
+                  )
+                : 'min-w-0 break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground'
+            )}
+          >
             {messageBoxContent}
-            {!zenMode && message.model && (
+            {!zenMode && !hideSettingsBadges && message.model && (
               <div className="mt-1.5">
                 <MessageSettingsBadges
                   model={message.model}
@@ -1045,8 +1095,12 @@ export const MessageItem = memo(function MessageItem({
           )}
         </div>
       ) : (
-        <div className="group relative text-foreground/90 w-full min-w-0 break-words">
-          {messageBoxContent}
+        <div className="group/message group relative text-foreground/90 w-full min-w-0 break-words">
+          {bubble ? (
+            <ReplyBubble>{messageBoxContent}</ReplyBubble>
+          ) : (
+            messageBoxContent
+          )}
           {!zenMode && assistantResponse && (
             <div className="mt-1 flex justify-end">
               <Tooltip>
@@ -1072,6 +1126,21 @@ export const MessageItem = memo(function MessageItem({
 
   // Custom right-click menu replaces the unusable browser default on the thread.
   if (message.role === 'user') {
+    // Jean's automatic agent updates are for the agent only; show its reply.
+    if (isAgentUpdateMessage(message.content)) return null
+    if (isChatContinuedMessage(message.content))
+      return <ChatContinuedNotice content={message.content} />
+    // A message from an agent: one line that opens the conversation
+    const agentSent = parseAgentSentMessage(message.content)
+    if (agentSent)
+      return (
+        <AgentMessageFromRow
+          sent={agentSent}
+          sessionId={sessionId}
+          worktreeId={worktreeId}
+          worktreePath={worktreePath}
+        />
+      )
     return (
       <MessageThreadContextMenu
         messageText={displayContent}

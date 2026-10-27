@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { render, screen, within } from '@/test/test-utils'
+import type * as TransportModule from '@/lib/transport'
 import { CloneProjectModal } from './CloneProjectModal'
 import { useProjectsStore } from '@/store/projects-store'
 import {
@@ -18,9 +19,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }))
 
 vi.mock('@/lib/transport', async () => {
-  const actual = (await vi.importActual('@/lib/transport')) as {
-    invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>
-  } & Record<string, unknown>
+  const actual =
+    await vi.importActual<typeof TransportModule>('@/lib/transport')
   return {
     ...actual,
     invoke: (cmd: string, args?: Record<string, unknown>) => {
@@ -181,7 +181,12 @@ describe('CloneProjectModal', () => {
     )
 
     await userEvent.click(provider)
-    await userEvent.click(screen.getByRole('option', { name: 'GitLab' }))
+    const gitlab = screen.getByRole('option', { name: 'GitLab' })
+    expect(within(gitlab).getByText('Beta')).toHaveClass('bg-warning/10')
+    expect(
+      within(screen.getByRole('option', { name: 'GitHub' })).queryByText('Beta')
+    ).toBeNull()
+    await userEvent.click(gitlab)
     expect(provider).toHaveTextContent('GitLab')
 
     await userEvent.click(provider)

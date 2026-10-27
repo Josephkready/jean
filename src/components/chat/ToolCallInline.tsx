@@ -43,6 +43,10 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { InlineFileDiff } from './InlineFileDiff'
+import {
+  codexSubagentDetail,
+  formatSubagentModel,
+} from './hooks/useActiveTodosAndAgents'
 
 // Streaming tool calls are replaced by persisted message tool calls when a run
 // finishes. Keep explicit user choices through that remount so an open tool
@@ -165,7 +169,13 @@ function formatSubAgentActivity(
     string,
     { status?: string } | undefined
   >
-  const lines = [`Agent: ${String(input.prompt ?? 'sub-agent')}`]
+  const name = codexSubagentDetail(input) ?? 'sub-agent'
+  const lines = [`Agent: ${name}`]
+  const model =
+    typeof input.model === 'string' && input.model.trim()
+      ? formatSubagentModel(input.model)
+      : undefined
+  if (model && !name.includes(model)) lines.push(`Model: ${model}`)
   for (const id of threadIds) {
     lines.push(`Thread: ${id}`)
     const status = states[id]?.status
@@ -359,6 +369,7 @@ function isRecognizedExternalTool(name: string): boolean {
     name.startsWith('mcp__') ||
     name.startsWith('mcp:') ||
     isAntigravityNativeToolName(name) ||
+    isMuseNativeToolName(name) ||
     isJeanMcpToolName(name)
   )
 }
@@ -385,6 +396,25 @@ function isAntigravityNativeToolName(name: string): boolean {
       'task_boundary',
     ].includes(name)
   )
+}
+
+/** Native Muse Code tools that use Jean's generic expandable renderer. */
+function isMuseNativeToolName(name: string): boolean {
+  return [
+    'add_memory',
+    'bash_input',
+    'code_exec',
+    'code_wait',
+    'cron_create',
+    'cron_delete',
+    'cron_list',
+    'edit_memory',
+    'search',
+    'subagent_cancel',
+    'update_goal',
+    'work_stop',
+    'write_todos',
+  ].includes(name)
 }
 
 /** Title-case a snake_case / kebab-case tool id for display. */
@@ -1307,6 +1337,8 @@ export function normalizeToolCallForDisplay(
 
   switch (normalizedName) {
     case 'Bash':
+    case 'bash':
+    case 'exec_command':
     case 'run_command':
     case 'shell_command':
     case 'run_terminal_command':
@@ -1317,11 +1349,12 @@ export function normalizeToolCallForDisplay(
         name: 'Bash',
         input: {
           ...withoutVariant,
-          command: input.command ?? input.CommandLine,
+          command: input.command ?? input.CommandLine ?? input.cmd,
         },
       }
     case 'view_file':
     case 'read_file':
+    case 'read':
     case 'Read':
       return {
         name: 'Read',
@@ -1338,6 +1371,7 @@ export function normalizeToolCallForDisplay(
       }
     case 'write_to_file':
     case 'write_file':
+    case 'write':
     case 'Write':
       return {
         name: 'Write',
@@ -1354,6 +1388,8 @@ export function normalizeToolCallForDisplay(
         },
       }
     case 'replace_file_content':
+    case 'edit_file':
+    case 'edit':
     case 'Edit':
       return {
         name: 'Edit',
@@ -1369,11 +1405,13 @@ export function normalizeToolCallForDisplay(
             input.old_string ??
             input.oldText ??
             input.old_text ??
+            input.old_str ??
             input.TargetContent,
           new_string:
             input.new_string ??
             input.newText ??
             input.new_text ??
+            input.new_str ??
             input.ReplacementContent,
         },
       }
@@ -1425,11 +1463,13 @@ export function normalizeToolCallForDisplay(
         },
       }
     case 'search_web':
+    case 'web_search':
       return {
         name: 'WebSearch',
         input: { ...withoutVariant, query: input.query ?? input.Query },
       }
     case 'read_url_content':
+    case 'web_fetch':
       return {
         name: 'WebFetch',
         input: { ...withoutVariant, url: input.url ?? input.Url },
@@ -1513,6 +1553,16 @@ export function summarizeToolCall(toolCall: ToolCall): {
   )
   const input = normalized.input
   const label = getToolSummaryName({ ...toolCall, name: normalized.name })
+
+  if (
+    normalized.name === 'SpawnAgent' ||
+    normalized.name === 'SendInput' ||
+    normalized.name === 'CloseAgent' ||
+    normalized.name === 'ResumeAgent' ||
+    normalized.name === 'WaitForAgents'
+  ) {
+    return { label, detail: codexSubagentDetail(input) }
+  }
 
   if (isJeanMcpToolName(normalized.name)) {
     const detail = formatJeanMcpToolDetail(input)
@@ -1814,12 +1864,10 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
     // Codex multi-agent tools
     case 'SpawnAgent': {
       const prompt = input.prompt as string | undefined
-      const truncatedPrompt =
-        prompt && prompt.length > 60 ? prompt.substring(0, 60) + '...' : prompt
       return {
         icon: <Users className="h-4 w-4 shrink-0" />,
         label: 'Spawn Agent',
-        detail: truncatedPrompt ?? 'sub-agent',
+        detail: codexSubagentDetail(input) ?? 'sub-agent',
         expandedContent:
           formatSubAgentActivity(input) ??
           prompt ??
@@ -1829,11 +1877,11 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
 
     case 'SendInput': {
       // Codex sub_agent_activity puts the agent path in `prompt`
-      const agentId = (input.agent_id ?? input.prompt) as string | undefined
+      const detail = codexSubagentDetail(input)
       return {
         icon: <Send className="h-4 w-4 shrink-0" />,
         label: 'Send Input',
-        detail: agentId ? `to agent ${agentId}` : undefined,
+        detail: detail ? `to ${detail}` : undefined,
         expandedContent:
           formatSubAgentActivity(input) ?? JSON.stringify(input, null, 2),
       }
@@ -1853,11 +1901,10 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
     }
 
     case 'CloseAgent': {
-      const agentId = (input.agent_id ?? input.prompt) as string | undefined
       return {
         icon: <XCircle className="h-4 w-4 shrink-0" />,
         label: 'Close Agent',
-        detail: agentId,
+        detail: codexSubagentDetail(input),
         expandedContent:
           formatSubAgentActivity(input) ?? JSON.stringify(input, null, 2),
       }
@@ -2069,7 +2116,7 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
 
     // OpenCode-only tools
     case 'apply_patch': {
-      const patchText = input.patchText as string | undefined
+      const patchText = firstStringField(input, ['patchText', 'patch', 'input'])
       const fileCount = patchText
         ? (patchText.match(/^---\s/gm) || []).length
         : 0
@@ -2401,7 +2448,8 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
       return {
         icon: <Terminal className="h-4 w-4 shrink-0" />,
         label: isKnownExternal
-          ? isAntigravityNativeToolName(normalized.name)
+          ? isAntigravityNativeToolName(normalized.name) ||
+            isMuseNativeToolName(normalized.name)
             ? humanizeSnakeCase(normalized.name)
             : normalized.name
           : `${normalized.name} (unhandled tool)`,

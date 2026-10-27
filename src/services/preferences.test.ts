@@ -14,6 +14,8 @@ import {
   usePatchPreferences,
   useSavePreferences,
   preferencesQueryKeys,
+  applyOneShotKeybindingMigrations,
+  loadPreferencesForServer,
 } from './preferences'
 import { AppearancePane } from '@/components/preferences/panes/AppearancePane'
 import type { AppPreferences } from '@/types/preferences'
@@ -42,7 +44,11 @@ import {
   defaultPreferences,
 } from '@/types/preferences'
 import { DEFAULT_KEYBINDINGS } from '@/types/keybindings'
-import { clearClientPreferencesForTests } from '@/lib/client-preferences'
+import {
+  clearClientPreferencesForTests,
+  updateClientPreferences,
+} from '@/lib/client-preferences'
+import { LOCAL_SERVER_ID } from '@/types/server-resource'
 import { SettingsTargetProvider } from '@/lib/settings-target'
 
 vi.mock('@/lib/transport', () => ({
@@ -307,12 +313,46 @@ describe('model option helpers', () => {
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain(
       'After ANY correction from the user'
     )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain('Subagent Strategy')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      '### 3. Self-Improvement Loop'
+    )
   })
 
   it('does not require GitHub discovery in every chat', () => {
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain(
       'GitHub Issue and Discussion Discovery'
     )
+  })
+})
+
+describe('applyOneShotKeybindingMigrations', () => {
+  it('rewrites only the old Full access default', () => {
+    const result = applyOneShotKeybindingMigrations(
+      {
+        ...DEFAULT_KEYBINDINGS,
+        approve_plan_yolo: 'mod+y',
+        toggle_zen_mode: 'mod+alt+z',
+      },
+      []
+    )
+
+    expect(result.keybindings.approve_plan_yolo).toBe('mod+shift+alt+y')
+    expect(result.keybindings.toggle_zen_mode).toBe('mod+alt+z')
+    expect(result.persist).toBe(true)
+  })
+
+  it('keeps mod+y after the migration id is recorded', () => {
+    const result = applyOneShotKeybindingMigrations(
+      {
+        ...DEFAULT_KEYBINDINGS,
+        approve_plan_yolo: 'mod+y',
+      },
+      ['approve_plan_yolo_mod_y']
+    )
+
+    expect(result.keybindings.approve_plan_yolo).toBe('mod+y')
+    expect(result.persist).toBe(false)
   })
 })
 
@@ -457,6 +497,23 @@ describe('preferences service', () => {
       )
     })
 
+    it('uses the attached server browser hostname', async () => {
+      const { invokeForServer } = await import('@/lib/transport')
+      vi.mocked(invokeForServer).mockResolvedValueOnce({
+        schemaVersion: 1,
+        revision: 'revision-1',
+        preferences: { browser_default_host: 'dev.example.com' },
+      })
+
+      const { result } = renderHook(() => usePreferences(), {
+        wrapper: createServerWrapper(queryClient, 'dev-server'),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(result.current.data?.browser_default_host).toBe('dev.example.com')
+      expect(result.current.data?.jean_mcp_enabled).toBe(true)
+    })
+
     it('loads preferences from backend', async () => {
       const { invoke } = await import('@/lib/transport')
       const mockPreferences: AppPreferences = {
@@ -508,6 +565,8 @@ describe('preferences service', () => {
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
         has_seen_jean_mcp_intro: false,
+        show_full_file_path: false,
+        spellcheck_enabled: true,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -521,6 +580,7 @@ describe('preferences service', () => {
         auto_save_context: false,
         auto_pull_base_branch: true,
         confirm_session_close: true,
+        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -536,6 +596,8 @@ describe('preferences service', () => {
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        pi_agent_owns_policy: false,
+        claude_auto_steer_enabled: true,
         grok_auto_steer_enabled: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -553,6 +615,7 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         grok_cli_source: 'jean',
         gh_cli_source: 'jean',
+        glab_cli_source: 'jean',
         wsl_mode_chosen: false,
         wsl_enabled: false,
         wsl_distro: '',
@@ -594,6 +657,7 @@ describe('preferences service', () => {
       expect(result.current.data?.theme).toBe('system')
       expect(result.current.data?.selected_model).toBe('claude-opus-5-5')
       expect(result.current.data?.jean_mcp_enabled).toBe(true)
+      expect(result.current.data?.browser_default_host).toBeNull()
     })
 
     it('reports backend errors instead of overwriting cached preferences', async () => {
@@ -629,6 +693,8 @@ describe('preferences service', () => {
         keybindings: {
           toggle_left_sidebar: 'mod+1', // Old default
           restore_last_archived: 'mod+alt+shift+t', // Broken modifier order
+          clear_session_context: 'mod+shift+k', // Old default, now unbound
+          toggle_zen_mode: 'mod+alt+z', // Custom binding
         },
         archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
@@ -663,6 +729,8 @@ describe('preferences service', () => {
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
         has_seen_jean_mcp_intro: false,
+        show_full_file_path: false,
+        spellcheck_enabled: true,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -676,6 +744,7 @@ describe('preferences service', () => {
         auto_save_context: false,
         auto_pull_base_branch: true,
         confirm_session_close: true,
+        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -691,6 +760,8 @@ describe('preferences service', () => {
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        pi_agent_owns_policy: false,
+        claude_auto_steer_enabled: true,
         grok_auto_steer_enabled: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -708,6 +779,7 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         grok_cli_source: 'jean',
         gh_cli_source: 'jean',
+        glab_cli_source: 'jean',
         wsl_mode_chosen: false,
         wsl_enabled: false,
         wsl_distro: '',
@@ -738,11 +810,58 @@ describe('preferences service', () => {
       expect(result.current.data?.keybindings?.restore_last_archived).toBe(
         'mod+shift+alt+t'
       )
+      expect(result.current.data?.keybindings?.clear_session_context).toBe('')
+      expect(result.current.data?.keybindings?.toggle_zen_mode).toBe(
+        'mod+alt+z'
+      )
       expect(result.current.data?.keybindings?.open_quick_menu).toBe(
         DEFAULT_KEYBINDINGS.open_quick_menu
       )
       expect(Object.keys(result.current.data?.keybindings ?? {})).toHaveLength(
         Object.keys(DEFAULT_KEYBINDINGS).length
+      )
+    })
+
+    it('migrates a stored Full access mod+y once and then keeps an explicit mod+y', async () => {
+      const { invoke } = await import('@/lib/transport')
+      vi.mocked(invoke).mockResolvedValue({
+        keybindings: {
+          approve_plan_yolo: 'mod+y',
+          toggle_zen_mode: 'mod+alt+z',
+        },
+      })
+
+      const first = await loadPreferencesForServer(LOCAL_SERVER_ID)
+      expect(first.keybindings.approve_plan_yolo).toBe('mod+shift+alt+y')
+      expect(first.keybindings.toggle_zen_mode).toBe('mod+alt+z')
+      expect(first.applied_keybinding_migrations).toContain(
+        'approve_plan_yolo_mod_y'
+      )
+
+      updateClientPreferences({
+        keybindings: {
+          ...first.keybindings,
+          approve_plan_yolo: 'mod+y',
+        },
+      })
+
+      const second = await loadPreferencesForServer(LOCAL_SERVER_ID)
+      expect(second.keybindings.approve_plan_yolo).toBe('mod+y')
+      expect(second.keybindings.toggle_zen_mode).toBe('mod+alt+z')
+    })
+
+    it('leaves a custom Full access chord in place while recording the migration', async () => {
+      const { invoke } = await import('@/lib/transport')
+      vi.mocked(invoke).mockResolvedValue({
+        keybindings: {
+          approve_plan_yolo: 'mod+shift+l',
+        },
+      })
+
+      const loaded = await loadPreferencesForServer(LOCAL_SERVER_ID)
+      expect(loaded.keybindings.approve_plan_yolo).toBe('mod+shift+l')
+      expect(loaded.applied_keybinding_migrations).toContain(
+        'approve_plan_yolo_mod_y'
       )
     })
 
@@ -797,6 +916,8 @@ describe('preferences service', () => {
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
         has_seen_jean_mcp_intro: false,
+        show_full_file_path: false,
+        spellcheck_enabled: true,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -810,6 +931,7 @@ describe('preferences service', () => {
         auto_save_context: false,
         auto_pull_base_branch: true,
         confirm_session_close: true,
+        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -826,6 +948,8 @@ describe('preferences service', () => {
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        pi_agent_owns_policy: false,
+        claude_auto_steer_enabled: true,
         grok_auto_steer_enabled: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -843,6 +967,7 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         grok_cli_source: 'jean',
         gh_cli_source: 'jean',
+        glab_cli_source: 'jean',
         wsl_mode_chosen: false,
         wsl_enabled: false,
         wsl_distro: '',
@@ -924,6 +1049,8 @@ describe('preferences service', () => {
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
         has_seen_jean_mcp_intro: false,
+        show_full_file_path: false,
+        spellcheck_enabled: true,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -937,6 +1064,7 @@ describe('preferences service', () => {
         auto_save_context: false,
         auto_pull_base_branch: true,
         confirm_session_close: true,
+        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -952,6 +1080,8 @@ describe('preferences service', () => {
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        pi_agent_owns_policy: false,
+        claude_auto_steer_enabled: true,
         grok_auto_steer_enabled: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -969,6 +1099,7 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         grok_cli_source: 'jean',
         gh_cli_source: 'jean',
+        glab_cli_source: 'jean',
         wsl_mode_chosen: false,
         wsl_enabled: false,
         wsl_distro: '',
@@ -1052,6 +1183,8 @@ describe('preferences service', () => {
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
         has_seen_jean_mcp_intro: false,
+        show_full_file_path: false,
+        spellcheck_enabled: true,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -1065,6 +1198,7 @@ describe('preferences service', () => {
         auto_save_context: false,
         auto_pull_base_branch: true,
         confirm_session_close: true,
+        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -1080,6 +1214,8 @@ describe('preferences service', () => {
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        pi_agent_owns_policy: false,
+        claude_auto_steer_enabled: true,
         grok_auto_steer_enabled: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -1097,6 +1233,7 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         grok_cli_source: 'jean',
         gh_cli_source: 'jean',
+        glab_cli_source: 'jean',
         wsl_mode_chosen: false,
         wsl_enabled: false,
         wsl_distro: '',
@@ -1222,6 +1359,8 @@ describe('preferences service', () => {
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
         has_seen_jean_mcp_intro: false,
+        show_full_file_path: false,
+        spellcheck_enabled: true,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -1235,6 +1374,7 @@ describe('preferences service', () => {
         auto_save_context: false,
         auto_pull_base_branch: true,
         confirm_session_close: true,
+        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -1250,6 +1390,8 @@ describe('preferences service', () => {
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        pi_agent_owns_policy: false,
+        claude_auto_steer_enabled: true,
         grok_auto_steer_enabled: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -1267,6 +1409,7 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         grok_cli_source: 'jean',
         gh_cli_source: 'jean',
+        glab_cli_source: 'jean',
         wsl_mode_chosen: false,
         wsl_enabled: false,
         wsl_distro: '',
@@ -1348,6 +1491,8 @@ describe('preferences service', () => {
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
         has_seen_jean_mcp_intro: false,
+        show_full_file_path: false,
+        spellcheck_enabled: true,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -1361,6 +1506,7 @@ describe('preferences service', () => {
         auto_save_context: false,
         auto_pull_base_branch: true,
         confirm_session_close: true,
+        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -1376,6 +1522,8 @@ describe('preferences service', () => {
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        pi_agent_owns_policy: false,
+        claude_auto_steer_enabled: true,
         grok_auto_steer_enabled: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -1393,6 +1541,7 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         grok_cli_source: 'jean',
         gh_cli_source: 'jean',
+        glab_cli_source: 'jean',
         wsl_mode_chosen: false,
         wsl_enabled: false,
         wsl_distro: '',
@@ -1507,6 +1656,28 @@ describe('preferences service', () => {
     }, 15_000)
   })
 
+  describe('AppearancePane compact chat view', () => {
+    it('shows the switch on before preferences load, matching the default', async () => {
+      const { invoke } = await import('@/lib/transport')
+      vi.mocked(invoke).mockImplementation(
+        () => new Promise(() => undefined) as Promise<never>
+      )
+
+      render(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(AppearancePane)
+        )
+      )
+
+      const switchEl = await screen.findByRole('switch', {
+        name: 'Compact chat view',
+      })
+      expect(switchEl).toHaveAttribute('aria-checked', 'true')
+    })
+  })
+
   describe('AppearancePane finished session animation', () => {
     it('toggles the finished session animation preference', async () => {
       const { invoke } = await import('@/lib/transport')
@@ -1597,6 +1768,37 @@ describe('preferences service', () => {
       ).toBe(true)
       expect(switchEl).toHaveAttribute('aria-checked', 'true')
       expect(toast.error).not.toHaveBeenCalled()
+    })
+
+    it('persists the collapsed sidebar edge hover setting', async () => {
+      const { invoke } = await import('@/lib/transport')
+      vi.mocked(invoke).mockImplementation(async command => {
+        if (command === 'load_preferences') return defaultPreferences
+        if (command === 'patch_preferences') return undefined
+        throw new Error(`Unexpected command ${command}`)
+      })
+
+      const user = userEvent.setup()
+      render(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(AppearancePane)
+        )
+      )
+
+      const switchEl = await screen.findByRole('switch', {
+        name: 'Open sidebar from screen edge',
+      })
+      expect(switchEl).toHaveAttribute('aria-checked', 'false')
+
+      await user.click(switchEl)
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
+          patch: { sidebar_hover_open_enabled: true },
+        })
+      })
     })
   })
 })

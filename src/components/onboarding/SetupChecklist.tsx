@@ -1,5 +1,5 @@
 /**
- * One row per selected AI backend plus the required GitHub CLI.
+ * One row per selected AI backend plus optional GitHub and GitLab CLIs.
  *
  * - Missing managed CLIs install automatically, all in parallel.
  * - CLIs found on PATH switch to the PATH binary automatically.
@@ -10,7 +10,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Check, Github, Loader2 } from '@/components/icons/reicon'
-import { getBackendIcon } from '@/components/ui/backend-label'
+import { BetaBadge } from '@/components/ui/badge'
+import { GitLabIcon } from '@/components/icons/GitLabIcon'
+import {
+  BackendLabel,
+  getBackendIcon,
+  getBackendPlainLabel,
+} from '@/components/ui/backend-label'
 import { getCursorInstallCommand } from '@/services/cursor-cli'
 import { cn } from '@/lib/utils'
 import { AuthLoginState } from './CliSetupComponents'
@@ -65,7 +71,13 @@ export function SetupChecklist({
   loginSeed,
   cursorServerId,
 }: SetupChecklistProps) {
-  const rows: CliType[] = [...backends, 'gh']
+  const [ghSkipped, setGhSkipped] = useState(false)
+  const [glabSkipped, setGlabSkipped] = useState(false)
+  const rows: CliType[] = [
+    ...backends,
+    ...(ghSkipped ? [] : (['gh'] as const)),
+    ...(glabSkipped ? [] : (['glab'] as const)),
+  ]
 
   // Auto actions already started during this checklist visit.
   const startedRef = useRef(new Set<string>())
@@ -284,8 +296,13 @@ export function SetupChecklist({
         const flow = flows[cli]
         const state = states[cli]
         const isActive = active === cli
-        const Icon = cli === 'gh' ? Github : getBackendIcon(cli)
-        const canSkip = cli !== 'gh' && backends.length > 1 && state !== 'ready'
+        const Icon =
+          cli === 'gh' ? Github : cli === 'glab' ? GitLabIcon : getBackendIcon(cli)
+        const rowLabel =
+          cli === 'gh' || cli === 'glab' ? flow.label : getBackendPlainLabel(cli)
+        const canSkip =
+          state !== 'ready' &&
+          (cli === 'gh' || cli === 'glab' || backends.length > 1)
         const waiting = interactive.includes(cli) && !isActive
         const cursorMissing = cli === 'cursor' && state === 'missing'
 
@@ -311,7 +328,7 @@ export function SetupChecklist({
         return (
           <li
             key={cli}
-            aria-label={flow.label}
+            aria-label={rowLabel}
             data-testid={`setup-row-${cli}`}
             className={cn(
               'rounded-lg border p-3 transition-colors',
@@ -321,7 +338,21 @@ export function SetupChecklist({
             <div className="flex items-center gap-3">
               <Icon className="size-5 shrink-0" />
               <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium">{flow.label}</div>
+                <div className="text-sm font-medium">
+                  {cli === 'gh' || cli === 'glab' ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      {flow.label}
+                      {cli === 'glab' && <BetaBadge />}
+                    </span>
+                  ) : (
+                    <BackendLabel backend={cli} />
+                  )}
+                  {(cli === 'gh' || cli === 'glab') && (
+                    <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                      optional
+                    </span>
+                  )}
+                </div>
                 <div
                   className={cn(
                     'truncate text-xs',
@@ -334,7 +365,11 @@ export function SetupChecklist({
               {canSkip && (
                 <button
                   type="button"
-                  onClick={() => onSkip(cli as AIBackend)}
+                  onClick={() => {
+                    if (cli === 'gh') setGhSkipped(true)
+                    else if (cli === 'glab') setGlabSkipped(true)
+                    else onSkip(cli as AIBackend)
+                  }}
                   className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
                 >
                   Skip

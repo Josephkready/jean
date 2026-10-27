@@ -22,16 +22,21 @@ export interface ClientViewState {
   pinned_recent_session_ids: string[]
   left_sidebar_visible: boolean
   left_sidebar_size: number
+  agents_sidebar_size: number
   file_browser_visible: boolean
   file_browser_size: number
   right_sidebar_visible: boolean
   zen_mode: boolean
   /** Open left rail section; Agents shows only while the feature is on */
   rail_section: 'workspace' | 'agents'
+  /** Last sidebar visibility of each rail section */
+  rail_sidebar_visible: Partial<Record<'workspace' | 'agents', boolean>>
   /** Agent open on the Agents page */
   selected_agent_id: string
   /** Agents sidebar server filter: 'all' or a server ID */
   agents_server_filter: string
+  /** Agent pages show every tab and tool activity */
+  agents_advanced: boolean
   terminal_visible_by_worktree: Record<string, boolean>
   terminal_panel_open: Record<string, boolean>
   terminal_visible: boolean
@@ -64,13 +69,16 @@ export const defaultClientViewState: ClientViewState = {
   pinned_recent_session_ids: [],
   left_sidebar_visible: false,
   left_sidebar_size: 250,
+  agents_sidebar_size: 250,
   file_browser_visible: false,
   file_browser_size: 280,
   right_sidebar_visible: false,
   zen_mode: false,
   rail_section: 'workspace',
+  rail_sidebar_visible: {},
   selected_agent_id: 'jean',
   agents_server_filter: 'all',
+  agents_advanced: false,
   terminal_visible_by_worktree: {},
   terminal_panel_open: {},
   terminal_visible: false,
@@ -219,6 +227,7 @@ function parseClientViewState(value: unknown): ClientViewState {
   }
   for (const key of [
     'left_sidebar_size',
+    'agents_sidebar_size',
     'file_browser_size',
     'terminal_height',
     'modal_terminal_width',
@@ -242,10 +251,23 @@ function parseClientViewState(value: unknown): ClientViewState {
   }
   if (value.rail_section === 'workspace' || value.rail_section === 'agents')
     assign('rail_section', value.rail_section)
+  if (isRecord(value.rail_sidebar_visible)) {
+    const visible = value.rail_sidebar_visible
+    assign(
+      'rail_sidebar_visible',
+      Object.fromEntries(
+        (['workspace', 'agents'] as const)
+          .filter(section => isBoolean(visible[section]))
+          .map(section => [section, visible[section]])
+      )
+    )
+  }
   if (isString(value.selected_agent_id) && value.selected_agent_id)
     assign('selected_agent_id', value.selected_agent_id)
   if (isString(value.agents_server_filter) && value.agents_server_filter)
     assign('agents_server_filter', value.agents_server_filter)
+  if (isBoolean(value.agents_advanced))
+    assign('agents_advanced', value.agents_advanced)
   if (isDockMode(value.modal_terminal_dock_mode))
     assign('modal_terminal_dock_mode', value.modal_terminal_dock_mode)
   if (isDockMode(value.browser_modal_dock_mode))
