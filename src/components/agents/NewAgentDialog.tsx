@@ -371,7 +371,9 @@ function TemplatePicker({
               data-testid={`agent-template-${template.id}`}
               className={cn(
                 'flex w-full items-start gap-3 rounded-lg px-2 py-2 text-left',
-                pressed ? 'bg-primary/10 ring-1 ring-primary' : 'hover:bg-muted'
+                pressed
+                  ? 'bg-primary/10 ring-1 ring-inset ring-primary'
+                  : 'hover:bg-muted'
               )}
               onClick={() => onSelect(template.id)}
             >
