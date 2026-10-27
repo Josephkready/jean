@@ -80,4 +80,15 @@ describe('FileContentModal', () => {
       await screen.findByRole('button', { name: 'Open in Editor' })
     ).toBeInTheDocument()
   })
+
+  it('closes an image on the first Escape instead of a focused tooltip', async () => {
+    const onClose = vi.fn()
+    render(<FileContentModal filePath="/tmp/shot.png" onClose={onClose} />)
+
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(dialog).toHaveFocus())
+    await userEvent.keyboard('{Escape}')
+
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
 })

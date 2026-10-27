@@ -44,6 +44,7 @@ const AGENT_RECAP_INSTRUCTION: &str = "
 - Keep the recap brief, but include every important result: what changed, what was found, what failed, what waits for approval, and links to the PRs, issues, or sessions.
 - Put actions and findings in a Markdown table, one row each, for example: | # | Action | Status | Link |. The user can select rows and add notes to them, so keep one item per row and number the rows.
 - Do not add test steps, diffs, or raw tool output.
+- To show screenshots or images (for example from a session result), add a fenced code block with the language `screenshots`, one absolute image file path or image URL per line. Jean shows it as an image gallery.
 - The last line of the recap is the next-action question.
 ";
 

@@ -14,8 +14,6 @@ import {
   GitBranchPlus,
   GitPullRequestArrow,
   Globe,
-  Maximize,
-  Minimize,
   Plus,
   Terminal,
 } from '@/components/icons/reicon'
@@ -242,7 +240,6 @@ export const SessionChatModal = memo(function SessionChatModal({
   const isMobile = useIsMobile()
   const isTouch = useIsTouchDevice()
   const zenMode = useUIStore(state => state.zenMode)
-  const toggleZenMode = useUIStore(state => state.toggleZenMode)
   const isModalTerminalOpen = useTerminalStore(
     state => state.modalTerminalOpen[worktreeId] ?? false
   )
@@ -757,6 +754,16 @@ export const SessionChatModal = memo(function SessionChatModal({
     })
   }, [worktreeId, worktreePath])
 
+  /** Mobile header: create a session with the default backend, no picker. */
+  const handleCreateDefaultSession = useCallback(() => {
+    useUIStore.getState().openNewSessionModeModal({
+      worktreeId,
+      worktreePath,
+      origin: 'modal',
+      intent: 'default',
+    })
+  }, [worktreeId, worktreePath])
+
   const handleClearContext = useCallback(() => {
     if (!currentSessionId || clearSessionHistory.isPending) return
     if (useChatStore.getState().isSending(currentSessionId)) {
@@ -980,8 +987,10 @@ export const SessionChatModal = memo(function SessionChatModal({
     // modal. keyCode 229 covers Safari/WKWebView (see issue #584 for Enter).
     if (isImeComposingEvent(e)) return
     const target = e.target as HTMLElement
+    // Match content slots: Radix Dialog.Portal drops data-slot, so the
+    // portal wrappers never carry it in the DOM.
     const portalAncestor = target?.closest?.(
-      '[data-slot="dialog-portal"], [data-slot="alert-dialog-portal"], [data-slot="sheet-portal"]'
+      '[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"]'
     )
     const terminalAncestor = target?.closest?.('[data-terminal-root="true"]')
     const { planDialogOpen, gitDiffModalOpen, contextViewerOpen } =
@@ -1144,36 +1153,16 @@ export const SessionChatModal = memo(function SessionChatModal({
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   {isMobile && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
-                          aria-label={
-                            zenMode ? 'Exit zen mode' : 'Enter zen mode'
-                          }
-                          aria-pressed={zenMode}
-                          data-testid="toggle-zen-mode"
-                          onClick={toggleZenMode}
-                        >
-                          {zenMode ? (
-                            <Minimize className="size-2.5" />
-                          ) : (
-                            <Maximize className="size-2.5" />
-                          )}
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        {zenMode ? 'Exit zen mode' : 'Zen mode'}{' '}
-                        <kbd className="ml-1 text-[0.625rem] opacity-60">
-                          {formatShortcutDisplay(
-                            preferences?.keybindings?.toggle_zen_mode ??
-                              DEFAULT_KEYBINDINGS.toggle_zen_mode
-                          )}
-                        </kbd>
-                      </TooltipContent>
-                    </Tooltip>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCreateDefaultSession}
+                      data-testid="mobile-new-session"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      New session
+                    </Button>
                   )}
                   {!zenMode && (
                     <>

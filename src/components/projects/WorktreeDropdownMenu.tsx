@@ -8,6 +8,7 @@ import {
   GitBranch,
   GitPullRequestArrow,
   Globe,
+  Maximize,
   MoreHorizontal,
   Play,
   Plus,
@@ -296,6 +297,16 @@ export function WorktreeDropdownMenu({
             <GitBranch className="mr-2 h-4 w-4" />
             New Worktree
           </DropdownMenuItem>
+
+          {isMobile && (
+            <DropdownMenuItem
+              onClick={() => useUIStore.getState().toggleZenMode()}
+              data-testid="menu-toggle-zen-mode"
+            >
+              <Maximize className="mr-2 h-4 w-4" />
+              Zen mode
+            </DropdownMenuItem>
+          )}
 
           {!isMobile && runScripts.length === 1 && (
             <DropdownMenuItem onClick={handleRun}>

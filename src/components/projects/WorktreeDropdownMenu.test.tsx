@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { fireEvent, render, screen } from '@/test/test-utils'
 import { WorktreeDropdownMenu } from './WorktreeDropdownMenu'
 import type { Worktree } from '@/types/projects'
+import { useUIStore } from '@/store/ui-store'
 import type * as EnvironmentModule from '@/lib/environment'
 
 const envMocks = vi.hoisted(() => ({
@@ -112,6 +113,37 @@ describe('WorktreeDropdownMenu', () => {
 
     expect(screen.queryByRole('menuitem', { name: /run/i })).toBeNull()
     expect(actionMocks.handleRun).not.toHaveBeenCalled()
+  })
+
+  it('toggles zen mode from the mobile menu only', async () => {
+    const user = userEvent.setup()
+    useUIStore.getState().setZenMode(false)
+
+    const { unmount } = render(
+      <WorktreeDropdownMenu
+        worktree={worktree}
+        projectId="project-1"
+        projectPath="/tmp/project"
+      />
+    )
+
+    await user.click(screen.getByRole('button'))
+    await user.click(screen.getByRole('menuitem', { name: 'Zen mode' }))
+
+    expect(useUIStore.getState().zenMode).toBe(true)
+    useUIStore.getState().setZenMode(false)
+    unmount()
+
+    envMocks.isMobile = false
+    render(
+      <WorktreeDropdownMenu
+        worktree={worktree}
+        projectId="project-1"
+        projectPath="/tmp/project"
+      />
+    )
+    await user.click(screen.getByRole('button'))
+    expect(screen.queryByRole('menuitem', { name: 'Zen mode' })).toBeNull()
   })
 
   it('shows the Git item in web access when there are no changes', async () => {

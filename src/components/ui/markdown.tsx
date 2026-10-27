@@ -3,7 +3,6 @@ import {
   Suspense,
   memo,
   useState,
-  useEffect,
   useCallback,
   useRef,
   useMemo,
@@ -38,9 +37,10 @@ import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '@/store/chat-store'
 import { useIsMobile } from '@/hooks/use-mobile'
-import { convertServerFileSrc, invokeForOptionalServer } from '@/lib/transport'
 import { parseServerResourceKey } from '@/lib/server-resource'
 import { tableToMarkdown, setTableRowInPrompt } from '@/lib/table-rows-prompt'
+import { useImageSrc } from './use-image-src'
+import { ScreenshotGallery, parseScreenshotPaths } from './screenshot-gallery'
 
 const MermaidBlock = lazy(() =>
   import('./mermaid-block').then(module => ({ default: module.MermaidBlock }))
@@ -140,10 +140,14 @@ function handleFilePathClick(event: React.MouseEvent<HTMLElement>) {
 function CodeBlock({ children }: { children: ReactNode }) {
   const [copied, setCopied] = useState(false)
   const streaming = useContext(MarkdownStreamingContext)
+  const { sessionId } = useContext(MarkdownTableContext)
   const code = Children.toArray(children)[0]
-  const isMermaid =
-    isValidElement<{ className?: string }>(code) &&
-    code.props.className?.split(/\s+/).includes('language-mermaid')
+  const languages =
+    (isValidElement<{ className?: string }>(code) &&
+      code.props.className?.split(/\s+/)) ||
+    []
+  const isMermaid = languages.includes('language-mermaid')
+  const isScreenshots = languages.includes('language-screenshots')
 
   const handleCopy = useCallback(() => {
     const text = extractText(children)
@@ -152,6 +156,20 @@ function CodeBlock({ children }: { children: ReactNode }) {
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }, [children])
+
+  if (isScreenshots && !streaming) {
+    const paths = parseScreenshotPaths(extractText(children))
+    if (paths.length > 0) {
+      return (
+        <ScreenshotGallery
+          paths={paths}
+          serverId={
+            sessionId ? parseServerResourceKey(sessionId)?.serverId : undefined
+          }
+        />
+      )
+    }
+  }
 
   if (isMermaid && !streaming) {
     return (
@@ -212,48 +230,7 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const serverId = sessionId
     ? parseServerResourceKey(sessionId)?.serverId
     : undefined
-  const isUrl = !src || /^(https?:|data:|blob:|asset:|\/api\/|#)/i.test(src)
-  const isAppData = Boolean(src && /com\.jean\.desktop[/\\]/.test(src))
-  const [loadedImage, setLoadedImage] = useState<{
-    path: string
-    serverId?: string
-    url: string
-  } | null>(null)
-
-  // Screenshots can live outside app data and project roots (for example /tmp).
-  // Use the same owner-routed file reader as the file viewer for those paths.
-  useEffect(() => {
-    if (!src || isUrl || isAppData) return
-    let cancelled = false
-    void invokeForOptionalServer<{ mimeType: string; data: string }>(
-      serverId,
-      'read_file_base64',
-      { path: src }
-    )
-      .then(result => {
-        if (!cancelled) {
-          setLoadedImage({
-            path: src,
-            serverId,
-            url: `data:${result.mimeType};base64,${result.data}`,
-          })
-        }
-      })
-      .catch(error => {
-        if (!cancelled) console.error('Failed to load markdown image:', error)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [src, serverId, isUrl, isAppData])
-
-  const imageSrc = isUrl
-    ? src
-    : isAppData && src
-      ? convertServerFileSrc(serverId, src)
-      : loadedImage?.path === src && loadedImage?.serverId === serverId
-        ? loadedImage.url
-        : undefined
+  const imageSrc = useImageSrc(src, serverId)
 
   return (
     <img
