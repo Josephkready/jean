@@ -381,6 +381,39 @@ describe('useActiveTodosAndAgents', () => {
     ])
   })
 
+  it('keeps agents of a reopened running turn in progress', () => {
+    const runningTurn = {
+      id: 'running-run-1',
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        toolCall('Agent', { id: 'task-done', description: 'Fix A' }, 'Report'),
+        toolCall('Agent', { id: 'task-open', description: 'Fix B' }),
+      ],
+    } as ChatMessage
+
+    const { result, rerender } = renderHook(
+      ({ isSending }) =>
+        useActiveTodosAndAgents({
+          activeSessionId: 'session-1',
+          isSending,
+          currentToolCalls: [],
+          lastAssistantMessage: runningTurn,
+          messages: [runningTurn],
+        }),
+      { initialProps: { isSending: true } }
+    )
+
+    expect(result.current.activeAgents).toMatchObject([
+      { id: 'task-done', status: 'completed' },
+      { id: 'task-open', status: 'in_progress' },
+    ])
+
+    // The run ended but the snapshot id was not refreshed yet
+    rerender({ isSending: false })
+    expect(result.current.activeAgents[1]?.status).toBe('completed')
+  })
+
   it('keeps the panel dismissed when the finished turn gets a new message id', () => {
     const agentCall = toolCall(
       'Agent',

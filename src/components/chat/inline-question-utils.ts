@@ -8,7 +8,7 @@ export interface InlineQuestion {
   /** Last line before the list, without the cue */
   question: string
   options: string[]
-  /** The text without the cue and the numbered list */
+  /** The text without the question, the cue, and the numbered list */
   rest: string
 }
 
@@ -85,21 +85,30 @@ export function parseInlineNumberedQuestion(
   if (!list || list.options.length > MAX_OPTIONS) return null
   if (new Set(list.options).size !== list.options.length) return null
 
-  // Drop the list and the cue; keep text that shares a line with the cue
+  // The question is the last non-blank line before the list, without the cue
   const withoutCue = (line: string) => line.replace(REPLY_CUE_RE, '').trimEnd()
-  const kept = lines
-    .filter((_, index) => index < list.start || index > list.end)
+  let questionIndex = -1
+  for (let i = list.start - 1; i >= 0; i--) {
+    if (plain(withoutCue(lines[i] ?? ''))) {
+      questionIndex = i
+      break
+    }
+  }
+  const question =
+    questionIndex >= 0 ? plain(withoutCue(lines[questionIndex] ?? '')) : ''
+
+  // The rest drops the question, the cue, and the list
+  const rest = lines
+    .filter(
+      (_, index) =>
+        index !== questionIndex && (index < list.start || index > list.end)
+    )
     .map(withoutCue)
-  const question = lines
-    .slice(0, list.start)
-    .map(line => plain(withoutCue(line)))
-    .reverse()
-    .find(Boolean)
 
   return {
-    question: question ?? 'Choose an option',
+    question: question || 'Choose an option',
     options: list.options,
-    rest: kept
+    rest: rest
       .join('\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim(),

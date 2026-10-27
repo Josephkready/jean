@@ -1,7 +1,7 @@
 import { createRef } from 'react'
 import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@/test/test-utils'
+import { fireEvent, render, screen, within } from '@/test/test-utils'
 import { CompactMessageList } from './CompactMessageList'
 import { formatLocalTime } from './time-utils'
 import type {
@@ -477,7 +477,9 @@ describe('CompactMessageList', () => {
     ]
     const { rerender } = renderCompact(messages, { onSendAnswer })
 
-    const question = screen.getByText('Which mode do you want?')
+    const block = screen.getByRole('region', { name: 'Question' })
+    const question = within(block).getByText('Which mode do you want?')
+    expect(screen.getAllByText('Which mode do you want?')).toHaveLength(1)
     const option = screen.getByRole('button', { name: /^2\.\s?List$/ })
     expect(screen.queryByText('Reply with a number:')).not.toBeInTheDocument()
     expect(
