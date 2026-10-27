@@ -1435,12 +1435,8 @@ export const ChatInput = memo(function ChatInput({
           pill
             ? 'Message...'
             : isSending
-              ? executionMode === 'plan'
-                ? 'Plan: Type to queue next message...'
-                : 'Build: Type to queue next message...'
-              : executionMode === 'plan'
-                ? 'Planning: Plan a task, @ files or # issues...'
-                : 'Build: Ask, @ files or # issues...'
+              ? 'Queue a follow-up...'
+              : 'Ask anything. @ files, # issues, / commands'
         }
         // PERFORMANCE: Uncontrolled input - no value prop
         // Value is managed via valueRef and direct DOM manipulation

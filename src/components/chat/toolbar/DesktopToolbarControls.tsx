@@ -374,8 +374,6 @@ export function DesktopToolbarControls({
         <TooltipContent>Attachments</TooltipContent>
       </Tooltip>
 
-      <div className="hidden @xl:block h-4 w-px bg-border/50" />
-
       {(loadedIssueCount > 0 ||
         loadedPRCount > 0 ||
         loadedDiscussionCount > 0 ||
@@ -384,7 +382,6 @@ export function DesktopToolbarControls({
         loadedSentryCount > 0 ||
         loadedContextCount > 0) && (
         <>
-          <div className="hidden @xl:block h-4 w-px bg-border/50" />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -707,7 +704,6 @@ export function DesktopToolbarControls({
 
       {prUrl && prNumber && (
         <>
-          <div className="hidden @xl:block h-4 w-px bg-border/50" />
           <Tooltip>
             <TooltipTrigger asChild>
               <a
@@ -740,7 +736,6 @@ export function DesktopToolbarControls({
 
       {mergeableStatus === 'conflicting' && (
         <>
-          <div className="hidden @xl:block h-4 w-px bg-border/50" />
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -761,7 +756,6 @@ export function DesktopToolbarControls({
 
       {showProviderDropdown && (
         <>
-          <div className="hidden @xl:block h-4 w-px bg-border/50" />
           <DropdownMenu
             open={providerDropdownOpen}
             onOpenChange={setProviderDropdownOpen}
@@ -842,8 +836,6 @@ export function DesktopToolbarControls({
         </>
       )}
 
-      <div className="hidden @xl:block h-4 w-px bg-border/50" />
-
       {!hideModelPicker && (
         <DesktopBackendModelPicker
           disabled={false}
@@ -858,10 +850,6 @@ export function DesktopToolbarControls({
           onModelChange={handleModelChange}
           onBackendModelChange={handleBackendModelChange}
         />
-      )}
-
-      {!hideReasoningControl && (
-        <div className="hidden @xl:block h-4 w-px bg-border/50" />
       )}
 
       {hideReasoningControl ? null : usesEffortControl ? (
@@ -890,8 +878,6 @@ export function DesktopToolbarControls({
           onCloseAutoFocus={focusChatInput}
         />
       )}
-
-      <div className="hidden @xl:block h-4 w-px bg-border/50" />
 
       <ExecutionModeDropdown
         backend={selectedBackend}

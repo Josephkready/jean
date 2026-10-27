@@ -62,7 +62,7 @@ export const mockPreferences = {
   auto_session_naming: true,
   ui_font_size: 13,
   chat_font_size: 13,
-  ui_font: 'inter',
+  ui_font: 'geist',
   chat_font: 'jetbrains-mono',
   git_poll_interval: 5,
   remote_poll_interval: 60,
