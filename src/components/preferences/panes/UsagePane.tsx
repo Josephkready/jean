@@ -28,10 +28,14 @@ import { useNow } from '@/hooks/useNow'
 import {
   formatCompactDuration,
   formatPlanName,
-  formatResetAt,
-  formatResetCountdown,
   toEpochMs,
 } from '@/lib/usage-format'
+import { HOUR_SECONDS, WEEK_SECONDS } from '@/lib/usage-pace'
+import {
+  UsageChartLegend,
+  UsageWindows,
+  type UsageWindowSpec,
+} from '@/components/usage/usage-windows'
 import { cn } from '@/lib/utils'
 
 /** One card per backend: icon, name, plan badge, then usage windows. */
@@ -68,29 +72,6 @@ function UsageCard({
   )
 }
 
-interface UsageWindow {
-  usedPercent: number
-  resetsAt: number | null
-}
-
-function clampPercent(value: number): number {
-  return Math.max(0, Math.min(100, value))
-}
-
-function barClass(usedPercent: number): string {
-  const p = clampPercent(usedPercent)
-  if (p >= 90) return 'bg-destructive'
-  if (p >= 70) return 'bg-warning'
-  return 'bg-primary'
-}
-
-function percentClass(usedPercent: number): string {
-  const p = clampPercent(usedPercent)
-  if (p >= 90) return 'text-destructive'
-  if (p >= 70) return 'text-warning'
-  return 'text-foreground'
-}
-
 /** `5-hour session` from the window length, `Session` when unknown. */
 function sessionLabel(limitWindowSeconds?: number | null): string {
   if (!limitWindowSeconds) return 'Session'
@@ -109,67 +90,6 @@ function getQueryErrorMessage(error: unknown, fallback: string) {
     return error.message
   }
   return fallback
-}
-
-/** Usage window: label + % used, bar, then reset countdown. */
-const UsageRow: React.FC<{
-  label: string
-  usage: UsageWindow | null
-  nowMs: number
-}> = ({ label, usage, nowMs }) => {
-  if (!usage) return null
-
-  const usedPercent = clampPercent(usage.usedPercent)
-  const resetsAt = usage.resetsAt
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="truncate text-xs text-foreground">{label}</span>
-        <span
-          className={cn(
-            'shrink-0 text-xs font-medium tabular-nums',
-            percentClass(usedPercent)
-          )}
-        >
-          {Math.round(usedPercent)}%
-          <span className="ml-1 font-normal text-muted-foreground">used</span>
-        </span>
-      </div>
-      <div
-        className="h-1.5 w-full overflow-hidden rounded-full bg-secondary"
-        role="progressbar"
-        aria-valuenow={Math.round(usedPercent)}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-label={`${label} ${usedPercent.toFixed(1)}% used`}
-      >
-        <div
-          className={cn(
-            'h-full rounded-full transition-[width] duration-300',
-            barClass(usedPercent)
-          )}
-          style={{ width: `${usedPercent}%` }}
-        />
-      </div>
-      {resetsAt ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <p className="text-[11px] tabular-nums text-muted-foreground">
-              Resets in {formatResetCountdown(resetsAt, nowMs)}
-              <span className="mx-1.5 text-border" aria-hidden>
-                ·
-              </span>
-              {formatResetAt(resetsAt, nowMs)}
-            </p>
-          </TooltipTrigger>
-          <TooltipContent>
-            {`Resets ${new Date(toEpochMs(resetsAt)).toLocaleString()}`}
-          </TooltipContent>
-        </Tooltip>
-      ) : null}
-    </div>
-  )
 }
 
 function InlineStatus({
@@ -373,15 +293,31 @@ export const UsagePane: React.FC = () => {
     return (
       <div className="space-y-2">
         <MetaLine items={[extra]} />
-        <div className="space-y-3">
-          <UsageRow label="5-hour session" usage={data.session} nowMs={nowMs} />
-          <UsageRow label="Weekly" usage={data.weekly} nowMs={nowMs} />
-          <UsageRow
-            label="Weekly · Sonnet"
-            usage={data.sonnetWeekly}
-            nowMs={nowMs}
-          />
-        </div>
+        <UsageWindows
+          nowMs={nowMs}
+          primary={[
+            {
+              key: 'session',
+              label: '5-hour session',
+              usage: data.session,
+              windowSeconds: 5 * HOUR_SECONDS,
+            },
+            {
+              key: 'weekly',
+              label: 'Weekly',
+              usage: data.weekly,
+              windowSeconds: WEEK_SECONDS,
+            },
+          ]}
+          secondary={[
+            {
+              key: 'sonnet-weekly',
+              label: 'Weekly · Sonnet',
+              usage: data.sonnetWeekly,
+              windowSeconds: WEEK_SECONDS,
+            },
+          ]}
+        />
       </div>
     )
   }
@@ -412,24 +348,18 @@ export const UsagePane: React.FC = () => {
         ? `Credits remaining: ${data.creditsRemaining}`
         : null
 
-    const extraLimits = data.modelLimits.flatMap(limit => {
-      const rows: { key: string; label: string; usage: UsageWindow }[] = []
-      if (limit.session) {
-        rows.push({
-          key: `${limit.label}-session`,
-          label: limit.label,
-          usage: limit.session,
-        })
-      }
-      if (limit.weekly) {
-        rows.push({
-          key: `${limit.label}-weekly`,
-          label: `${limit.label} · Weekly`,
-          usage: limit.weekly,
-        })
-      }
-      return rows
-    })
+    const extraLimits = data.modelLimits.flatMap((limit): UsageWindowSpec[] => [
+      {
+        key: `${limit.label}-session`,
+        label: limit.label,
+        usage: limit.session,
+      },
+      {
+        key: `${limit.label}-weekly`,
+        label: `${limit.label} · Weekly`,
+        usage: limit.weekly,
+      },
+    ])
 
     return (
       <div className="space-y-2">
@@ -439,23 +369,21 @@ export const UsagePane: React.FC = () => {
             Rate limit reached ({data.rateLimitReachedType.replace(/_/g, ' ')})
           </InlineStatus>
         ) : null}
-        <div className="space-y-3">
-          <UsageRow
-            label={sessionLabel(data.session?.limitWindowSeconds)}
-            usage={data.session}
-            nowMs={nowMs}
-          />
-          <UsageRow label="Weekly" usage={data.weekly} nowMs={nowMs} />
-          <UsageRow label="Code reviews" usage={data.reviews} nowMs={nowMs} />
-          {extraLimits.map(row => (
-            <UsageRow
-              key={row.key}
-              label={row.label}
-              usage={row.usage}
-              nowMs={nowMs}
-            />
-          ))}
-        </div>
+        <UsageWindows
+          nowMs={nowMs}
+          primary={[
+            {
+              key: 'session',
+              label: sessionLabel(data.session?.limitWindowSeconds),
+              usage: data.session,
+            },
+            { key: 'weekly', label: 'Weekly', usage: data.weekly },
+          ]}
+          secondary={[
+            { key: 'reviews', label: 'Code reviews', usage: data.reviews },
+            ...extraLimits,
+          ]}
+        />
       </div>
     )
   }
@@ -518,22 +446,21 @@ export const UsagePane: React.FC = () => {
     return (
       <div className="space-y-2">
         <MetaLine items={[codeAccess, period]} />
-        <div className="space-y-3">
-          <UsageRow label="Grok Build" usage={data.session} nowMs={nowMs} />
-          <UsageRow label="Weekly credits" usage={data.weekly} nowMs={nowMs} />
-          {products.map(product => (
-            <UsageRow
-              key={product.product}
-              label={product.product}
-              usage={{
-                usedPercent: product.usedPercent,
-                resetsAt:
-                  data.session?.resetsAt ?? data.weekly?.resetsAt ?? null,
-              }}
-              nowMs={nowMs}
-            />
-          ))}
-        </div>
+        <UsageWindows
+          nowMs={nowMs}
+          primary={[
+            { key: 'build', label: 'Grok Build', usage: data.session },
+            { key: 'weekly', label: 'Weekly credits', usage: data.weekly },
+          ]}
+          secondary={products.map(product => ({
+            key: product.product,
+            label: product.product,
+            usage: {
+              usedPercent: product.usedPercent,
+              resetsAt: data.session?.resetsAt ?? data.weekly?.resetsAt ?? null,
+            },
+          }))}
+        />
         {tasks.length > 0 ? <MetaLine items={tasks} /> : null}
       </div>
     )
@@ -588,6 +515,8 @@ export const UsagePane: React.FC = () => {
           in to Claude, Codex, or Grok to see limits here.
         </InlineStatus>
       ) : null}
+
+      {hasAnyBackend ? <UsageChartLegend /> : null}
 
       {showClaude ? (
         <UsageCard

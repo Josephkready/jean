@@ -19,21 +19,21 @@ export function InlineQuestionOptions({
   return (
     <section
       aria-label="Question"
-      className="mt-3 flex flex-col gap-2 rounded-lg bg-muted/40 p-3"
+      className="mt-3 flex flex-col items-start gap-2"
     >
       <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         <CircleHelp className="size-3.5" />
         Question
       </div>
       <p className="text-sm font-medium text-foreground">{question}</p>
-      <div className="flex flex-col gap-1.5">
+      <div className="flex max-w-full flex-col items-start gap-1.5">
         {options.map((option, index) => (
           <button
             key={option}
             type="button"
             disabled={disabled}
             onClick={() => onSend(inlineQuestionAnswer(options, index))}
-            className="flex items-start gap-2.5 rounded-md bg-muted/60 px-3 py-2 text-left text-sm text-foreground transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
+            className="flex max-w-full items-start gap-2.5 rounded-md bg-muted/60 px-3 py-2 text-left text-sm text-foreground transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
           >
             <span className="flex size-5 shrink-0 items-center justify-center rounded bg-background/60 text-xs font-medium tabular-nums text-muted-foreground">
               {index + 1}.
