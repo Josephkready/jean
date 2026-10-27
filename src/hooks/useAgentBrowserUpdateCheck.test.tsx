@@ -8,6 +8,7 @@ vi.mock('@/lib/transport', () => ({ invoke: vi.fn() }))
 vi.mock('@/lib/query-client', () => ({
   queryClient: { invalidateQueries: vi.fn(), setQueryData: vi.fn() },
 }))
+vi.mock('@/lib/environment', () => ({ updateTargetLabel: () => 'Local' }))
 vi.mock('@/services/mcp', () => ({ invalidateAllMcpServers: vi.fn() }))
 const prefs = vi.hoisted(() => ({ agent_browser_enabled: true }))
 vi.mock('@/services/preferences', () => ({
@@ -55,7 +56,7 @@ describe('useAgentBrowserUpdateCheck', () => {
     expect(invoke).toHaveBeenCalledWith('check_agent_browser_update')
     expect(invoke).not.toHaveBeenCalledWith('install_agent_browser')
     expect(toast.info).toHaveBeenCalledWith(
-      'Agent Browser update available',
+      'Agent Browser (Local) update available',
       expect.objectContaining({
         description: '0.8.0 → 0.9.0',
         action: expect.objectContaining({ label: 'Update' }),
@@ -69,7 +70,7 @@ describe('useAgentBrowserUpdateCheck', () => {
     act(() => action?.onClick?.())
     expect(toast.dismiss).toHaveBeenCalledWith('agent-browser-update')
     expect(toast.loading).toHaveBeenCalledWith(
-      'Updating Agent Browser…',
+      'Updating Agent Browser (Local)…',
       expect.objectContaining({ id: 'agent-browser-update-progress' })
     )
     await act(async () => {

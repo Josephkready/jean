@@ -431,6 +431,19 @@
   animation: icon-glow 2s ease-in-out infinite;
 }
 
+/* Mermaid diagrams (Pele) follow the app theme without a re-render. */
+.pele {
+  --pele-bg: var(--background);
+  --pele-fg: var(--foreground);
+  --pele-muted: var(--muted-foreground);
+  --pele-line: var(--muted-foreground);
+  --pele-surface: var(--muted);
+  --pele-surface-alt: color-mix(in oklch, var(--muted), var(--foreground) 6%);
+  --pele-border: var(--muted-foreground);
+  --pele-accent: var(--primary);
+  --pele-critical: var(--destructive);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50 outline-none;

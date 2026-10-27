@@ -168,6 +168,22 @@ describe('transport bootstrap', () => {
     ])
   })
 
+  it('strips scoped ids from commands sent straight to a server', async () => {
+    const invokeOnServer = vi.fn(async () => ({ id: 'p9' }))
+    vi.doMock('./server-connections', () => ({ invokeOnServer }))
+    const transport = await loadNativeTransportModule(vi.fn())
+
+    await transport.invokeForServer('remote-1', 'add_project', {
+      path: '/srv/qrcode',
+      parentId: 'remote-1:folder-7',
+    })
+
+    expect(invokeOnServer).toHaveBeenCalledWith('remote-1', 'add_project', {
+      path: '/srv/qrcode',
+      parentId: 'folder-7',
+    })
+  })
+
   it('routes path-only Git and GitHub commands to a remote owner', async () => {
     const invokeOnServer = vi.fn(async () => ({ issues: [], totalCount: 0 }))
     vi.doMock('./server-connections', () => ({ invokeOnServer }))
@@ -720,6 +736,37 @@ describe('transport bootstrap', () => {
     await flushAsync()
 
     expect(ws.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('recovers on wake when an established socket closed without a reload', async () => {
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    })
+    const transport = await loadTransportModule()
+    transport.connectTransport()
+    await flushAsync()
+    const recover = vi.fn()
+    transport.onEstablishedWsDisconnect(recover)
+
+    getWs(0).close()
+    expect(recover).toHaveBeenCalledTimes(1)
+
+    // The reload did not happen (page frozen). Wake must recover again.
+    window.dispatchEvent(new Event('pageshow'))
+    expect(recover).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers at once when the listener registers after the socket dropped', async () => {
+    const transport = await loadTransportModule()
+    transport.connectTransport()
+    await flushAsync()
+
+    getWs(0).close()
+    const recover = vi.fn()
+    transport.onEstablishedWsDisconnect(recover)
+
+    expect(recover).toHaveBeenCalledTimes(1)
   })
 
   it('uses extended timeout for terminal lifecycle commands', async () => {

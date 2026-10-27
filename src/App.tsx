@@ -50,6 +50,7 @@ import {
   useCodexUsageUpdateListener,
 } from './services/codex-cli'
 import { useGhCliStatus, useGhCliAuth } from './services/gh-cli'
+import { useAutoResume } from './components/chat/hooks/useAutoResume'
 import {
   useOpencodeCliStatus,
   useOpencodeCliAuth,
@@ -261,7 +262,9 @@ function App() {
 
       let totalBytes = 0
       let downloadedBytes = 0
-      const toastId = toast.loading(`Downloading update ${update.version}...`)
+      const toastId = toast.loading(
+        `Downloading update ${update.version} (Local)...`
+      )
 
       // Mark in-progress so auto-check cannot re-open the modal mid-download.
       // Keep pendingUpdateRef + version badge until success so retries work and
@@ -281,14 +284,14 @@ function App() {
               downloadedBytes += event.data.chunkLength
               if (totalBytes > 0) {
                 const percent = Math.round((downloadedBytes / totalBytes) * 100)
-                toast.loading(`Downloading update... ${percent}%`, {
+                toast.loading(`Downloading update (Local)... ${percent}%`, {
                   id: toastId,
                 })
               }
               break
             case 'Finished':
               logger.info('Download complete, installing...')
-              toast.loading('Installing update...', { id: toastId })
+              toast.loading('Installing update (Local)...', { id: toastId })
               break
           }
         })
@@ -313,7 +316,7 @@ function App() {
         store.setUpdateModalVersion(null)
         store.setPendingUpdateVersion(null)
 
-        toast.success(`Update ${update.version} installed!`, {
+        toast.success(`Update ${update.version} installed (Local)!`, {
           id: toastId,
           duration: Infinity,
           action: {
@@ -651,15 +654,25 @@ function App() {
       const runningSendingIds: Record<string, boolean> = {}
       const runningSendStartedAt: Record<string, number> = {}
       if (data.runningSessions?.length) {
+        const knownStartedAt = useChatStore.getState().sendStartedAt
         for (const sessionId of data.runningSessions) {
           runningSendingIds[sessionId] = true
-          const startedAt = data.sessionsByWorktree
-            ? Object.values(data.sessionsByWorktree)
-                .flatMap(ws => (ws as WorktreeSessions).sessions)
-                .find(session => session.id === sessionId)?.last_run_started_at
-            : undefined
+          // Sessions outside the bootstrapped worktrees (e.g. agent sessions)
+          // are absent from sessionsByWorktree; fall back to the focused
+          // session payload, then to the start time this client already knew.
+          const startedAt =
+            (data.sessionsByWorktree
+              ? Object.values(data.sessionsByWorktree)
+                  .flatMap(ws => (ws as WorktreeSessions).sessions)
+                  .find(session => session.id === sessionId)
+                  ?.last_run_started_at
+              : undefined) ??
+            (data.activeSessions?.[sessionId] as Session | undefined)
+              ?.last_run_started_at
           if (startedAt) {
             runningSendStartedAt[sessionId] = startedAt * 1000
+          } else if (knownStartedAt[sessionId] != null) {
+            runningSendStartedAt[sessionId] = knownStartedAt[sessionId]
           }
         }
       }
@@ -888,6 +901,9 @@ function App() {
   // Keep Codex usage UI fresh when the app-server pushes account rate-limit updates.
   useCodexUsageUpdateListener()
 
+  // Auto-continue armed sessions once their usage limit resets.
+  useAutoResume()
+
   // Browser mode: WebSocket starts in parallel with HTTP preload (see above).
   // Bootstrap replay events are ingested into the transport buffer before live
   // listeners attach; WS buffers events until React listeners register.
@@ -1062,7 +1078,7 @@ function App() {
     enabled: nativeCli && !!ghStatus?.installed,
   })
 
-  // Show onboarding if GitHub CLI is not ready, or no AI backend is ready.
+  // Show onboarding if no AI backend is ready. GitHub CLI is optional.
   // Only in native app - pure web access uses the host's already-setup CLIs.
   useEffect(() => {
     if (!isNativeApp()) return

@@ -61,6 +61,7 @@ function renderDesktopToolbarControls(
     mcpStatuses: undefined,
     loadedIssueContexts: [],
     loadedPRContexts: [],
+    loadedDiscussionContexts: [],
     loadedSecurityContexts: [],
     loadedAdvisoryContexts: [],
     loadedLinearContexts: [],
@@ -88,6 +89,7 @@ function renderDesktopToolbarControls(
     handleEffortLevelChange: vi.fn(),
     handleViewIssue: vi.fn(),
     handleViewPR: vi.fn(),
+    handleViewDiscussion: vi.fn(),
     handleViewSecurityAlert: vi.fn(),
     handleViewAdvisory: vi.fn(),
     handleViewLinear: vi.fn(),
@@ -121,7 +123,6 @@ describe('DesktopToolbarControls', () => {
   })
 
   it.each([
-    ['plan', 'Full access'],
     ['build', 'Auto-accept edits'],
     ['yolo', 'Full access'],
   ] as const)('shows %s label in the desktop mode trigger', (mode, label) => {
@@ -129,6 +130,14 @@ describe('DesktopToolbarControls', () => {
 
     expect(
       screen.getByRole('button', { name: new RegExp(`^Permissions: ${label}$`, 'i') })
+    ).toBeInTheDocument()
+  })
+
+  it('shows Plan in the desktop mode trigger', () => {
+    renderDesktopToolbarControls({ executionMode: 'plan' })
+
+    expect(
+      screen.getByRole('button', { name: 'Workflow: Plan' })
     ).toBeInTheDocument()
   })
 
@@ -141,7 +150,7 @@ describe('DesktopToolbarControls', () => {
       onSetExecutionMode,
     })
 
-    await user.click(screen.getByRole('button', { name: 'Permissions: Full access' }))
+    await user.click(screen.getByRole('button', { name: 'Workflow: Plan' }))
     await user.click(screen.getByRole('menuitemradio', { name: /Supervised/ }))
     expect(onSetExecutionMode).toHaveBeenCalledWith('supervised')
   })
@@ -186,7 +195,7 @@ describe('DesktopToolbarControls', () => {
       screen.getByRole('button', { name: /choose backend and model/i })
     ).toBeEnabled()
     expect(screen.getByRole('button', { name: /medium/i })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Permissions: Full access' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Workflow: Plan' })).toBeEnabled()
   })
 
   it('keeps Claude provider switcher available after messages exist', () => {
@@ -320,6 +329,51 @@ describe('DesktopToolbarControls', () => {
     }
     expect(screen.queryByText('Megathink')).not.toBeInTheDocument()
     expect(screen.queryByText('xHigh')).not.toBeInTheDocument()
+  })
+
+  it('offers exactly the Muse reasoning efforts and applies the chosen one', async () => {
+    const user = userEvent.setup()
+    const handleEffortLevelChange = vi.fn()
+    renderDesktopToolbarControls({
+      isCodex: false,
+      selectedBackend: 'muse',
+      selectedModel: 'muse/default',
+      selectedEffortLevel: 'high',
+      selectedThinkingLevel: 'megathink',
+      thinkingDropdownOpen: true,
+      handleEffortLevelChange,
+    })
+
+    const items = screen.getAllByRole('menuitemradio')
+    expect(items.map(item => item.textContent)).toEqual([
+      'NoneNo reasoning1',
+      'MinimalMinimal2',
+      'LowLow3',
+      'MediumModerate4',
+      'HighDeep5',
+      'xHighExtra high6',
+      'MaxMaximum7',
+      'UltraBeyond max8',
+    ])
+    const ultraItem = items[7]
+    if (!ultraItem) throw new Error('missing Ultra effort item')
+    await user.click(ultraItem)
+    expect(handleEffortLevelChange).toHaveBeenCalledWith('ultra')
+  })
+
+  it('shows High for a Claude-only effort that Muse cannot run', () => {
+    renderDesktopToolbarControls({
+      isCodex: false,
+      selectedBackend: 'muse',
+      selectedModel: 'muse/muse-spark-1.2',
+      selectedEffortLevel: 'ultracode',
+      thinkingDropdownOpen: true,
+    })
+
+    expect(screen.getByRole('menu', { name: 'High' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('menuitemradio', { name: /^HighDeep/ })
+    ).toHaveAttribute('aria-checked', 'true')
   })
 
   it('calls effort change handler when selecting an effort on desktop', async () => {

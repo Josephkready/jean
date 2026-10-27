@@ -1,5 +1,6 @@
-// Types that match the Rust UIState struct
-// Contains ephemeral UI state that should be restored on app restart
+// Types that match the Rust UIState struct.
+// The server stores one navigation snapshot per client. Pins and pinned
+// canvas labels stay in the shared UI state file.
 // Note: Field names use snake_case to match Rust struct exactly
 //
 // Durable session state (answered_questions, submitted_answers, fixed_findings,
@@ -10,7 +11,16 @@
 // is stored in UI state.
 // Review results are also stored in Session files (review_results field).
 
-import type { LabelData } from '@/types/chat'
+import type { LabelData, SendMessageArgs } from '@/types/chat'
+
+/** A session armed for auto-continue after a usage limit resets. */
+export interface AutoResumeEntry {
+  session_id: string
+  /** Reset epoch (ms) to wait for. */
+  resume_at_ms: number
+  /** Exact send args to replay. */
+  send_args: SendMessageArgs
+}
 
 export interface ProjectCanvasSettingsState {
   worktree_sort_mode?: 'created' | 'last_activity' | 'manual'
@@ -55,6 +65,12 @@ export interface PendingTextFileDraft {
   size: number
   /** Optional; omitted when persisting to keep UI state small */
   content?: string
+  /** Set when the chip holds rows picked from a chat table */
+  table_rows?: {
+    table_key: string
+    rows: number[]
+    notes?: Record<number, string>
+  }
 }
 
 export interface PendingFileDraft {
@@ -65,6 +81,7 @@ export interface PendingFileDraft {
   source_project_name?: string
   extension: string
   is_directory: boolean
+  attached?: boolean
 }
 
 export interface PendingSkillDraft {
@@ -110,6 +127,8 @@ export interface UIState {
   pending_skills?: Record<string, PendingSkillDraft[]>
   /** Worktrees whose setup-script status card was dismissed */
   dismissed_setup_scripts?: string[]
+  /** Sessions whose Queued prompts panel is collapsed */
+  collapsed_queued_prompts_sessions?: string[]
   /** Whether the review sidebar is visible */
   review_sidebar_visible?: boolean
   /** Modal terminal drawer open state per worktree */
@@ -174,6 +193,12 @@ export interface UIState {
    * (failed-run badges only count runs not in this list).
    */
   seen_failed_workflow_run_ids?: number[]
+  /** Agent ID → newest agent update time (Unix seconds) the user has seen */
+  agent_updates_seen_at?: Record<string, number>
+  /** Sessions armed for auto-continue after a usage limit resets */
+  auto_resume?: AutoResumeEntry[]
+  /** Git diff modal file list view mode */
+  git_diff_view_mode?: 'list' | 'tree'
   version: number
 }
 
@@ -196,6 +221,7 @@ export const defaultUIState: UIState = {
   pending_files: {},
   pending_skills: {},
   dismissed_setup_scripts: [],
+  collapsed_queued_prompts_sessions: [],
   modal_terminal_open: {},
   modal_terminal_dock_mode: 'floating',
   modal_terminal_width: 400,
@@ -220,5 +246,8 @@ export const defaultUIState: UIState = {
   browser_bottom_panel_height: 360,
   pinned_recent_session_ids: [],
   seen_failed_workflow_run_ids: [],
+  agent_updates_seen_at: {},
+  auto_resume: [],
+  git_diff_view_mode: 'list',
   version: 1,
 }

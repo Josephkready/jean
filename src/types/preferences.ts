@@ -630,7 +630,12 @@ Respond with ONLY the raw JSON object, no markdown, no code fences, no explanati
 {"session_name": "Your session name here"}
 </output_format>`
 
-export const DEFAULT_PARALLEL_EXECUTION_PROMPT = `In plan mode, structure plans so subagents can work simultaneously. In build/execute mode, use subagents in parallel for faster implementation.
+export const DEFAULT_PARALLEL_EXECUTION_PROMPT = `### Subagent Strategy to keep main context window clean
+- Offload research, exploration, and parallel analysis to subagents
+- For complex problems, throw more compute at it via subagents
+- One task per subagent for focused execution
+
+In plan mode, structure plans so subagents can work simultaneously. In build/execute mode, use subagents in parallel for faster implementation.
 
 When launching multiple Task subagents, prefer sending them in a single message rather than sequentially. Group independent work items (e.g., editing separate files, researching unrelated questions) into parallel Task calls. Only sequence Tasks when one depends on another's output.
 
@@ -648,7 +653,7 @@ export const DEFAULT_GLOBAL_SYSTEM_PROMPT = `Always use ASD-STE100 Simplified Te
 - Write detailed specs upfront to reduce ambiguity
 - Keep plans concise but complete enough for zero-context handoff (Full access/Build in a new worktree must not require re-scanning the repo). Prefer short wording over thin checklists.
 - When the current execution mode is plan, use the backend's native plan tool/UI call when available (Claude ExitPlanMode, Codex \`<proposed_plan>\` / collaboration Plan mode, Cursor/OpenCode equivalent), not plain text only.
-- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/\`--print\` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline as a short numbered list of options (1, 2, 3...) and tell the user to reply with a number.
+- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/\`--print\` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline in this exact format: one line with the question, then the line \`Reply with a number:\`, then a numbered list (\`1.\`, \`2.\`, \`3.\`...) of 2 to 8 short options, one option per line. Jean shows these options as buttons. If you end with a \`## Recap\`, put this question at the end of the recap, not before it.
 - For Codex specifically, when the current execution mode is plan: do not write plan files or code; when the plan is ready wrap it in \`<proposed_plan>...</proposed_plan>\` so Jean can show the approval UI. Do not use the \`update_plan\` checklist tool in plan mode.
 - Every Codex response that contains or revises a plan while the current execution mode is plan must use a complete \`<proposed_plan>\` block (or a native plan item); do not provide plain-text-only plans, and do not attempt file writes.
 - Use a plain-text Unresolved Questions section only for non-actionable notes or when the backend cannot ask interactively.
@@ -660,19 +665,14 @@ export const DEFAULT_GLOBAL_SYSTEM_PROMPT = `Always use ASD-STE100 Simplified Te
 - Skip only for trivial edits to code already read this session.
 - Do NOT use Context7 — WebSearch only.
 
-### 3. Subagent Strategy to keep main context window clean
-- Offload research, exploration, and parallel analysis to subagents
-- For complex problems, throw more compute at it via subagents
-- One task per subagent for focused execution
-
-### 4. Self-Improvement Loop
+### 3. Self-Improvement Loop
 - Only update '.ai/lessons.md' for general, project-wide learning that applies across features
 - Do not add feature-specific, bug-fix-specific, or small/local lessons
 - Remove narrow or specific entries when you detect them
 - Review lessons at session start for relevant project
 - Keep '.ai/lessons.md' concise by merging duplicate rules and removing obsolete entries
 
-### 5. Verification Before Done
+### 4. Verification Before Done
 - Never mark a task complete without proving it works
 - Diff behavior between main and your changes when relevant
 - Ask yourself: "Would a staff engineer approve this?"
@@ -681,16 +681,20 @@ export const DEFAULT_GLOBAL_SYSTEM_PROMPT = `Always use ASD-STE100 Simplified Te
 - Skip tests for docs, copy, comments, styling-only, and prompt/config text changes; say that you skipped them.
 - Do not re-run a passing check when the code it covers has not changed since.
 - Write new tests only for behavior that can break silently: business logic, parsing/serialization, state transitions, persistence, and a regression test for each fixed bug.
-- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called. Verify UI changes in the running app instead.
-- If a UI check needs a browser and no other browser tool is available, use the Agent Browser.
+- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called.
+- ALWAYS use a browser when the user asks for it, or when the task is visual: copy or match a style from a reference, compare with another page or screenshot, or fix a layout or visual bug.
+- Also use a browser when the change has runtime UI behavior that typecheck, lint, or tests cannot prove: new or changed user flows, or state/interaction logic.
+- In all other cases, do NOT open a browser. Examples: small copy/text edits, small class or prop tweaks that you did not have to match to a reference, refactors with no behavior change, backend-only changes. For these, a typecheck or the narrowest test is enough. Say "Not tested in browser" in the recap.
+- Before you open a browser on your own decision (not a user request), state in one line why a cheaper check is not enough.
+- If a UI check needs a browser and no other browser tool is available, use the Agent Browser. Check only the changed area, not the full app.
 
-### 6. Demand Elegance (Balanced)
+### 5. Demand Elegance (Balanced)
 - For non-trivial changes: pause and ask "is there a more elegant way?"
 - If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
 - Skip this for simple, obvious fixes - don't over-engineer
 - Challenge your own work before presenting it
 
-### 7. Autonomous Bug Fixing
+### 6. Autonomous Bug Fixing
 - When given a bug report: just fix it. Don't ask for hand-holding
 - Point at logs, errors, failing tests -> then resolve them
 - Zero context switching required from the user
@@ -721,6 +725,7 @@ export const DEFAULT_GLOBAL_SYSTEM_PROMPT = `Always use ASD-STE100 Simplified Te
 - Do NOT create git worktrees manually (\`git worktree add\`, Superpowers \`using-git-worktrees\`, or similar) unless the user explicitly asks for a new worktree.
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.
 - If already in a Jean worktree or base/main workspace, continue in the current workspace.
+- Do NOT change the branch of the current worktree or the base/main session (\`git checkout <branch>\`, \`git switch\`, \`git checkout -b\`, \`gh pr checkout\`, or similar) unless the user explicitly asks. Keep all work on the current branch.
 
 ## Jean Run Environment
 - When you need to test a running app (UI, HTTP, browser, smoke, e2e), call Jean MCP \`get_run_environments\` first (pass this worktreeId when known).
@@ -1031,9 +1036,15 @@ export const GROK_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
 export const KIMI_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
   makeMagicPromptModelsPreset('kimi/default')
 
+export const DEVIN_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('devin/default')
 /** Antigravity preset for all magic prompts */
 export const ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
   makeMagicPromptModelsPreset('antigravity/auto')
+
+/** Muse preset for all magic prompts */
+export const MUSE_DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels =
+  makeMagicPromptModelsPreset('muse/default')
 
 /** Default reasoning efforts for Claude backend (null = use model default) */
 export const DEFAULT_MAGIC_PROMPT_EFFORTS: MagicPromptReasoningEfforts = {
@@ -1240,8 +1251,10 @@ export const COMMANDCODE_DEFAULT_MAGIC_PROMPT_BACKENDS =
   makeBackendsPreset('commandcode')
 export const GROK_DEFAULT_MAGIC_PROMPT_BACKENDS = makeBackendsPreset('grok')
 export const KIMI_DEFAULT_MAGIC_PROMPT_BACKENDS = makeBackendsPreset('kimi')
+export const DEVIN_DEFAULT_MAGIC_PROMPT_BACKENDS = makeBackendsPreset('devin')
 export const ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_BACKENDS =
   makeBackendsPreset('antigravity')
+export const MUSE_DEFAULT_MAGIC_PROMPT_BACKENDS = makeBackendsPreset('muse')
 
 /**
  * Resolve a magic prompt provider for a given key.
@@ -1282,6 +1295,19 @@ export function resolveMagicPromptBackend(
   ) as CliBackend | null
 }
 
+/** Modifier held while closing to skip the confirmation dialog ('none' disables). */
+export type CloseConfirmBypassModifier = 'shift' | 'alt' | 'none'
+
+export const CLOSE_CONFIRM_BYPASS_MODIFIERS = [
+  'shift',
+  'alt',
+  'none',
+] as const satisfies readonly CloseConfirmBypassModifier[]
+
+/** Off by default: closing stays behind the confirmation dialog until opted out. */
+export const DEFAULT_CLOSE_CONFIRM_BYPASS_MODIFIER: CloseConfirmBypassModifier =
+  'none'
+
 // Types that match the Rust AppPreferences struct
 // Only contains settings that should be persisted to disk
 // Note: Field names use snake_case to match Rust struct exactly
@@ -1290,7 +1316,7 @@ export interface AppPreferences {
   selected_model: ClaudeModel // Claude model ID passed to --model flag
   thinking_level: ThinkingLevel // Thinking level: 'off' | 'think' | 'megathink' | 'ultrathink'
   default_effort_level: EffortLevel // Effort level for Opus adaptive thinking: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultracode'
-  terminal: TerminalApp // Terminal app: 'terminal' | 'warp' | 'ghostty' | 'iterm2' | 'powershell' | 'windows-terminal'
+  terminal: TerminalApp // Terminal app: 'terminal' | 'warp' | 'ghostty' | 'kitty' | 'iterm2' | 'powershell' | 'windows-terminal'
   terminal_renderer?: TerminalRenderer // Embedded terminal renderer: 'xterm' or 'ghostty-web' (experimental)
   terminal_font?: TerminalFont // Embedded terminal font
   terminal_font_size?: number // Embedded terminal font size in pixels
@@ -1307,11 +1333,13 @@ export interface AppPreferences {
   /** Overall text weight ladder: light | normal | medium (default normal) */
   font_weight?: FontWeight
   keybindings: KeybindingsMap // User-configurable keyboard shortcuts
+  /** One-shot keybinding migrations already applied for this client. */
+  applied_keybinding_migrations?: string[]
   archive_retention_days: number // Days to keep archived items (0 = never delete)
   syntax_theme_dark: SyntaxTheme // Syntax highlighting theme for dark mode
   syntax_theme_light: SyntaxTheme // Syntax highlighting theme for light mode
   compact_chat_view_enabled: boolean // Collapse intermediate tool calls/replies into a single ticker line, only showing the latest activity
-  auto_recaps_enabled?: boolean // Ask agents to end multi-step/tool turns with a recap
+  sidebar_hover_open_enabled?: boolean // Temporarily reveal the collapsed desktop sidebar from the left screen edge
   keep_ai_servers_warm?: boolean // Keep Codex/OpenCode servers alive briefly between requests
   magic_prompts: MagicPrompts // Customizable prompts for AI-powered features
   magic_prompt_models: MagicPromptModels // Per-prompt model overrides
@@ -1346,6 +1374,8 @@ export interface AppPreferences {
   has_seen_jean_mcp_intro: boolean // Whether user has seen the Jean MCP server announcement
   /** One-time tip: soft text on 1× displays when zoom ≠ 100% (default false = not dismissed) */
   has_seen_external_display_zoom_tip?: boolean
+  show_full_file_path: boolean // Show full relative path in file mention badges instead of just filename
+  spellcheck_enabled: boolean // Enable spellcheck in the chat input
   chrome_enabled: boolean // Enable browser automation via Chrome extension
   /** @deprecated Client-local only (issue #622). Kept for one-time seed/migration. */
   zoom_level: number // Desktop zoom level percentage (50-200, default 100)
@@ -1368,6 +1398,7 @@ export interface AppPreferences {
   fast_mode_models: string[] // Model keys ("backend:baseModel") with fast tier last enabled
 
   confirm_session_close: boolean // Show confirmation dialog before closing sessions/worktrees
+  close_confirm_bypass_modifier: CloseConfirmBypassModifier // Modifier that skips the close confirmation ('none' disables)
   default_execution_mode: ExecutionMode // Default workflow/permission policy for new sessions
   default_backend: CliBackend // Default CLI backend for new sessions
   default_new_session_kind: NewSessionKind // Default action for CMD+T: 'chat', 'terminal', or a CLI backend
@@ -1378,7 +1409,9 @@ export interface AppPreferences {
   selected_commandcode_model?: string // Default Command Code model (CLI default)
   selected_grok_model: GrokModel // Default Grok model
   selected_kimi_model?: KimiModel // Default Kimi Code model
+  selected_devin_model?: DevinModel // Default Devin model
   selected_antigravity_model?: AntigravityModel // Default Antigravity CLI model
+  selected_muse_model?: MuseModel // Default Muse Code model
   default_codex_reasoning_effort: CodexReasoningEffort // Default reasoning effort for Codex: 'low' | 'medium' | 'high' | 'xhigh'
   default_codex_model_verbosity: CodexModelVerbosity // Default model verbosity for Codex chat: 'low' | 'medium' | 'high'
   default_grok_reasoning_effort: GrokReasoningEffort // Default reasoning effort for Grok: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -1386,8 +1419,11 @@ export interface AppPreferences {
   codex_auto_steer_enabled: boolean // Steer prompts into a running Codex turn instead of queueing (default: false)
   opencode_auto_steer_enabled: boolean // Steer prompts into a running OpenCode turn instead of queueing (default: false)
   pi_auto_steer_enabled: boolean // Steer prompts into a running PI turn instead of queueing (default: false)
+  pi_agent_owns_policy: boolean // Let PI own tools, extensions, and system/project instructions
+  claude_auto_steer_enabled: boolean // Steer prompts into a running Claude turn via the detached host (Unix only, default: false)
   grok_auto_steer_enabled: boolean // Steer prompts into a running Grok turn instead of queueing (default: false)
   kimi_auto_steer_enabled?: boolean // Reserved for Kimi Code steering support
+  devin_auto_steer_enabled?: boolean // Reserved for Devin steering support
   antigravity_auto_steer_enabled?: boolean // Reserved until Antigravity headless mode supports steering
   close_original_on_clear_context: boolean // Close original session when using Clear Context and yolo (default: true)
   build_model: string | null // Model override for plan approval (build mode), null = use session model
@@ -1407,8 +1443,11 @@ export interface AppPreferences {
   opencode_cli_source: 'jean' | 'path' // OpenCode CLI source: 'jean' (managed) or 'path' (system PATH)
   grok_cli_source: 'jean' | 'path' // Grok CLI source: 'jean' (managed) or 'path' (system PATH)
   kimi_cli_source?: 'jean' | 'path' // Kimi Code CLI source: 'jean' (managed) or 'path' (system PATH)
+  devin_cli_source?: 'jean' | 'path' // Devin CLI source: 'jean' (managed) or 'path' (system PATH)
   antigravity_cli_source?: 'jean' | 'path' // Antigravity CLI source: 'jean' (managed) or 'path' (system PATH)
+  muse_cli_source?: 'jean' | 'path' // Muse Code CLI source: 'jean' (managed) or 'path' (system PATH)
   gh_cli_source: 'jean' | 'path' // GitHub CLI source: 'jean' (managed) or 'path' (system PATH)
+  glab_cli_source: 'jean' | 'path' // GitLab CLI source: 'jean' (managed) or 'path' (system PATH)
   pi_cli_source: 'jean' | 'path' // PI CLI source: 'jean' (managed) or 'path' (system PATH)
   commandcode_cli_source?: 'jean' | 'path' // Command Code CLI source: 'jean' (managed) or 'path' (system PATH)
   wsl_mode_chosen: boolean // Whether WSL mode selection has been made (prevents re-asking on Windows)
@@ -1426,6 +1465,12 @@ export interface AppPreferences {
   jean_mcp_max_depth: number // Max recursive spawn depth via Jean MCP (default 3)
   jean_mcp_rate_limit_per_minute: number // Per-source rate limit for session-spawning tools (default 20)
   agent_browser_enabled: boolean // Install agent-browser and add its MCP server to CLI configs (default false)
+  /**
+   * Hostname for new browser tabs and port open buttons when a jean.json port
+   * has no host. Null or blank means localhost. Stored on the Jean server, so
+   * every attached client — including remote sessions — uses this value.
+   */
+  browser_default_host?: string | null
 }
 
 export type TerminalBackgroundMode = 'auto' | 'light' | 'dark' | 'custom'
@@ -1478,6 +1523,13 @@ export const PREDEFINED_CODEX_PROVIDERS: CodexProviderProfile[] = [
     env_key: 'OPENROUTER_API_KEY',
     wire_api: 'responses',
   },
+  {
+    name: 'CLIProxyAPI',
+    provider_id: 'cliproxyapi',
+    base_url: 'http://127.0.0.1:8317/v1',
+    env_key: 'CLIPROXYAPI_API_KEY',
+    wire_api: 'responses',
+  },
 ]
 
 export const PREDEFINED_PI_PROVIDERS: PiProviderProfile[] = [
@@ -1500,6 +1552,24 @@ export const PREDEFINED_PI_PROVIDERS: PiProviderProfile[] = [
 ]
 
 export const PREDEFINED_CLI_PROFILES: CustomCliProfile[] = [
+  {
+    name: 'CLIProxyAPI',
+    settings_json: JSON.stringify(
+      {
+        env: {
+          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317',
+          ANTHROPIC_AUTH_TOKEN:
+            '<filled when Opinionated CLIProxyAPI is installed>',
+          ANTHROPIC_API_KEY:
+            '<filled when Opinionated CLIProxyAPI is installed>',
+          CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+          API_TIMEOUT_MS: '600000',
+        },
+      },
+      null,
+      2
+    ),
+  },
   {
     name: 'OpenRouter',
     settings_json: JSON.stringify(
@@ -1992,7 +2062,9 @@ export type PiModel = `pi/${string}`
 export type CommandCodeModel = `commandcode/${string}`
 export type GrokModel = `grok/${string}`
 export type KimiModel = `kimi/${string}`
+export type DevinModel = `devin/${string}`
 export type AntigravityModel = `antigravity/${string}`
+export type MuseModel = `muse/${string}`
 export type MagicPromptModel =
   | ClaudeModel
   | CodexModel
@@ -2002,7 +2074,9 @@ export type MagicPromptModel =
   | CommandCodeModel
   | GrokModel
   | KimiModel
+  | DevinModel
   | AntigravityModel
+  | MuseModel
 
 /** Check if a model string identifies an OpenCode model */
 export function isOpenCodeModel(model: string): model is OpenCodeModel {
@@ -2036,6 +2110,15 @@ export function isAntigravityCliModel(
   model: string
 ): model is AntigravityModel {
   return model.startsWith('antigravity/')
+}
+/** Check if a model string identifies a Muse Code model */
+export function isMuseModel(model: string): model is MuseModel {
+  return model.startsWith('muse/')
+}
+
+/** Check if a model string identifies a Devin model */
+export function isDevinModel(model: string): model is DevinModel {
+  return model.startsWith('devin/')
 }
 
 /** Check if a model string identifies a Codex model */
@@ -2100,7 +2183,9 @@ export type CliBackend =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'antigravity'
+  | 'muse'
 
 export const backendOptions: { value: CliBackend; label: string }[] = [
   { value: 'claude', label: 'Claude' },
@@ -2112,12 +2197,15 @@ export const backendOptions: { value: CliBackend; label: string }[] = [
   { value: 'grok', label: 'Grok' },
   { value: 'kimi', label: 'Kimi Code' },
   { value: 'antigravity', label: 'Antigravity CLI (Beta)' },
+  { value: 'muse', label: 'Muse (Beta)' },
+  { value: 'devin', label: 'Devin (Beta)' },
 ]
 
 export type TerminalApp =
   | 'terminal'
   | 'warp'
   | 'ghostty'
+  | 'kitty'
   | 'iterm2'
   | 'powershell'
   | 'windows-terminal'
@@ -2136,6 +2224,7 @@ const allTerminalOptions: {
   { value: 'terminal', label: 'Terminal', platforms: ['mac', 'linux'] },
   { value: 'warp', label: 'Warp', platforms: ['mac', 'windows'] },
   { value: 'ghostty', label: 'Ghostty', platforms: ['mac', 'linux'] },
+  { value: 'kitty', label: 'Kitty', platforms: ['linux'] },
   { value: 'iterm2', label: 'iTerm2', platforms: ['mac'] },
   { value: 'powershell', label: 'PowerShell', platforms: ['windows'] },
   {
@@ -2224,6 +2313,8 @@ export const newSessionKindOptions: {
   { value: 'grok', label: 'Grok' },
   { value: 'kimi', label: 'Kimi Code' },
   { value: 'antigravity', label: 'Antigravity CLI (Beta)' },
+  { value: 'muse', label: 'Muse (Beta)' },
+  { value: 'devin', label: 'Devin (Beta)' },
 ]
 
 export function getNewSessionKindLabel(
@@ -2469,11 +2560,12 @@ export const defaultPreferences: AppPreferences = {
   chat_font: 'geist',
   font_weight: FONT_WEIGHT_DEFAULT,
   keybindings: DEFAULT_KEYBINDINGS,
+  applied_keybinding_migrations: [],
   archive_retention_days: 7,
   syntax_theme_dark: 'vitesse-black',
   syntax_theme_light: 'github-light',
   compact_chat_view_enabled: true, // Default: enabled
-  auto_recaps_enabled: true, // Default: enabled
+  sidebar_hover_open_enabled: false, // Default: off (opt-in)
   keep_ai_servers_warm: true, // Default: enabled for faster follow-up requests
   magic_prompts: DEFAULT_MAGIC_PROMPTS,
   magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
@@ -2507,6 +2599,8 @@ export const defaultPreferences: AppPreferences = {
   has_seen_jean_config_wizard: false, // Default: not seen
   has_seen_jean_mcp_intro: false, // Default: not seen
   has_seen_external_display_zoom_tip: false, // Default: show tip once on 1× + non-100% zoom
+  show_full_file_path: false, // Default: show filename only
+  spellcheck_enabled: true, // Default: enabled
   chrome_enabled: true, // Default: enabled
   zoom_level: ZOOM_LEVEL_DEFAULT,
   mobile_zoom_level: ZOOM_LEVEL_DEFAULT,
@@ -2521,6 +2615,7 @@ export const defaultPreferences: AppPreferences = {
   favorite_base_branches: [],
   fast_mode_models: [],
   confirm_session_close: true, // Default: enabled (show confirmation)
+  close_confirm_bypass_modifier: DEFAULT_CLOSE_CONFIRM_BYPASS_MODIFIER, // Default: off — closing always confirms until opted out
   default_execution_mode: 'yolo', // Default: Full access
   default_backend: 'claude', // Default: Claude
   default_new_session_kind: 'chat', // Default: Jean Chat for CMD+T
@@ -2531,7 +2626,9 @@ export const defaultPreferences: AppPreferences = {
   selected_commandcode_model: 'commandcode/default', // Default Command Code model
   selected_grok_model: 'grok/grok-4.6', // Default Grok model
   selected_kimi_model: 'kimi/default', // Use Kimi Code's configured default model
+  selected_devin_model: 'devin/default', // Use Devin's configured default model
   selected_antigravity_model: 'antigravity/auto', // Use Antigravity CLI automatic model routing
+  selected_muse_model: 'muse/default', // Use Muse Code's server default model
   default_codex_reasoning_effort: 'high', // Default: high reasoning
   default_codex_model_verbosity: 'medium', // Default: medium verbosity (not low — Jean #535)
   default_grok_reasoning_effort: 'high', // Default: high reasoning
@@ -2539,8 +2636,11 @@ export const defaultPreferences: AppPreferences = {
   codex_auto_steer_enabled: false, // Default: queue while Codex is running
   opencode_auto_steer_enabled: false, // Default: queue while OpenCode is running
   pi_auto_steer_enabled: false, // Default: queue while PI is running
+  pi_agent_owns_policy: false, // Default: Jean maps execution modes and injects its system prompt
+  claude_auto_steer_enabled: false, // Default: queue while Claude is running
   grok_auto_steer_enabled: false, // Default: queue while Grok is running
   kimi_auto_steer_enabled: false,
+  devin_auto_steer_enabled: false,
   antigravity_auto_steer_enabled: false,
   close_original_on_clear_context: true, // Default: enabled
   build_model: null, // Default: use session model
@@ -2560,8 +2660,11 @@ export const defaultPreferences: AppPreferences = {
   opencode_cli_source: 'jean', // Default: Jean-managed
   grok_cli_source: 'jean', // Default: Jean-managed
   kimi_cli_source: 'jean', // Default: Jean-managed
+  devin_cli_source: 'jean', // Default: Jean-managed Devin CLI
   antigravity_cli_source: 'jean', // Default: Jean-managed
+  muse_cli_source: 'jean', // Default: Jean-managed
   gh_cli_source: 'jean', // Default: Jean-managed
+  glab_cli_source: 'jean', // Default: Jean-managed
   pi_cli_source: 'jean', // Default: Jean-managed
   commandcode_cli_source: 'jean', // Default: Jean-managed
   wsl_mode_chosen: false, // Default: not yet chosen
@@ -2578,4 +2681,5 @@ export const defaultPreferences: AppPreferences = {
   jean_mcp_max_depth: 3,
   jean_mcp_rate_limit_per_minute: 20,
   agent_browser_enabled: false, // Default: off
+  browser_default_host: null, // Unset: tabs and port buttons use localhost
 }

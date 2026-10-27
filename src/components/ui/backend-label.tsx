@@ -1,6 +1,6 @@
 import type { ForwardRefExoticComponent, RefAttributes } from 'react'
 import type { LucideProps } from '@/components/icons/reicon'
-import { Badge } from '@/components/ui/badge'
+import { BetaBadge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { ClaudeIcon } from '@/components/icons/ClaudeIcon'
 import { CodexIcon } from '@/components/icons/CodexIcon'
@@ -10,7 +10,9 @@ import { PiIcon } from '@/components/icons/PiIcon'
 import { CommandCodeIcon } from '@/components/icons/CommandCodeIcon'
 import { GrokIcon } from '@/components/icons/GrokIcon'
 import { KimiIcon } from '@/components/icons/KimiIcon'
+import { DevinIcon } from '@/components/icons/DevinIcon'
 import { AntigravityIcon } from '@/components/icons/AntigravityIcon'
+import { MuseIcon } from '@/components/icons/MuseIcon'
 import type { CliBackend } from '@/types/preferences'
 
 export type BackendIconComponent = ForwardRefExoticComponent<
@@ -35,8 +37,12 @@ export function getBackendIcon(backend: CliBackend): BackendIconComponent {
       return GrokIcon
     case 'kimi':
       return KimiIcon
+    case 'devin':
+      return DevinIcon
     case 'antigravity':
       return AntigravityIcon
+    case 'muse':
+      return MuseIcon
   }
 }
 
@@ -58,13 +64,19 @@ export function getBackendLabel(backend: CliBackend): string {
       return 'Grok'
     case 'kimi':
       return 'Kimi Code'
+    case 'devin':
+      return 'Devin'
     case 'antigravity':
       return 'Antigravity CLI'
+    case 'muse':
+      return 'Muse'
   }
 }
 
 export function isBetaBackend(backend: CliBackend): boolean {
-  return backend === 'antigravity'
+  return (
+    backend === 'antigravity' || backend === 'muse' || backend === 'devin'
+  )
 }
 
 export function getBackendPlainLabel(backend: CliBackend): string {
@@ -89,16 +101,7 @@ export function BackendLabel({
   return (
     <span className={cn('inline-flex items-center gap-1.5', className)}>
       <span>{label}</span>
-      <Badge
-        aria-hidden="true"
-        variant="outline"
-        className={cn(
-          'rounded-sm px-1.5 py-0 text-[10px] leading-4 uppercase tracking-wide bg-warning/10 text-warning border-warning/40',
-          badgeClassName
-        )}
-      >
-        Beta
-      </Badge>
+      <BetaBadge className={badgeClassName} />
     </span>
   )
 }

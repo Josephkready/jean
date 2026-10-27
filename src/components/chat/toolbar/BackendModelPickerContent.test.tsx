@@ -60,6 +60,14 @@ vi.mock('@/services/antigravity-cli', () => ({
   }),
 }))
 
+let mockMuseModels: { id: string; label: string }[] | undefined
+
+vi.mock('@/services/muse-cli', () => ({
+  useAvailableMuseModels: () => ({
+    data: mockMuseModels,
+  }),
+}))
+
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
     data: {
@@ -81,6 +89,7 @@ beforeEach(() => {
   mockFastModeModels = []
   mockCursorModels = [{ id: 'auto', label: 'Auto' }]
   mockAntigravityModels = []
+  mockMuseModels = undefined
   patchPreferencesMutate.mockClear()
   refreshOpencodeModelsMutateAsync.mockReset()
   refreshOpencodeModelsMutateAsync.mockResolvedValue(['openai/gpt-5.4'])
@@ -227,14 +236,21 @@ describe('BackendModelPickerContent', () => {
     expect(onRequestClose).toHaveBeenCalled()
   })
 
-  it('shows the beta sidebar dot on Antigravity, not Cursor, Command Code, or Grok', () => {
+  it('shows the beta sidebar dot on Antigravity, Muse, and Devin, not Cursor, Command Code, or Grok', () => {
     render(
       <BackendModelPickerContent
         open
         selectedBackend="cursor"
         selectedModel="cursor/auto"
         selectedProvider={null}
-        installedBackends={['cursor', 'commandcode', 'grok', 'antigravity']}
+        installedBackends={[
+          'cursor',
+          'commandcode',
+          'grok',
+          'devin',
+          'antigravity',
+          'muse',
+        ]}
         customCliProfiles={[]}
         onModelChange={vi.fn()}
         onBackendModelChange={vi.fn()}
@@ -247,14 +263,18 @@ describe('BackendModelPickerContent', () => {
       name: 'Command Code',
     })
     const grokTab = screen.getByRole('tab', { name: 'Grok' })
+    const devinTab = screen.getByRole('tab', { name: 'Devin (Beta)' })
     const antigravityTab = screen.getByRole('tab', {
       name: 'Antigravity CLI (Beta)',
     })
+    const museTab = screen.getByRole('tab', { name: 'Muse (Beta)' })
 
     expect(cursorTab.querySelector('.bg-warning')).toBeNull()
     expect(commandCodeTab.querySelector('.bg-warning')).toBeNull()
     expect(grokTab.querySelector('.bg-warning')).toBeNull()
+    expect(devinTab.querySelector('.bg-warning')).not.toBeNull()
     expect(antigravityTab.querySelector('.bg-warning')).not.toBeNull()
+    expect(museTab.querySelector('.bg-warning')).not.toBeNull()
   })
 
   it('lists CLI-reported Antigravity models ahead of static fallbacks', () => {
@@ -368,6 +388,73 @@ describe('BackendModelPickerContent', () => {
     expect(
       screen.queryByRole('button', { name: /refresh model list/i })
     ).not.toBeInTheDocument()
+  })
+
+  it('lists the Muse models on the Muse tab and switches backend on select', async () => {
+    const user = userEvent.setup()
+    const onModelChange = vi.fn()
+    const onBackendModelChange = vi.fn()
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="claude"
+        selectedModel="claude-fable-5"
+        selectedProvider={null}
+        installedBackends={['claude', 'muse']}
+        customCliProfiles={[]}
+        onModelChange={onModelChange}
+        onBackendModelChange={onBackendModelChange}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    await user.click(screen.getByRole('tab', { name: 'Muse (Beta)' }))
+    expect(
+      screen.getAllByRole('option').map(option => option.textContent)
+    ).toEqual(['Defaultmuse/default', 'Muse Spark 1.2muse/muse-spark-1.2'])
+    await user.click(screen.getByText('Muse Spark 1.2'))
+
+    expect(onBackendModelChange).toHaveBeenCalledWith(
+      'muse',
+      'muse/muse-spark-1.2'
+    )
+    expect(onModelChange).not.toHaveBeenCalled()
+  })
+
+  it('offers CLI-reported Muse models and selects them by their Muse id', async () => {
+    const user = userEvent.setup()
+    const onModelChange = vi.fn()
+    mockMuseModels = [
+      { id: 'muse/default', label: 'Default' },
+      { id: 'muse/muse-spark-1.2', label: 'Muse Spark 1.2' },
+      { id: 'muse/muse-spark-2', label: 'Muse Spark 2' },
+    ]
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="muse"
+        selectedModel="muse/default"
+        selectedProvider={null}
+        installedBackends={['muse']}
+        customCliProfiles={[]}
+        onModelChange={onModelChange}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    expect(
+      screen.getAllByRole('option').map(option => option.textContent)
+    ).toEqual([
+      'Defaultmuse/default',
+      'Muse Spark 1.2muse/muse-spark-1.2',
+      'Muse Spark 2muse/muse-spark-2',
+    ])
+    await user.click(screen.getByText('Muse Spark 2'))
+
+    expect(onModelChange).toHaveBeenCalledWith('muse/muse-spark-2')
   })
 
   it('keeps the Cursor fallback model when web access caches an empty model list', () => {

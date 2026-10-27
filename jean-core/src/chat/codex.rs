@@ -797,7 +797,7 @@ pub fn build_thread_start_params(
     // Codex reads MCP config from TOML files directly, so we can't detect
     // whether MCP servers are configured — but setting mcp_elicitations=false
     // is a no-op when no MCP servers exist, so it's safe to use in build mode.
-    match execution_mode.unwrap_or("plan") {
+    match execution_mode.unwrap_or("build") {
         "build" | "auto" => {
             params["approvalPolicy"] = serde_json::json!({
                 "granular": {
@@ -891,7 +891,7 @@ fn build_collaboration_mode_params(
     model: Option<&str>,
 ) -> Option<serde_json::Value> {
     let model = model.map(|m| split_fast_model(m).0)?;
-    let collab_mode = match execution_mode.unwrap_or("plan") {
+    let collab_mode = match execution_mode.unwrap_or("build") {
         "plan" => "plan",
         // build / yolo / anything else: leave Plan collaboration mode so the
         // model is no longer bound by plan-only developer instructions.
@@ -942,7 +942,7 @@ pub fn build_turn_start_params(
     // overrides the thread-level `sandbox`, so using workspaceWrite here would
     // accidentally re-sandbox yolo turns and break tools such as Playwright on
     // macOS (issue #328 / PR #362).
-    let mode = execution_mode.unwrap_or("plan");
+    let mode = execution_mode.unwrap_or("build");
     params["approvalsReviewer"] = serde_json::json!(if mode == "auto" {
         "auto_review"
     } else {
@@ -1075,9 +1075,9 @@ pub fn execute_codex_via_server(
 ) -> Result<CodexResponse, String> {
     use super::codex_server;
 
-    let is_plan_mode = execution_mode.unwrap_or("plan") == "plan";
-    let is_build_mode = execution_mode.unwrap_or("plan") == "build";
-    let is_yolo_mode = execution_mode.unwrap_or("plan") == "yolo";
+    let is_plan_mode = execution_mode.unwrap_or("build") == "plan";
+    let is_build_mode = execution_mode.unwrap_or("build") == "build";
+    let is_yolo_mode = execution_mode.unwrap_or("build") == "yolo";
     let model_verbosity = resolve_model_verbosity(app);
 
     // Mid-turn Approve (yolo) and pure yolo turns both auto-accept residual
@@ -1090,7 +1090,7 @@ pub fn execute_codex_via_server(
         existing_thread_id.is_some()
     );
 
-    // Ensure the app-server is running
+    // Ensure the app-server is running on the CLI's own Codex home.
     codex_server::ensure_running(app)?;
     // The app-server outlives individual Jean sessions, so its MCP registry may
     // predate changes to ~/.codex/config.toml. Refresh it before starting or
@@ -1570,7 +1570,7 @@ pub fn resume_codex_after_crash(
         "Codex crash recovery: session={session_id}, thread={thread_id}, had_active_turn={had_active_turn}"
     );
 
-    // 1. Ensure the app-server is running.
+    // 1. Ensure the app-server is running on the CLI's own Codex home.
     codex_server::ensure_running(app)?;
 
     // Register a SessionContext BEFORE calling thread/resume. The server may
@@ -3180,17 +3180,99 @@ fn sub_agent_activity_tool(item: &serde_json::Value) -> Option<(&'static str, se
         thread_id.to_string(),
         serde_json::json!({ "status": agent_status, "message": null }),
     );
-    let input = serde_json::json!({
+    // `prompt` stays the agent path so older readers keep working. `agent_path`
+    // is the explicit field; the UI names the agent from its last segment
+    // (`/root/reviewer` → reviewer) instead of showing the raw path.
+    let mut input = serde_json::json!({
         "id": item.get("id").cloned().unwrap_or(serde_json::Value::Null),
         "type": "sub_agent_activity",
         "kind": kind,
         "prompt": agent_path,
+        "agent_path": agent_path,
         "receiver_thread_ids": [thread_id],
         "agents_states": agents_states,
         "status": "completed",
     });
+    if let Some(obj) = input.as_object_mut() {
+        if let Some(model) = item
+            .get("model")
+            .filter(|value| value.as_str().is_some_and(|model| !model.trim().is_empty()))
+        {
+            obj.insert("model".to_string(), model.clone());
+        }
+        if let Some(effort) = item
+            .get("reasoning_effort")
+            .or_else(|| item.get("reasoningEffort"))
+            .filter(|value| !value.is_null())
+        {
+            obj.insert("reasoning_effort".to_string(), effort.clone());
+        }
+    }
 
     Some((tool_name, input))
+}
+
+fn codex_agent_status_is_unsettled(status: &str) -> bool {
+    matches!(status, "" | "running" | "pendingInit" | "pending_init")
+}
+
+/// Codex `subAgentActivity` has no completed kind, so a finished parent run is
+/// the terminal signal. Leave Running/Resumable logs alone — those agents may
+/// still be live. Cancelled and crashed runs become interrupted so a later
+/// prompt cannot paint them as still loading.
+fn settle_finished_codex_agents(tool_calls: &mut [ToolCall], run: &super::types::RunEntry) {
+    use super::types::RunStatus;
+
+    let terminal = match run.status {
+        RunStatus::Running | RunStatus::Resumable => return,
+        RunStatus::Cancelled | RunStatus::Crashed => "interrupted",
+        RunStatus::Completed if run.cancelled => "interrupted",
+        RunStatus::Completed => "completed",
+    };
+
+    for tool in tool_calls.iter_mut() {
+        let Some(input) = tool.input.as_object_mut() else {
+            continue;
+        };
+        let states_key = if input.contains_key("agents_states") {
+            "agents_states"
+        } else if input.contains_key("agentsStates") {
+            "agentsStates"
+        } else {
+            continue;
+        };
+        let Some(states) = input.get_mut(states_key) else {
+            continue;
+        };
+        let Some(states) = states.as_object_mut() else {
+            continue;
+        };
+        for state in states.values_mut() {
+            let Some(state) = state.as_object_mut() else {
+                continue;
+            };
+            let status = state
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if !codex_agent_status_is_unsettled(status) {
+                continue;
+            }
+            state.insert(
+                "status".to_string(),
+                serde_json::Value::String(terminal.to_string()),
+            );
+            if terminal == "interrupted" {
+                let message = state.get("message").and_then(|value| value.as_str());
+                if message.is_none() || message.is_some_and(str::is_empty) {
+                    state.insert(
+                        "message".to_string(),
+                        serde_json::json!("Interrupted before completion"),
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Whether Codex command/permission approvals should be auto-accepted for this session.
@@ -3294,13 +3376,21 @@ fn handle_approval_request(
                 return;
             }
 
-            // Auto-approve embedded/resolved CLI binaries (matches Claude's --allowedTools)
-            let gh_binary = crate::gh_cli::config::resolve_gh_binary(app);
-            let gh_str = gh_binary.to_string_lossy();
-            if command.contains(&*gh_str)
-                || command.contains("gh-cli/gh")
-                || command.contains("claude-cli/claude")
-            {
+            // Auto-approve embedded/resolved CLI binaries (matches Claude's --allowedTools).
+            // Only treat `gh` as auto-approved when it is actually installed.
+            let gh_auto_approve = crate::gh_cli::config::resolve_available_gh_binary(app)
+                .map(|path| {
+                    let gh_str = path.to_string_lossy().into_owned();
+                    command.contains(&gh_str) || command.contains("gh-cli/gh")
+                })
+                .unwrap_or(false);
+            let glab_auto_approve = crate::glab_cli::config::resolve_available_glab_binary(app)
+                .map(|path| {
+                    let glab_str = path.to_string_lossy().into_owned();
+                    command.contains(&glab_str) || command.contains("glab-cli/glab")
+                })
+                .unwrap_or(false);
+            if gh_auto_approve || glab_auto_approve || command.contains("claude-cli/claude") {
                 log::trace!("Auto-accepting CLI command (rpc_id={rpc_id}): {command}");
                 if let Err(e) = super::codex_server::send_response(
                     rpc_id,
@@ -5142,6 +5232,8 @@ pub fn parse_codex_run_to_message(
         enrich_thin_codex_plan(&mut tool_calls, &mut content_blocks, &content);
     }
 
+    settle_finished_codex_agents(&mut tool_calls, run);
+
     Ok(ChatMessage {
         id: run
             .assistant_message_id
@@ -5232,6 +5324,9 @@ pub fn execute_one_shot_codex(
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    for (key, value) in crate::opinionated::cliproxyapi::codex_process_env() {
+        cmd.env(key, value);
+    }
 
     // Run in a new process group so a timeout kill can take down the whole tree.
     // Codex spawns MCP server children (e.g. chrome-devtools-mcp) that survive a
@@ -5903,7 +5998,69 @@ mod tests {
 
         assert_eq!(agent.input["receiver_thread_ids"][0], "agent-1");
         assert_eq!(agent.input["prompt"], "/root/reviewer");
+        assert_eq!(agent.input["agent_path"], "/root/reviewer");
+        // The parent run completed, so a still-running subagent is settled.
+        assert_eq!(
+            agent.input["agents_states"]["agent-1"]["status"],
+            "completed"
+        );
+    }
+
+    #[test]
+    fn parse_codex_run_keeps_subagents_running_while_the_parent_run_is_live() {
+        let mut run = test_run_entry();
+        run.status = crate::chat::types::RunStatus::Running;
+        let lines = vec![
+            r#"{"type":"item.completed","item":{"id":"call-1","type":"subAgentActivity","kind":"started","agentThreadId":"agent-1","agentPath":"/root/reviewer","model":"gpt-5.4","reasoningEffort":"high"}}"#.to_string(),
+        ];
+
+        let message = parse_codex_run_to_message(&lines, &run).expect("message");
+        let agent = message
+            .tool_calls
+            .iter()
+            .find(|tool| tool.name == "SpawnAgent")
+            .expect("spawned agent tool");
+
+        assert_eq!(agent.input["model"], "gpt-5.4");
+        assert_eq!(agent.input["reasoning_effort"], "high");
         assert_eq!(agent.input["agents_states"]["agent-1"]["status"], "running");
+    }
+
+    #[test]
+    fn parse_codex_run_interrupts_unfinished_subagents_when_cancelled() {
+        let mut run = test_run_entry();
+        run.status = crate::chat::types::RunStatus::Cancelled;
+        run.cancelled = true;
+        let lines = vec![
+            r#"{"type":"item.completed","item":{"id":"call-1","type":"subAgentActivity","kind":"started","agentThreadId":"agent-1","agentPath":"/root/reviewer"}}"#.to_string(),
+            r#"{"type":"item.started","item":{"id":"call-2","type":"collabAgentToolCall","tool":"spawnAgent","status":"completed","receiverThreadIds":["agent-2"],"prompt":"Keep this failure","agentsStates":{"agent-2":{"status":"errored","message":"boom"}}}}"#.to_string(),
+        ];
+
+        let message = parse_codex_run_to_message(&lines, &run).expect("message");
+        let started = message
+            .tool_calls
+            .iter()
+            .find(|tool| tool.id == "call-1")
+            .expect("started agent");
+        let failed = message
+            .tool_calls
+            .iter()
+            .find(|tool| tool.id == "call-2")
+            .expect("failed agent");
+
+        assert_eq!(
+            started.input["agents_states"]["agent-1"]["status"],
+            "interrupted"
+        );
+        assert_eq!(
+            started.input["agents_states"]["agent-1"]["message"],
+            "Interrupted before completion"
+        );
+        assert_eq!(
+            failed.input["agents_states"]["agent-2"]["status"],
+            "errored"
+        );
+        assert_eq!(failed.input["agents_states"]["agent-2"]["message"], "boom");
     }
 
     #[test]
@@ -6403,6 +6560,7 @@ mod tests {
             status: RunStatus::Cancelled,
             assistant_message_id: Some("assistant-1".to_string()),
             cancelled: true,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6412,7 +6570,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6462,6 +6622,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-3".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6471,7 +6632,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6518,6 +6681,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-2".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6527,7 +6691,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6579,6 +6745,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-merge-plan".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6588,7 +6755,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6642,6 +6811,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-enrich-plan".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6651,7 +6821,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6715,6 +6887,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-order".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6724,7 +6897,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6836,6 +7011,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-plain-plan".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6845,7 +7021,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6895,6 +7073,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-3".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6904,7 +7083,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -6959,6 +7140,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-4".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -6968,7 +7150,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -7004,6 +7188,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-5".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -7013,7 +7198,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -7163,6 +7350,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-ws".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -7172,7 +7360,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 

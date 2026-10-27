@@ -91,7 +91,16 @@ pub struct UsageData {
 // Message Types
 // ============================================================================
 
-/// Backend for a chat session (Claude CLI, Codex CLI, OpenCode, Cursor, PI, or Command Code)
+/// Execution location is part of a Devin session's identity.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DevinLocation {
+    #[default]
+    Local,
+    Cloud,
+}
+
+/// Backend for a chat session (Claude CLI, Codex CLI, OpenCode, Cursor, PI, Command Code, or Devin)
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
@@ -104,7 +113,9 @@ pub enum Backend {
     Commandcode,
     Grok,
     Kimi,
+    Devin,
     Antigravity,
+    Muse,
 }
 
 impl<'de> Deserialize<'de> for Backend {
@@ -126,7 +137,9 @@ impl<'de> Deserialize<'de> for Backend {
             "commandcode" => Backend::Commandcode,
             "grok" => Backend::Grok,
             "kimi" => Backend::Kimi,
+            "devin" => Backend::Devin,
             "antigravity" | "gemini" => Backend::Antigravity,
+            "muse" => Backend::Muse,
             "claude" | "" => Backend::Claude,
             other => {
                 log::warn!("Unknown chat backend '{other}', falling back to claude");
@@ -151,6 +164,12 @@ mod backend_tests {
     fn backend_deserializes_kimi() {
         let backend: Backend = serde_json::from_str("\"kimi\"").unwrap();
         assert_eq!(backend, Backend::Kimi);
+    }
+
+    #[test]
+    fn backend_deserializes_devin() {
+        let backend: Backend = serde_json::from_str("\"devin\"").unwrap();
+        assert_eq!(backend, Backend::Devin);
     }
 
     #[test]
@@ -836,6 +855,15 @@ pub struct Session {
     /// Kimi Code ACP session ID for resuming conversations
     #[serde(default)]
     pub kimi_session_id: Option<String>,
+    /// Devin CLI ACP session ID for resuming conversations
+    #[serde(default)]
+    pub devin_session_id: Option<String>,
+    #[serde(default)]
+    pub devin_location: DevinLocation,
+    #[serde(default)]
+    pub devin_config_options: Option<serde_json::Value>,
+    #[serde(default)]
+    pub devin_config_overrides: HashMap<String, String>,
     /// Antigravity CLI conversation ID for resuming conversations.
     #[serde(
         default,
@@ -843,6 +871,9 @@ pub struct Session {
         alias = "gemini_session_id"
     )]
     pub antigravity_session_id: Option<String>,
+    /// Muse Code MSP session ID for resuming conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse_session_id: Option<String>,
     /// Selected model for this session
     #[serde(default)]
     pub selected_model: Option<String>,
@@ -1058,6 +1089,89 @@ impl Session {
         self.selected_execution_mode = mode;
     }
 
+    /// Cloud models come from the remote session, not the local CLI catalog.
+    pub fn devin_cloud_model(&self) -> String {
+        let option = self
+            .devin_config_options
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .and_then(|options| {
+                options.iter().find(|option| {
+                    option.get("category").and_then(serde_json::Value::as_str) == Some("model")
+                })
+            });
+        let id = option
+            .and_then(|option| option.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("model");
+        let model = self
+            .devin_config_overrides
+            .get(id)
+            .map(String::as_str)
+            .or_else(|| {
+                option
+                    .and_then(|option| option.get("currentValue"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or("default");
+        format!("devin/{}", model.strip_prefix("devin/").unwrap_or(model))
+    }
+
+    pub fn set_devin_config(&mut self, config_id: String, value: String) -> Result<(), String> {
+        fn contains_value(options: &serde_json::Value, value: &str) -> bool {
+            options.as_array().is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("value").and_then(serde_json::Value::as_str) == Some(value)
+                        || item
+                            .get("options")
+                            .is_some_and(|nested| contains_value(nested, value))
+                })
+            })
+        }
+        if self.backend != Backend::Devin {
+            return Err("Configuration is only available for Devin sessions".to_string());
+        }
+        let valid = self
+            .devin_config_options
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|options| {
+                options.iter().any(|option| {
+                    option.get("id").and_then(serde_json::Value::as_str) == Some(config_id.as_str())
+                        && option.get("category").and_then(serde_json::Value::as_str)
+                            != Some("mode")
+                        && option
+                            .get("options")
+                            .is_some_and(|options| contains_value(options, &value))
+                })
+            });
+        if !valid {
+            return Err("Devin does not advertise this configuration value".to_string());
+        }
+        self.devin_config_overrides.insert(config_id, value);
+        Ok(())
+    }
+
+    pub fn set_devin_location(&mut self, location: DevinLocation) -> Result<(), String> {
+        if self.devin_location == location {
+            return Ok(());
+        }
+        if self.backend != Backend::Devin {
+            return Err("Location is only available for Devin sessions".to_string());
+        }
+        if self.devin_session_id.is_some()
+            || !self.messages.is_empty()
+            || self.message_count.unwrap_or(0) > 0
+        {
+            return Err("Start a new session to change the Devin location".to_string());
+        }
+        self.devin_location = location;
+        self.devin_config_options = None;
+        self.devin_config_overrides.clear();
+        Ok(())
+    }
+
     /// Create a new session with the given name and backend
     pub fn new(name: String, order: u32, backend: Backend) -> Self {
         Self {
@@ -1085,7 +1199,12 @@ impl Session {
             commandcode_session_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
+            devin_location: DevinLocation::Local,
+            devin_config_options: None,
+            devin_config_overrides: HashMap::new(),
             antigravity_session_id: None,
+            muse_session_id: None,
             selected_model: None,
             selected_thinking_level: None,
             selected_effort_level: None,
@@ -1457,7 +1576,12 @@ impl SessionMetadata {
             commandcode_session_id: self.commandcode_session_id.clone(),
             grok_session_id: self.grok_session_id.clone(),
             kimi_session_id: self.kimi_session_id.clone(),
+            devin_session_id: self.devin_session_id.clone(),
+            devin_location: self.devin_location,
+            devin_config_options: self.devin_config_options.clone(),
+            devin_config_overrides: self.devin_config_overrides.clone(),
             antigravity_session_id: self.antigravity_session_id.clone(),
+            muse_session_id: self.muse_session_id.clone(),
             selected_model: self.selected_model.clone(),
             selected_thinking_level: self.selected_thinking_level.clone(),
             selected_effort_level: self.selected_effort_level.clone(),
@@ -1527,7 +1651,12 @@ impl SessionMetadata {
         self.commandcode_session_id = session.commandcode_session_id.clone();
         self.grok_session_id = session.grok_session_id.clone();
         self.kimi_session_id = session.kimi_session_id.clone();
+        self.devin_session_id = session.devin_session_id.clone();
+        self.devin_location = session.devin_location;
+        self.devin_config_options = session.devin_config_options.clone();
+        self.devin_config_overrides = session.devin_config_overrides.clone();
         self.antigravity_session_id = session.antigravity_session_id.clone();
+        self.muse_session_id = session.muse_session_id.clone();
         self.selected_model = session.selected_model.clone();
         self.selected_thinking_level = session.selected_thinking_level.clone();
         self.selected_effort_level = session.selected_effort_level.clone();
@@ -1784,6 +1913,12 @@ pub struct RunEntry {
     /// Whether the run was cancelled by the user
     #[serde(default)]
     pub cancelled: bool,
+    /// Provider rejected the turn before any assistant output (usage limit,
+    /// auth, API error). The user request stays in history and provider-switch
+    /// handoff. Explicit user cancel/undo-send leaves this false so withdrawn
+    /// text is not reintroduced.
+    #[serde(default)]
+    pub provider_rejected: bool,
     /// Whether this run was recovered from a crash
     #[serde(default)]
     pub recovered: bool,
@@ -1812,6 +1947,9 @@ pub struct RunEntry {
     /// Kimi Code ACP session ID — persisted per-run for conversation continuity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kimi_session_id: Option<String>,
+    /// Devin CLI ACP session ID — persisted per-run for conversation continuity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devin_session_id: Option<String>,
     /// Antigravity CLI conversation ID for resuming conversations.
     #[serde(
         default,
@@ -1819,6 +1957,9 @@ pub struct RunEntry {
         alias = "gemini_session_id"
     )]
     pub antigravity_session_id: Option<String>,
+    /// Muse Code MSP session ID, persisted per run for conversation continuity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse_session_id: Option<String>,
     /// AI change checkpoint id captured before this run (working-tree snapshot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
@@ -1828,10 +1969,15 @@ impl RunEntry {
     /// Whether this run should appear as user/assistant messages in the visible chat timeline.
     ///
     /// Cancelled runs remain in metadata and JSONL for diagnostics. Instant
-    /// cancellations with no assistant id are hidden; cancellations after the
-    /// backend started are shown as the user prompt plus whatever partial
-    /// assistant/tool output had already streamed, marked as cancelled.
+    /// user cancellations with no assistant id are hidden. A provider rejection
+    /// before any assistant output stays visible as the user request so a later
+    /// turn can recover it. Cancellations after the backend started are shown
+    /// as the user prompt plus whatever partial assistant/tool output had
+    /// already streamed, marked as cancelled.
     pub fn is_renderable_in_chat_history(&self) -> bool {
+        if self.provider_rejected {
+            return !self.user_message.trim().is_empty();
+        }
         self.status != RunStatus::Cancelled || self.assistant_message_id.is_some()
     }
 
@@ -1909,9 +2055,21 @@ pub struct SessionMetadata {
     /// Kimi Code ACP session ID for resuming conversations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kimi_session_id: Option<String>,
+    /// Devin CLI ACP session ID for resuming conversations
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devin_session_id: Option<String>,
+    #[serde(default)]
+    pub devin_location: DevinLocation,
+    #[serde(default)]
+    pub devin_config_options: Option<serde_json::Value>,
+    #[serde(default)]
+    pub devin_config_overrides: HashMap<String, String>,
     /// Antigravity CLI conversation ID for resuming conversations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antigravity_session_id: Option<String>,
+    /// Muse Code MSP session ID for resuming conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse_session_id: Option<String>,
     /// Selected model for this session
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_model: Option<String>,
@@ -2111,9 +2269,14 @@ pub struct SessionDebugInfo {
     pub grok_session_id: Option<String>,
     /// Kimi Code ACP session ID (if any)
     pub kimi_session_id: Option<String>,
+    /// Devin CLI ACP session ID (if any)
+    pub devin_session_id: Option<String>,
     /// Antigravity CLI conversation ID for resuming conversations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antigravity_session_id: Option<String>,
+    /// Muse Code MSP session ID (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse_session_id: Option<String>,
     /// Path to Claude CLI's JSONL file (in ~/.claude/projects/)
     pub claude_jsonl_file: Option<String>,
     /// List of JSONL run log files for this session
@@ -2145,7 +2308,12 @@ impl SessionMetadata {
             commandcode_session_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
+            devin_location: DevinLocation::Local,
+            devin_config_options: None,
+            devin_config_overrides: HashMap::new(),
             antigravity_session_id: None,
+            muse_session_id: None,
             selected_model: None,
             selected_thinking_level: None,
             selected_effort_level: None,
@@ -2232,6 +2400,21 @@ impl SessionMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_metadata_ignores_removed_provider_account_id() {
+        let metadata = SessionMetadata::new("session".into(), "worktree".into(), "Chat".into(), 0);
+        let mut value = serde_json::to_value(&metadata).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "provider_account_id".to_string(),
+            serde_json::json!("work-acct"),
+        );
+
+        let restored: SessionMetadata = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(&restored).unwrap();
+        assert_eq!(restored.id, metadata.id);
+        assert!(saved.get("provider_account_id").is_none());
+    }
 
     // ========================================================================
     // ThinkingLevel tests
@@ -2828,6 +3011,118 @@ mod tests {
     }
 
     #[test]
+    fn test_muse_session_id_roundtrip_via_update_from_session() {
+        let mut session = Session::new("Muse MSP support".to_string(), 0, Backend::Muse);
+        session.muse_session_id = Some("01a14f1f-c834-7492-baab-0dbc3634ef84".to_string());
+        let mut metadata = SessionMetadata::new(
+            session.id.clone(),
+            "wt-muse".to_string(),
+            session.name.clone(),
+            session.order,
+        );
+        metadata.update_from_session(&session);
+        assert_eq!(
+            metadata.muse_session_id.as_deref(),
+            Some("01a14f1f-c834-7492-baab-0dbc3634ef84")
+        );
+        let restored = metadata.to_session();
+        assert_eq!(
+            restored.muse_session_id.as_deref(),
+            Some("01a14f1f-c834-7492-baab-0dbc3634ef84")
+        );
+        assert_eq!(restored.backend, Backend::Muse);
+        assert_eq!(serde_json::to_value(&Backend::Muse).unwrap(), "muse");
+        let parsed: Backend = serde_json::from_str("\"muse\"").unwrap();
+        assert_eq!(parsed, Backend::Muse);
+    }
+
+    #[test]
+    fn test_devin_session_id_roundtrip_via_update_from_session() {
+        let mut session = Session::new("Devin ACP support".to_string(), 0, Backend::Devin);
+        session.devin_location = DevinLocation::Cloud;
+        session.devin_session_id = Some("devin-acp-1".to_string());
+
+        let mut metadata = SessionMetadata::new(
+            session.id.clone(),
+            "wt-devin".to_string(),
+            session.name.clone(),
+            session.order,
+        );
+        metadata.update_from_session(&session);
+
+        assert_eq!(metadata.devin_session_id.as_deref(), Some("devin-acp-1"));
+        let restored = metadata.to_session();
+        assert_eq!(restored.devin_session_id.as_deref(), Some("devin-acp-1"));
+        assert_eq!(restored.backend, Backend::Devin);
+        assert_eq!(restored.devin_location, DevinLocation::Cloud);
+        let mut legacy = serde_json::to_value(&metadata).unwrap();
+        legacy.as_object_mut().unwrap().remove("devin_location");
+        let legacy: SessionMetadata = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.devin_location, DevinLocation::Local);
+    }
+
+    #[test]
+    fn devin_cloud_model_ignores_local_selection_and_prefers_remote_override() {
+        let mut session = Session::new("Devin".to_string(), 0, Backend::Devin);
+        session.selected_model = Some("devin/local-model".into());
+        assert_eq!(session.devin_cloud_model(), "devin/default");
+        session.devin_config_options = Some(serde_json::json!([
+            {"id":"model", "category":"model", "currentValue":"remote-model"}
+        ]));
+        assert_eq!(session.devin_cloud_model(), "devin/remote-model");
+        session
+            .devin_config_overrides
+            .insert("model".into(), "remote-choice".into());
+        assert_eq!(session.devin_cloud_model(), "devin/remote-choice");
+    }
+
+    #[test]
+    fn devin_config_accepts_only_advertised_values_and_persists() {
+        let mut session = Session::new("Devin".to_string(), 0, Backend::Devin);
+        session.devin_config_options = Some(serde_json::json!([
+            {"id":"thought_level", "category":"thought_level", "options":[{"value":"high"}]},
+            {"id":"mode", "category":"mode", "options":[{"value":"bypass"}]}
+        ]));
+        assert!(session
+            .set_devin_config("thought_level".into(), "high".into())
+            .is_ok());
+        assert!(session
+            .set_devin_config("thought_level".into(), "unknown".into())
+            .is_err());
+        assert!(session
+            .set_devin_config("mode".into(), "bypass".into())
+            .is_err());
+        assert!(session
+            .set_devin_config("unknown".into(), "high".into())
+            .is_err());
+        let mut metadata =
+            SessionMetadata::new(session.id.clone(), "wt".into(), session.name.clone(), 0);
+        metadata.update_from_session(&session);
+        let restored = metadata.to_session();
+        assert_eq!(
+            restored
+                .devin_config_overrides
+                .get("thought_level")
+                .map(String::as_str),
+            Some("high")
+        );
+        assert_eq!(restored.devin_config_options, session.devin_config_options);
+    }
+
+    #[test]
+    fn devin_location_cannot_change_after_session_starts() {
+        let mut session = Session::new("Devin".to_string(), 0, Backend::Devin);
+        session.set_devin_location(DevinLocation::Cloud).unwrap();
+        session.devin_session_id = Some("remote-id".to_string());
+        assert!(session.set_devin_location(DevinLocation::Local).is_err());
+        assert_eq!(session.devin_location, DevinLocation::Cloud);
+        assert!(session.set_devin_location(DevinLocation::Cloud).is_ok());
+        session.devin_session_id = None;
+        session.message_count = Some(1);
+        assert!(session.set_devin_location(DevinLocation::Local).is_err());
+    }
+
+    #[test]
     fn test_antigravity_session_id_roundtrip_via_update_from_session() {
         let mut session = Session::new(
             "Antigravity conversation support".to_string(),
@@ -2884,6 +3179,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-1".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -2893,7 +3189,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         });
 
@@ -2929,6 +3227,7 @@ mod tests {
             status: RunStatus::Running,
             assistant_message_id: None,
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: Some(12345),
@@ -2938,7 +3237,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         });
 
@@ -2963,6 +3264,7 @@ mod tests {
             status: RunStatus::Cancelled,
             assistant_message_id: Some("assistant-cancelled".to_string()),
             cancelled: true,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -2972,7 +3274,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -2993,13 +3297,22 @@ mod tests {
         assert!(run.renders_assistant_message());
         assert_eq!(run.rendered_message_count(), 2);
 
-        // Instant cancel (no assistant id) stays fully hidden.
+        // Instant user cancel (no assistant id) stays fully hidden.
         run.assistant_message_id = None;
         run.status = RunStatus::Cancelled;
         run.cancelled = true;
+        run.provider_rejected = false;
         assert!(!run.is_renderable_in_chat_history());
         assert!(!run.renders_assistant_message());
         assert_eq!(run.rendered_message_count(), 0);
+
+        // Provider rejection before output keeps the user request, with no
+        // fabricated assistant reply.
+        run.provider_rejected = true;
+        assert!(run.is_renderable_in_chat_history());
+        assert!(!run.renders_assistant_message());
+        assert_eq!(run.rendered_message_count(), 1);
+        run.provider_rejected = false;
 
         run.assistant_message_id = Some("assistant-cancelled".to_string());
         run.status = RunStatus::Completed;
@@ -3007,6 +3320,23 @@ mod tests {
 
         assert!(run.is_renderable_in_chat_history());
         assert_eq!(run.rendered_message_count(), 2);
+    }
+
+    #[test]
+    fn older_cancelled_runs_without_provider_rejected_stay_hidden() {
+        let run: RunEntry = serde_json::from_value(serde_json::json!({
+            "run_id": "run-old",
+            "user_message_id": "user-old",
+            "user_message": "withdrawn before this field existed",
+            "started_at": 1,
+            "status": "cancelled",
+            "cancelled": true
+        }))
+        .unwrap();
+
+        assert!(!run.provider_rejected);
+        assert!(!run.is_renderable_in_chat_history());
+        assert_eq!(run.rendered_message_count(), 0);
     }
 
     #[test]
@@ -3032,6 +3362,7 @@ mod tests {
             status: RunStatus::Cancelled,
             assistant_message_id: Some("assistant-cancelled".to_string()),
             cancelled: true,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -3041,7 +3372,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         });
         metadata.runs.push(RunEntry {
@@ -3059,6 +3392,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-completed".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -3068,7 +3402,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         });
 
@@ -3104,6 +3440,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: None,
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -3113,7 +3450,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         });
 
@@ -3135,6 +3474,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: None,
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: Some("claude-sess-abc".to_string()),
             pid: None,
@@ -3144,7 +3484,9 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         });
 

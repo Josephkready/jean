@@ -107,6 +107,13 @@ static USAGE_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Used by the delayed shutdown thread to avoid killing a newly-spawned server.
 static SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Bumped on every `ensure_running()`. An idle timer stands down when this
+/// changed after it was scheduled, so only the latest release can shut down.
+static IDLE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Idle grace period before an unused server is shut down.
+static IDLE_TIMEOUT_MS: AtomicU64 = AtomicU64::new(600_000);
+
 /// True while a background socket reconnect thread owns recovery. Prevents
 /// `ensure_running` from spawning a second transport against the same PID.
 #[cfg(unix)]
@@ -134,6 +141,21 @@ struct ServerPidRecord {
     proxy_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     socket_path: Option<PathBuf>,
+}
+
+/// True when a pid file records a Jean-managed Codex account directory.
+///
+/// Those homes are no longer used. The recorded server is stopped so the next
+/// spawn uses the CLI's own `~/.codex`.
+fn pid_json_uses_managed_codex_home(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| value.get("codex_home").cloned())
+        .is_some_and(|home| match home {
+            serde_json::Value::String(path) => !path.trim().is_empty(),
+            serde_json::Value::Null => false,
+            _ => true,
+        })
 }
 
 fn pid_file_path() -> Option<PathBuf> {
@@ -222,6 +244,17 @@ pub fn cleanup_orphaned_server(app: &AppHandle) {
             return;
         }
 
+        // A server started with a Jean-managed account home must not be
+        // reused. Stop it so the next spawn uses ~/.codex.
+        if recorded_server_uses_managed_codex_home() {
+            log::info!(
+                "Stopping Codex app-server (pid={}) that was started with a Jean-managed account home",
+                record.server_pid
+            );
+            kill_recorded_codex_server(&record);
+            return;
+        }
+
         // If Codex turns were in-flight when the previous Jean exited, the
         // detached app-server may still be the process doing the work.
         // Preserve it (and its pid/socket files) so recovery can reconnect
@@ -259,6 +292,10 @@ pub fn cleanup_orphaned_server(app: &AppHandle) {
 /// only the connection is dropped. Recovery reconnects on next launch.
 pub fn shutdown_server() {
     let mut guard = CODEX_SERVER.lock().unwrap();
+    shutdown_server_locked(&mut guard);
+}
+
+fn shutdown_server_locked(guard: &mut std::sync::MutexGuard<'_, Option<CodexAppServerInner>>) {
     let Some(server) = guard.take() else { return };
 
     #[cfg(unix)]
@@ -304,16 +341,20 @@ fn kill_server(mut server: CodexAppServerInner) {
 
 /// Ensure the server is running. Spawns + initializes if needed.
 /// Increments usage count — caller MUST call `unregister_session` when done.
+///
+/// The server always uses the CLI's own Codex home. Jean does not set
+/// `CODEX_HOME`.
 pub fn ensure_running(app: &AppHandle) -> Result<(), String> {
     let _ = APP_HANDLE.set(app.clone());
 
+    IDLE_EPOCH.fetch_add(1, Ordering::SeqCst);
     USAGE_COUNT.fetch_add(1, Ordering::SeqCst);
 
     match ensure_running_inner(app) {
         Ok(()) => Ok(()),
         Err(e) => {
             // Roll back usage count on failure so we don't leave a phantom user
-            USAGE_COUNT.fetch_sub(1, Ordering::SeqCst);
+            decrement_usage_count();
             Err(e)
         }
     }
@@ -634,6 +675,28 @@ fn should_preserve_unreachable_live_server(has_active_sessions: bool) -> bool {
     has_active_sessions
 }
 
+fn recorded_server_uses_managed_codex_home() -> bool {
+    let Some(path) = pid_file_path() else {
+        return false;
+    };
+    let Ok(json) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    pid_json_uses_managed_codex_home(&json)
+}
+
+fn kill_recorded_codex_server(record: &ServerPidRecord) {
+    use crate::platform::{kill_process, kill_process_tree};
+    if let Some(proxy_pid) = record.proxy_pid {
+        let _ = kill_process_tree(proxy_pid);
+        let _ = kill_process(proxy_pid);
+    }
+    let _ = kill_process_tree(record.server_pid);
+    let _ = kill_process(record.server_pid);
+    remove_socket_file(record.socket_path.as_ref());
+    remove_pid_file();
+}
+
 #[cfg(unix)]
 fn wait_for_socket_reconnect(timeout: std::time::Duration) {
     let start = std::time::Instant::now();
@@ -797,6 +860,14 @@ fn try_adopt_existing_server(active_sessions: Option<ActiveSessions>) -> AdoptAt
         remove_pid_file();
         return AdoptAttempt::Missing;
     }
+    if recorded_server_uses_managed_codex_home() {
+        log::info!(
+            "Stopping Codex app-server (pid={}) that was started with a Jean-managed account home",
+            record.server_pid
+        );
+        kill_recorded_codex_server(&record);
+        return AdoptAttempt::Missing;
+    }
 
     let pending_requests: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
     let active_sessions = active_sessions.unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
@@ -905,7 +976,16 @@ fn ensure_running_socket(
         "--listen".to_string(),
         format!("unix://{}", socket_path.display()),
     ];
-    let pid = super::detached::spawn_detached_process(cli_path, &args, &log_path, &app_data)?;
+    // #875 removed Jean-managed Codex homes. Only the CLIProxyAPI client key
+    // is injected, and only when that sidecar has generated one.
+    let cliproxy_env = crate::opinionated::cliproxyapi::codex_process_env();
+    let env: Vec<(&str, &str)> = cliproxy_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let pid = super::detached::spawn_detached_process_with_env(
+        cli_path, &args, &log_path, &app_data, &env,
+    )?;
 
     write_pid_file(&ServerPidRecord {
         jean_pid: std::process::id(),
@@ -966,13 +1046,18 @@ fn ensure_running_stdio(
         cli_path.display()
     );
 
-    let mut child = crate::platform::resolved_cli_command(cli_path, None)
+    let mut command = crate::platform::resolved_cli_command(cli_path, None);
+    command
         .arg("app-server")
         .arg("--listen")
         .arg("stdio://")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in crate::opinionated::cliproxyapi::codex_process_env() {
+        command.env(key, value);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to spawn codex app-server: {e}"))?;
 
@@ -1312,11 +1397,15 @@ pub fn register_session(thread_id: &str, ctx: SessionContext) {
     }
 }
 
-/// Decrement the usage count without unregistering a session or scheduling shutdown.
-/// Used when `ensure_running()` succeeded but thread start failed before a session
-/// was registered (so there's nothing to unregister, but the count is inflated).
+/// Decrement the usage count without unregistering a session or shutting down
+/// immediately. Used when `ensure_running()` succeeded but thread start failed
+/// before a session was registered (so there's nothing to unregister, but the
+/// count is inflated). Still arms the idle timer: earlier timers were disarmed
+/// by the `ensure_running()` epoch bump.
 pub fn decrement_usage_count() {
-    USAGE_COUNT.fetch_sub(1, Ordering::SeqCst);
+    if USAGE_COUNT.fetch_sub(1, Ordering::SeqCst) == 1 {
+        schedule_idle_shutdown();
+    }
 }
 
 /// Unregister a session and schedule delayed shutdown if no sessions remain.
@@ -1340,33 +1429,96 @@ pub fn release_usage() {
             .map(|preferences| preferences.keep_ai_servers_warm)
             .unwrap_or(true);
         if !keep_warm {
-            shutdown_idle_server();
-            return;
-        }
-        // Last session finished — schedule delayed shutdown (10min grace period
-        // to keep server warm for typical work sessions).
-        // Capture generation so we don't kill a newly-spawned server.
-        let gen = SERVER_GENERATION.load(Ordering::SeqCst);
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(600));
-            if USAGE_COUNT.load(Ordering::SeqCst) == 0
-                && SERVER_GENERATION.load(Ordering::SeqCst) == gen
+            let epoch = IDLE_EPOCH.load(Ordering::SeqCst);
+            let gen = SERVER_GENERATION.load(Ordering::SeqCst);
+            if shutdown_if_idle(epoch, gen, IdleShutdownKind::WarmingDisabled)
+                != IdleShutdownOutcome::ToolsRunning
             {
-                log::info!("No active codex sessions — shutting down app-server");
-                shutdown_server();
+                return;
             }
-        });
+        }
+        schedule_idle_shutdown();
     }
 }
 
-/// Shut down an idle server even if the just-finished run has not yet been
-/// removed from the incomplete-run manifest.
-fn shutdown_idle_server() {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleShutdownKind {
+    /// Grace period elapsed; keep the server if Codex runs are incomplete.
+    Timer,
+    /// Warming disabled: stop even if the just-finished run has not yet been
+    /// removed from the incomplete-run manifest.
+    WarmingDisabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleShutdownOutcome {
+    /// Usage started (or the server changed) since the timer was armed.
+    Superseded,
+    /// Idle, but commands started by Codex tools are still running.
+    ToolsRunning,
+    Stopped,
+}
+
+fn idle_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(IDLE_TIMEOUT_MS.load(Ordering::SeqCst))
+}
+
+/// Arm an idle timer for the current epoch. While tool commands keep running
+/// it re-checks every grace period instead of giving up.
+fn schedule_idle_shutdown() {
+    let epoch = IDLE_EPOCH.load(Ordering::SeqCst);
+    let gen = SERVER_GENERATION.load(Ordering::SeqCst);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(idle_timeout());
+        if shutdown_if_idle(epoch, gen, IdleShutdownKind::Timer)
+            != IdleShutdownOutcome::ToolsRunning
+        {
+            return;
+        }
+    });
+}
+
+/// Shut the server down if nothing used it since `epoch` and no tool command is
+/// still running. The check and the kill happen under the `CODEX_SERVER` lock,
+/// which `ensure_running_inner` also takes, so a request that arrives
+/// concurrently either stands this down (usage/epoch changed) or respawns
+/// after the kill. Nothing holding the lock waits on `USAGE_COUNT`.
+fn shutdown_if_idle(epoch: u64, gen: u64, kind: IdleShutdownKind) -> IdleShutdownOutcome {
     let mut guard = CODEX_SERVER.lock().unwrap();
-    if let Some(server) = guard.take() {
-        log::info!("AI server warming disabled — shutting down codex app-server");
-        kill_server(server);
+    if USAGE_COUNT.load(Ordering::SeqCst) != 0
+        || IDLE_EPOCH.load(Ordering::SeqCst) != epoch
+        || SERVER_GENERATION.load(Ordering::SeqCst) != gen
+    {
+        return IdleShutdownOutcome::Superseded;
     }
+    let Some(server_pid) = guard.as_ref().map(|server| server.server_pid) else {
+        return IdleShutdownOutcome::Stopped;
+    };
+    // Codex starts every tool command with `setsid()`, while MCP servers and
+    // the CLI's node wrapper stay in the app-server's session. A descendant in
+    // another session is therefore a command a turn left running (e.g. a dev
+    // server). Killing the tree would SIGKILL it, so keep the server instead.
+    // An MCP server or wrapper that calls `setsid()` itself also keeps the
+    // server alive; that errs toward an idle server, never a killed command.
+    if crate::platform::has_descendant_in_other_session(server_pid) {
+        log::info!(
+            "Codex app-server (pid={server_pid}) is idle but tool commands are still running — keeping it"
+        );
+        return IdleShutdownOutcome::ToolsRunning;
+    }
+    match kind {
+        IdleShutdownKind::Timer => {
+            log::info!("No active codex sessions — shutting down app-server");
+            shutdown_server_locked(&mut guard);
+        }
+        IdleShutdownKind::WarmingDisabled => {
+            if let Some(server) = guard.take() {
+                log::info!("AI server warming disabled — shutting down codex app-server");
+                kill_server(server);
+            }
+        }
+    }
+    IdleShutdownOutcome::Stopped
 }
 
 /// Send a `turn/interrupt` request to cancel an in-progress turn.
@@ -1710,6 +1862,25 @@ mod tests {
     }
 
     #[test]
+    fn managed_codex_home_pid_records_are_detected_and_not_rewritten() {
+        assert!(!pid_json_uses_managed_codex_home(
+            r#"{"jean_pid":1,"server_pid":2}"#
+        ));
+        assert!(!pid_json_uses_managed_codex_home(
+            r#"{"jean_pid":1,"server_pid":2,"codex_home":null}"#
+        ));
+        assert!(pid_json_uses_managed_codex_home(
+            r#"{"jean_pid":1,"server_pid":2,"codex_home":"/tmp/jean/provider-accounts/codex/work"}"#
+        ));
+
+        let legacy = r#"{"jean_pid":1,"server_pid":2,"proxy_pid":null,"socket_path":"/tmp/jean-codex.sock","codex_home":"/tmp/jean/provider-accounts/codex/work"}"#;
+        let parsed: ServerPidRecord = serde_json::from_str(legacy).unwrap();
+        let rewritten = serde_json::to_string(&parsed).unwrap();
+        assert!(!pid_json_uses_managed_codex_home(&rewritten));
+        assert!(rewritten.contains("\"server_pid\":2"));
+    }
+
+    #[test]
     fn server_pid_record_parses_legacy_record_without_socket_path() {
         let json = r#"{"jean_pid":10,"server_pid":20}"#;
         let parsed: ServerPidRecord = serde_json::from_str(json).unwrap();
@@ -1882,5 +2053,169 @@ mod tests {
         // Second call is a no-op (no panic, no duplicate events)
         fail_connection(&pending, &sessions, &dead);
         assert!(event_rx.try_recv().is_err());
+    }
+
+    /// Fake `codex app-server` speaking JSON-RPC over stdio: answers every
+    /// request with `{"goal":null}`, or an error for `thread/goal/clear`.
+    /// `prelude` runs first in the same shell (the server keeps its pid).
+    #[cfg(unix)]
+    fn start_fake_server(app: &AppHandle, dir: &std::path::Path, prelude: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-codex");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{prelude}\nexec perl -ne 'BEGIN {{ $| = 1; $SIG{{CHLD}} = \"IGNORE\" }} \
+                 if (/\"id\":(\\d+)/) {{ my $id = $1; \
+                 print /goal\\/clear/ \
+                 ? qq({{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{{\"code\":-1,\"message\":\"boom\"}}}}\\n) \
+                 : qq({{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"goal\":null}}}}\\n) }}'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = APP_HANDLE.set(app.clone());
+        let mut guard = CODEX_SERVER.lock().unwrap();
+        ensure_running_stdio(&script, &mut guard).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn server_running() -> bool {
+        CODEX_SERVER.lock().unwrap().is_some()
+    }
+
+    #[cfg(unix)]
+    fn temp_app() -> (tempfile::TempDir, AppHandle) {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(temp.path().join("data"), temp.path().into()).unwrap();
+        (temp, app)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_timer_is_superseded_by_later_usage() {
+        if !crate::test_support::in_isolated_process(
+            "chat::codex_server::tests::idle_timer_is_superseded_by_later_usage",
+        ) {
+            return;
+        }
+        let (temp, app) = temp_app();
+        start_fake_server(&app, temp.path(), "");
+        IDLE_TIMEOUT_MS.store(1_000, Ordering::SeqCst);
+        let ms = std::time::Duration::from_millis;
+
+        ensure_running(&app).unwrap();
+        release_usage(); // timer A due at ~1000ms
+        std::thread::sleep(ms(600));
+        ensure_running(&app).unwrap();
+        release_usage(); // timer B due at ~1600ms
+
+        std::thread::sleep(ms(700)); // ~1300ms: past timer A only
+        assert!(server_running(), "stale timer must not stop the server");
+
+        std::thread::sleep(ms(1_000)); // ~2300ms: past timer B
+        assert!(!server_running(), "latest timer stops the idle server");
+        assert_eq!(USAGE_COUNT.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_shutdown_keeps_server_while_tool_command_runs() {
+        if !crate::test_support::in_isolated_process(
+            "chat::codex_server::tests::idle_shutdown_keeps_server_while_tool_command_runs",
+        ) {
+            return;
+        }
+        let (temp, app) = temp_app();
+        let tool_pid_file = temp.path().join("tool.pid");
+        // Codex starts tool commands with setsid(); mimic a dev server left running.
+        start_fake_server(
+            &app,
+            temp.path(),
+            &format!(
+                "perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sleep 60 &\necho $! > '{}'",
+                tool_pid_file.display()
+            ),
+        );
+        IDLE_TIMEOUT_MS.store(300, Ordering::SeqCst);
+        let ms = std::time::Duration::from_millis;
+        std::thread::sleep(ms(200));
+        let tool_pid: u32 = std::fs::read_to_string(&tool_pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        ensure_running(&app).unwrap();
+        release_usage();
+        std::thread::sleep(ms(1_000)); // several grace periods
+        let kept = server_running();
+        let tool_alive = is_process_alive(tool_pid);
+
+        let _ = crate::platform::kill_process(tool_pid);
+        std::thread::sleep(ms(1_000));
+        let stopped_after_tool_exit = !server_running();
+        if !stopped_after_tool_exit {
+            shutdown_server();
+        }
+
+        assert!(kept, "server with a running tool command must be kept");
+        assert!(tool_alive, "tool command must not be killed");
+        assert!(
+            stopped_after_tool_exit,
+            "server stops once the tool command has exited"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn goal_commands_release_codex_usage() {
+        if !crate::test_support::in_isolated_process(
+            "chat::codex_server::tests::goal_commands_release_codex_usage",
+        ) {
+            return;
+        }
+        let (temp, app) = temp_app();
+        start_fake_server(&app, temp.path(), "");
+        let worktree_id = "worktree-goal";
+        let worktree_path = temp.path().to_string_lossy().to_string();
+        let mut session = super::super::types::Session::new(
+            "Goal".to_string(),
+            0,
+            super::super::types::Backend::Codex,
+        );
+        session.codex_thread_id = Some("thread-goal".to_string());
+        let session_id = session.id.clone();
+        super::super::storage::with_sessions_mut(&app, &worktree_path, worktree_id, |sessions| {
+            sessions.sessions.push(session);
+            Ok(())
+        })
+        .unwrap();
+        let args = || {
+            (
+                app.clone(),
+                worktree_id.to_string(),
+                worktree_path.clone(),
+                session_id.clone(),
+            )
+        };
+
+        let (a, w, p, s) = args();
+        super::super::codex_goal_set(a, w, p, s, "Ship it".to_string()).unwrap();
+        assert_eq!(USAGE_COUNT.load(Ordering::SeqCst), 0, "goal set");
+
+        let (a, w, p, s) = args();
+        super::super::codex_goal_get(a, w, p, s).unwrap();
+        assert_eq!(USAGE_COUNT.load(Ordering::SeqCst), 0, "goal get");
+
+        let (a, w, p, s) = args();
+        assert!(super::super::codex_goal_clear(a, w, p, s).is_err());
+        assert_eq!(
+            USAGE_COUNT.load(Ordering::SeqCst),
+            0,
+            "goal clear error path"
+        );
+
+        shutdown_server();
     }
 }

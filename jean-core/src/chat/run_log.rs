@@ -118,10 +118,33 @@ impl RunLogWriter {
 
     /// Mark the run as cancelled and update the metadata.
     /// If a `claude_session_id` is provided, persist it so the next run can resume context.
+    ///
+    /// This is the undo-send path: a cancelled run with no assistant id is hidden
+    /// from history. Provider rejections use [`Self::reject_without_output`].
     pub fn cancel(
         &mut self,
         assistant_message_id: Option<&str>,
         claude_session_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.finish_cancelled(assistant_message_id, claude_session_id, false)
+    }
+
+    /// Persist a provider rejection that produced no assistant output.
+    ///
+    /// The user request stays on the run and remains visible in history and
+    /// provider-switch handoff. API/MCP sessions have no composer to restore
+    /// into, so this is what a later backend switch reads. Explicit
+    /// cancel/undo-send must keep using [`Self::cancel`] so withdrawn text is
+    /// not put back into context.
+    pub fn reject_without_output(&mut self) -> Result<(), String> {
+        self.finish_cancelled(None, None, true)
+    }
+
+    fn finish_cancelled(
+        &mut self,
+        assistant_message_id: Option<&str>,
+        claude_session_id: Option<&str>,
+        provider_rejected: bool,
     ) -> Result<(), String> {
         let now = now_timestamp();
         let run_id = self.run_id.clone();
@@ -141,6 +164,7 @@ impl RunLogWriter {
                     run.status = RunStatus::Cancelled;
                     run.ended_at = Some(now);
                     run.cancelled = true;
+                    run.provider_rejected = provider_rejected;
                     run.assistant_message_id = asst_id;
                     run.claude_session_id = claude_sid.clone();
                 }
@@ -169,7 +193,11 @@ impl RunLogWriter {
             }
         }
 
-        log::trace!("Run cancelled: {}", self.run_id);
+        if provider_rejected {
+            log::trace!("Run rejected before output: {}", self.run_id);
+        } else {
+            log::trace!("Run cancelled: {}", self.run_id);
+        }
         Ok(())
     }
 
@@ -360,6 +388,8 @@ fn reconcile_completed_running_runs(
     let mut reconciled = false;
     let mut claude_session_id = metadata.claude_session_id.clone();
     let mut kimi_session_id = metadata.kimi_session_id.clone();
+    let mut muse_session_id = metadata.muse_session_id.clone();
+    let mut devin_session_id = metadata.devin_session_id.clone();
 
     for run in &mut metadata.runs {
         if run.status != RunStatus::Running || !has_result(&run.run_id) {
@@ -372,12 +402,26 @@ fn reconcile_completed_running_runs(
         if run.assistant_message_id.is_none() {
             run.assistant_message_id = Some(Uuid::new_v4().to_string());
         }
-        if run.backend.as_ref().unwrap_or(&metadata_backend) == &Backend::Kimi {
+        if run_uses_devin_history_parser(&metadata_backend, run) {
+            if run.devin_session_id.is_none() {
+                run.devin_session_id = extract_provider_session_id(&run.run_id);
+            }
+            if let Some(session_id) = run.devin_session_id.clone() {
+                devin_session_id = Some(session_id);
+            }
+        } else if run.backend.as_ref().unwrap_or(&metadata_backend) == &Backend::Kimi {
             if run.kimi_session_id.is_none() {
                 run.kimi_session_id = extract_provider_session_id(&run.run_id);
             }
             if let Some(session_id) = run.kimi_session_id.clone() {
                 kimi_session_id = Some(session_id);
+            }
+        } else if run.backend.as_ref().unwrap_or(&metadata_backend) == &Backend::Muse {
+            if run.muse_session_id.is_none() {
+                run.muse_session_id = extract_provider_session_id(&run.run_id);
+            }
+            if let Some(session_id) = run.muse_session_id.clone() {
+                muse_session_id = Some(session_id);
             }
         } else {
             if run.claude_session_id.is_none() {
@@ -393,6 +437,8 @@ fn reconcile_completed_running_runs(
     if reconciled {
         metadata.claude_session_id = claude_session_id;
         metadata.kimi_session_id = kimi_session_id;
+        metadata.muse_session_id = muse_session_id;
+        metadata.devin_session_id = devin_session_id;
         metadata.is_reviewing = false;
         if metadata.status_override.as_deref() == Some("review") {
             metadata.status_override = None;
@@ -529,6 +575,7 @@ pub fn start_run(
         status: RunStatus::Running,
         assistant_message_id: None,
         cancelled: false,
+        provider_rejected: false,
         recovered: false,
         claude_session_id: None,
         pid: None,   // Set later via set_pid() after spawning detached process
@@ -538,7 +585,9 @@ pub fn start_run(
         cursor_chat_id: None,
         grok_session_id: None,
         kimi_session_id: None,
+        devin_session_id: None,
         antigravity_session_id: None,
+        muse_session_id: None,
         checkpoint_id: None,
     };
 
@@ -1397,7 +1446,9 @@ fn should_inject_synthetic_exit_plan(
         | Backend::Pi
         | Backend::Commandcode
         | Backend::Kimi
-        | Backend::Antigravity => base_match,
+        | Backend::Devin
+        | Backend::Antigravity
+        | Backend::Muse => base_match,
         // Grok owns live injection in grok.rs; recover plan tool on history reload
         // only when assistant text looks like a real plan (not research preamble).
         Backend::Grok => {
@@ -1435,6 +1486,14 @@ fn inject_synthetic_exit_plan(backend: &Backend, run_id: &str, assistant_msg: &m
                 "source": "codex",
             }),
         )
+    } else if matches!(backend, Backend::Devin) {
+        (
+            "ExitPlanMode",
+            serde_json::json!({
+                "plan": assistant_msg.content,
+                "source": "devin",
+            }),
+        )
     } else if matches!(backend, Backend::Kimi) {
         (
             "ExitPlanMode",
@@ -1449,6 +1508,14 @@ fn inject_synthetic_exit_plan(backend: &Backend, run_id: &str, assistant_msg: &m
             serde_json::json!({
                 "plan": assistant_msg.content,
                 "source": "antigravity",
+            }),
+        )
+    } else if matches!(backend, Backend::Muse) {
+        (
+            "ExitPlanMode",
+            serde_json::json!({
+                "plan": assistant_msg.content,
+                "source": "muse",
             }),
         )
     } else if matches!(backend, Backend::Grok) {
@@ -1569,6 +1636,21 @@ fn run_uses_kimi_history_parser(metadata_backend: &Backend, run: &RunEntry) -> b
         || (run.model.is_none() && metadata_backend == &Backend::Kimi)
 }
 
+fn run_can_resume_process(metadata_backend: &Backend, run: &RunEntry, process_alive: bool) -> bool {
+    // Devin has an attached ACP process, not a host that Jean can reconnect to.
+    process_alive && !run_uses_devin_history_parser(metadata_backend, run)
+}
+
+fn run_uses_devin_history_parser(metadata_backend: &Backend, run: &RunEntry) -> bool {
+    if let Some(backend) = run.backend.as_ref() {
+        return backend == &Backend::Devin;
+    }
+    run.model
+        .as_deref()
+        .map(crate::is_devin_model)
+        .unwrap_or(metadata_backend == &Backend::Devin)
+}
+
 fn run_uses_antigravity_history_parser(metadata_backend: &Backend, run: &RunEntry) -> bool {
     run.backend.as_ref() == Some(&Backend::Antigravity)
         || run
@@ -1576,6 +1658,12 @@ fn run_uses_antigravity_history_parser(metadata_backend: &Backend, run: &RunEntr
             .as_deref()
             .is_some_and(|model| model.starts_with("antigravity/"))
         || (run.model.is_none() && metadata_backend == &Backend::Antigravity)
+}
+
+fn run_uses_muse_history_parser(metadata_backend: &Backend, run: &RunEntry) -> bool {
+    run.backend.as_ref() == Some(&Backend::Muse)
+        || run.model.as_deref().is_some_and(crate::is_muse_model)
+        || (run.model.is_none() && metadata_backend == &Backend::Muse)
 }
 
 fn cancelled_codex_run_has_visible_artifacts(
@@ -1729,7 +1817,9 @@ pub fn load_session_messages_window(
             // Per-run model is authoritative when present. Only fall back to
             // session-level metadata.backend for legacy runs with no model stored.
             let use_codex_parser = run_uses_codex_history_parser(&metadata.backend, run);
-            let parse_result = if use_codex_parser {
+            let parse_result = if run_uses_devin_history_parser(&metadata.backend, run) {
+                super::devin::parse_devin_run_to_message(&lines, run)
+            } else if use_codex_parser {
                 super::codex::parse_codex_run_to_message(&lines, run)
             } else if run_uses_pi_history_parser(&metadata.backend, run) {
                 super::pi::parse_pi_run_to_message(&lines, run)
@@ -1739,6 +1829,8 @@ pub fn load_session_messages_window(
                 super::kimi::parse_kimi_run_to_message(&lines, run)
             } else if run_uses_antigravity_history_parser(&metadata.backend, run) {
                 super::antigravity::parse_antigravity_run_to_message(&lines, run)
+            } else if run_uses_muse_history_parser(&metadata.backend, run) {
+                super::muse::parse_muse_run_to_message(&lines, run)
             } else {
                 parse_run_to_message(&lines, run)
             };
@@ -1852,6 +1944,21 @@ mod tests {
     use super::*;
     use crate::chat::types::SessionMetadata;
 
+    #[test]
+    fn backend_session_id_ignores_run_header() {
+        let header_only = r#"{"_run_meta":true,"session_id":"jean-session","run_id":"r1"}"#;
+        assert_eq!(last_backend_session_id(header_only.as_bytes()), None);
+
+        let with_result = format!(
+            "{header_only}\n{}\n",
+            r#"{"type":"result","session_id":"claude-session"}"#
+        );
+        assert_eq!(
+            last_backend_session_id(with_result.as_bytes()).as_deref(),
+            Some("claude-session")
+        );
+    }
+
     fn sample_run() -> RunEntry {
         RunEntry {
             run_id: "run-123".to_string(),
@@ -1868,6 +1975,7 @@ mod tests {
             status: RunStatus::Completed,
             assistant_message_id: Some("assistant-123".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -1877,9 +1985,90 @@ mod tests {
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         }
+    }
+
+    #[test]
+    fn attached_devin_process_is_not_resumable_after_restart() {
+        let mut run = sample_run();
+        run.backend = Some(Backend::Devin);
+        assert!(!run_can_resume_process(&Backend::Devin, &run, true));
+        assert!(!run_can_resume_process(&Backend::Devin, &run, false));
+        run.backend = Some(Backend::Codex);
+        assert!(run_can_resume_process(&Backend::Devin, &run, true));
+        assert!(!run_can_resume_process(&Backend::Devin, &run, false));
+    }
+
+    #[test]
+    fn devin_history_parser_respects_run_backend_before_model_and_session() {
+        let mut run = sample_run();
+        run.backend = Some(Backend::Devin);
+        assert!(run_uses_devin_history_parser(&Backend::Claude, &run));
+        run.backend = Some(Backend::Claude);
+        run.model = Some("devin/default".to_string());
+        assert!(!run_uses_devin_history_parser(&Backend::Devin, &run));
+        run.backend = None;
+        assert!(run_uses_devin_history_parser(&Backend::Claude, &run));
+        run.model = Some("sonnet".to_string());
+        assert!(!run_uses_devin_history_parser(&Backend::Devin, &run));
+        run.model = None;
+        assert!(run_uses_devin_history_parser(&Backend::Devin, &run));
+    }
+
+    #[test]
+    fn reconciled_devin_run_restores_devin_not_claude_session_id() {
+        let mut metadata = SessionMetadata::new(
+            "session".to_string(),
+            "worktree".to_string(),
+            "Devin".to_string(),
+            0,
+        );
+        let mut run = sample_run();
+        run.backend = Some(Backend::Devin);
+        run.status = RunStatus::Running;
+        metadata.runs.push(run);
+        reconcile_completed_running_runs(
+            &mut metadata,
+            42,
+            |_| true,
+            |_| Some("devin-session".to_string()),
+        );
+        assert_eq!(metadata.devin_session_id.as_deref(), Some("devin-session"));
+        assert_eq!(
+            metadata.runs[0].devin_session_id.as_deref(),
+            Some("devin-session")
+        );
+        assert!(metadata.claude_session_id.is_none());
+    }
+
+    #[test]
+    fn restores_devin_plan_approval_only_after_success() {
+        let mut run = sample_run();
+        let mut message = sample_assistant_message();
+        assert!(should_inject_synthetic_exit_plan(
+            &Backend::Devin,
+            &run,
+            &message
+        ));
+        run.status = RunStatus::Cancelled;
+        assert!(!should_inject_synthetic_exit_plan(
+            &Backend::Devin,
+            &run,
+            &message
+        ));
+        run.status = RunStatus::Completed;
+        inject_synthetic_exit_plan(&Backend::Devin, &run.run_id, &mut message);
+        assert_eq!(message.tool_calls[0].input["source"], "devin");
+        assert_eq!(message.tool_calls[0].input["plan"], message.content);
+        assert!(!should_inject_synthetic_exit_plan(
+            &Backend::Devin,
+            &run,
+            &message
+        ));
     }
 
     #[test]
@@ -2162,6 +2351,31 @@ mod tests {
     }
 
     #[test]
+    fn muse_history_uses_msp_parser_and_recovers_plan_tool() {
+        let mut run = sample_run();
+        run.backend = Some(Backend::Muse);
+        run.model = Some("muse/default".to_string());
+        run.execution_mode = Some("plan".to_string());
+        let lines = vec![
+            r#"{"type":"session","session_id":"muse-1"}"#.to_string(),
+            r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"itemId":"m","kind":"agentMessage","status":"completed","text":"1. Inspect"}}}"#.to_string(),
+            r#"{"type":"result","session_id":"muse-1","cancelled":false}"#.to_string(),
+        ];
+        assert!(run_uses_muse_history_parser(&Backend::Muse, &run));
+        let mut msg = super::super::muse::parse_muse_run_to_message(&lines, &run)
+            .expect("Muse history message");
+        assert_eq!(msg.content, "1. Inspect");
+        assert!(should_inject_synthetic_exit_plan(
+            &Backend::Muse,
+            &run,
+            &msg
+        ));
+        inject_synthetic_exit_plan(&Backend::Muse, &run.run_id, &mut msg);
+        assert_eq!(msg.tool_calls[0].name, "ExitPlanMode");
+        assert_eq!(msg.tool_calls[0].input["source"], "muse");
+    }
+
+    #[test]
     fn injects_synthetic_exit_plan_for_recovered_antigravity_plan_runs() {
         let run = sample_run();
         let mut msg = sample_assistant_message();
@@ -2399,6 +2613,59 @@ Move services between instances without downtime.
             &message.content_blocks[2],
             ContentBlock::Text { text } if text == "done"
         ));
+    }
+
+    #[test]
+    fn jsonl_tail_completion_requires_host_exit_for_host_backed_runs() {
+        let lines = |v: &[&str]| {
+            v.iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        let result = r#"{"type":"result","subtype":"success"}"#;
+        let exit = r#"{"type":"jean_claude_host_exit","code":0}"#;
+
+        // Plain runs: the first result is enough.
+        assert!(jsonl_tail_shows_completion(lines(&[result]), false));
+        // Host-backed: a result with a pending steer is not done yet.
+        assert!(!jsonl_tail_shows_completion(lines(&[result]), true));
+        assert!(jsonl_tail_shows_completion(lines(&[result, exit]), true));
+        // Host exited without a result: not completed.
+        assert!(!jsonl_tail_shows_completion(lines(&[exit]), true));
+    }
+
+    #[test]
+    fn parse_run_handles_claude_host_log_without_duplicate_prompt() {
+        let run = sample_run();
+        // Host-backed Claude run: the host drops the replayed initial prompt
+        // and rewrites the steer echo, then adds its own marker lines.
+        let lines = vec![
+            r#"{"_run_meta":true}"#.to_string(),
+            r#"{"type":"jean_claude_host_start"}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#
+                .to_string(),
+            r#"{"type":"steered_user_message","text":"also echo"}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#
+                .to_string(),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1}}"#.to_string(),
+            r#"{"type":"jean_claude_host_exit","code":0}"#.to_string(),
+        ];
+
+        let message = parse_run_to_message(&lines, &run).unwrap();
+
+        let user_inputs: Vec<_> = message
+            .content_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::UserInput { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_inputs, vec!["also echo"]);
+        assert!(!message.content.contains(&run.user_message));
+        assert!(message.content.contains("working"));
+        assert!(message.content.contains("done"));
     }
 
     #[test]
@@ -2846,6 +3113,7 @@ Move services between instances without downtime.
             status: RunStatus::Cancelled,
             assistant_message_id: Some("assistant-compact".to_string()),
             cancelled: true,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -2855,7 +3123,9 @@ Move services between instances without downtime.
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
 
@@ -3209,7 +3479,7 @@ pub fn recover_incomplete_runs(app: &tauri::AppHandle) -> Result<Vec<RecoveredRu
             if run.status == RunStatus::Running || run.status == RunStatus::Resumable {
                 let process_alive = run.pid.map(is_process_alive).unwrap_or(false);
 
-                if process_alive {
+                if run_can_resume_process(&metadata_backend, run, process_alive) {
                     run.status = RunStatus::Resumable;
                     modified = true;
 
@@ -3230,7 +3500,7 @@ pub fn recover_incomplete_runs(app: &tauri::AppHandle) -> Result<Vec<RecoveredRu
                         run.pid
                     );
                 } else {
-                    // Process is dead - check if it completed successfully.
+                    // No resumable process - check if the run completed successfully.
                     // A Grok cancel marker is `type:result` plus `cancelled:true`.
                     // That is not a successful completion: keep the partial reply
                     // and mark the run cancelled instead of "content was not captured".
@@ -3250,9 +3520,19 @@ pub fn recover_incomplete_runs(app: &tauri::AppHandle) -> Result<Vec<RecoveredRu
                         if let Some(sid) =
                             extract_session_id_from_jsonl(app, &session_id, &run.run_id)
                         {
-                            if run.backend.as_ref().unwrap_or(&metadata_backend) == &Backend::Kimi {
+                            if run_uses_devin_history_parser(&metadata_backend, run) {
+                                run.devin_session_id = Some(sid.clone());
+                                metadata.devin_session_id = Some(sid);
+                            } else if run.backend.as_ref().unwrap_or(&metadata_backend)
+                                == &Backend::Kimi
+                            {
                                 run.kimi_session_id = Some(sid.clone());
                                 metadata.kimi_session_id = Some(sid);
+                            } else if run.backend.as_ref().unwrap_or(&metadata_backend)
+                                == &Backend::Muse
+                            {
+                                run.muse_session_id = Some(sid.clone());
+                                metadata.muse_session_id = Some(sid);
                             } else if run.claude_session_id.is_none() {
                                 run.claude_session_id = Some(sid.clone());
                                 metadata.claude_session_id = Some(sid);
@@ -3336,6 +3616,8 @@ pub fn recover_incomplete_runs(app: &tauri::AppHandle) -> Result<Vec<RecoveredRu
 
 /// Check if a run's JSONL file contains a "type":"result" line,
 /// indicating the CLI process completed successfully (vs crashing).
+/// Host-backed Claude runs also need the host exit marker: a pending steer
+/// can start another turn after a `result`.
 pub fn jsonl_has_result_line(app: &tauri::AppHandle, session_id: &str, run_id: &str) -> bool {
     let session_dir = match get_session_dir(app, session_id) {
         Ok(d) => d,
@@ -3347,38 +3629,49 @@ pub fn jsonl_has_result_line(app: &tauri::AppHandle, session_id: &str, run_id: &
         Err(_) => return false,
     };
 
+    // The Claude host writes its start marker right after the `_run_meta` header.
+    let host_backed = BufReader::new(&file)
+        .lines()
+        .take(2)
+        .map_while(Result::ok)
+        .any(|line| {
+            super::claude_host::host_marker_type(&line) == Some(super::claude_host::HOST_START_TYPE)
+        });
+
     // Read from the end — the result line is always the last line.
     // For efficiency, read the last 8KB which is more than enough for the result JSON.
+    use std::io::{Seek, SeekFrom};
+    let mut file = file;
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let reader = if file_len > 8192 {
-        use std::io::{Seek, SeekFrom};
-        let mut f = file;
-        let _ = f.seek(SeekFrom::End(-8192));
-        BufReader::new(f)
-    } else {
-        BufReader::new(file)
-    };
+    let _ = file.seek(SeekFrom::End(-(file_len.min(8192) as i64)));
+    let tail = BufReader::new(file).lines().map_while(Result::ok);
+    jsonl_tail_shows_completion(tail, host_backed)
+}
 
+fn jsonl_tail_shows_completion(lines: impl Iterator<Item = String>, host_backed: bool) -> bool {
     // Prefer error over result: legacy Grok ACP hosts wrote both, and salvaging
     // those as completed produced empty "content was not captured" runs (#580).
     // A cancelled result is not success either — see jsonl_line_is_cancelled_result.
     let mut has_result = false;
     let mut has_error = false;
-    for line in reader.lines() {
-        if let Ok(line) = line {
-            if jsonl_line_is_cancelled_result(&line) {
-                continue;
-            }
-            // Compact JSON from serde_json::json! uses no space after `:`.
-            if line.contains("\"type\":\"error\"") {
-                has_error = true;
-            }
-            if line.contains("\"type\":\"result\"") {
-                has_result = true;
-            }
+    let mut host_exited = false;
+    for line in lines {
+        if jsonl_line_is_cancelled_result(&line) {
+            continue;
+        }
+        if super::claude_host::host_marker_type(&line) == Some(super::claude_host::HOST_EXIT_TYPE) {
+            host_exited = true;
+            continue;
+        }
+        // Compact JSON from serde_json::json! uses no space after `:`.
+        if line.contains("\"type\":\"error\"") {
+            has_error = true;
+        }
+        if line.contains("\"type\":\"result\"") {
+            has_result = true;
         }
     }
-    has_result && !has_error
+    has_result && !has_error && (host_exited || !host_backed)
 }
 
 /// True when the run log ends in a Grok/Kimi cancel marker rather than success.
@@ -3428,7 +3721,7 @@ pub(crate) fn jsonl_line_is_cancelled_result(line: &str) -> bool {
         || line.contains("\"canceled\": true")
 }
 
-/// Extract the Claude session ID from a run's JSONL file.
+/// Extract the provider session ID from a run's JSONL file.
 /// Looks for the `"session_id"` field in the result line (last ~8KB of file).
 /// Returns None if the file doesn't exist, can't be read, or has no session ID.
 pub fn extract_session_id_from_jsonl(
@@ -3451,18 +3744,26 @@ pub fn extract_session_id_from_jsonl(
         BufReader::new(file)
     };
 
+    last_backend_session_id(reader)
+}
+
+/// Last non-empty `session_id` in run JSONL lines, ignoring Jean's run header.
+fn last_backend_session_id(reader: impl BufRead) -> Option<String> {
     let mut last_session_id = None;
-    for line in reader.lines().flatten() {
-        // Look for session_id in JSON lines (typically in result or system lines)
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(sid) = val.get("session_id").and_then(|v| v.as_str()) {
-                if !sid.is_empty() {
-                    last_session_id = Some(sid.to_string());
-                }
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        // The run header carries Jean's own session id, never a backend resume id.
+        if val.get("_run_meta").is_some() {
+            continue;
+        }
+        if let Some(sid) = val.get("session_id").and_then(|v| v.as_str()) {
+            if !sid.is_empty() {
+                last_session_id = Some(sid.to_string());
             }
         }
     }
-
     last_session_id
 }
 

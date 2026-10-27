@@ -107,8 +107,9 @@ describe('SessionChatModal removal behavior', () => {
       start === -1 || end === -1 ? '' : source.slice(start, end)
 
     expect(removeSessionTab).toContain('needsConfirm')
-    expect(removeSessionTab).toContain(
-      'preferences?.confirm_session_close !== false && !sessionIsEmpty'
+    // Tolerate Prettier's line breaks in the inlined gate.
+    expect(removeSessionTab).toMatch(
+      /preferences\?\.confirm_session_close !== false &&\s*!sessionIsEmpty/
     )
     // Confirm gate wraps the action for every non-empty tab (not only last).
     expect(removeSessionTab).toMatch(
@@ -277,11 +278,19 @@ describe('SessionChatModal removal behavior', () => {
 
   it('offers to open resumable chat sessions in a separate native client session', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
+    const menuSource = readSource(
+      'src/components/chat/SessionContextMenuItems.tsx'
+    )
+    const hookSource = readSource(
+      'src/components/chat/hooks/useOpenInNativeClient.ts'
+    )
 
-    expect(source).toContain('buildNativeClientSessionInput')
+    expect(source).toContain('useOpenInNativeClient(worktreeId, worktreePath)')
     expect(source).toContain('handleOpenInNativeClient')
-    expect(source).toContain('Open in Native Client')
-    expect(source).toMatch(
+    expect(source).toContain('<SessionContextMenuItems')
+    expect(menuSource).toContain('Open in Native Client')
+    expect(hookSource).toContain('buildNativeClientSessionInput')
+    expect(hookSource).toMatch(
       /reconnectNativeCliSession\(nativeSession, worktreeId, \{[\s\S]*?openModal: false/
     )
   })

@@ -102,8 +102,13 @@ function setupHook({
     msgs: ChatMessage[]
     sending: boolean
   }) {
-    const { isAtBottom, scrollViewportRef, handleScroll, stopFollowingTail } =
-      useScrollManagement({
+    const {
+      isAtBottom,
+      scrollViewportRef,
+      handleScroll,
+      stopFollowingTail,
+      scrollToBottom,
+    } = useScrollManagement({
         messages: msgs,
         virtualizedListRef,
         activeSessionId: sessionId,
@@ -124,6 +129,7 @@ function setupHook({
       >
         <span data-testid="is-at-bottom">{String(isAtBottom)}</span>
         <button data-testid="stop-follow" onClick={stopFollowingTail} />
+        <button data-testid="scroll-bottom" onClick={() => scrollToBottom()} />
         <div data-testid="content">
           <div data-plan-display data-testid="plan" />
         </div>
@@ -388,6 +394,50 @@ describe('useScrollManagement streaming auto-scroll', () => {
 
     fireEvent.scroll(viewport)
 
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+  })
+
+  it('keeps the bottom action hidden when an upward wheel does not move the viewport', () => {
+    const { getByTestId, viewport } = setupHook({ isSending: false })
+    viewport.scrollTop = 1600
+
+    act(() => {
+      viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
+    })
+
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+  })
+
+  it('stays pinned to the tail when content grows after streaming', async () => {
+    const { getByTestId, viewport, setScrollHeight } = setupHook({
+      isSending: false,
+    })
+    viewport.scrollTop = 1600
+    fireEvent.scroll(viewport)
+
+    setScrollHeight(2100)
+    await triggerResize()
+
+    expect(viewport.scrollTop).toBe(2100)
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+  })
+
+  it('hides the bottom action after a smooth scroll that overlapped a resize', async () => {
+    const { getByTestId, viewport, setScrollHeight } = setupHook({
+      isSending: false,
+    })
+    viewport.scrollTop = 1000
+    fireEvent.scroll(viewport)
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('false')
+
+    fireEvent.click(getByTestId('scroll-bottom'))
+    setScrollHeight(2500)
+    await triggerResize()
+    act(() => {
+      viewport.dispatchEvent(new Event('scrollend'))
+    })
+
+    expect(viewport.scrollTop).toBe(2500)
     expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
   })
 })

@@ -9,6 +9,7 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { TaskCallDetails } from './ToolCallInline'
+import { formatSubagentModel } from './hooks/useActiveTodosAndAgents'
 import { formatTokens } from '@/lib/session-debug'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useVisibilityAwareTicker } from '@/hooks/useVisibilityAwareTicker'
@@ -121,9 +122,10 @@ export function AgentWidget({
 
 /**
  * Tool count, tokens, and elapsed time. Ticks on its own so the per-second
- * update does not re-render the row and its expanded tool calls.
+ * update does not re-render the row and its expanded tool calls. Mobile shows
+ * only the bare token number and time so the model label stays visible.
  */
-function AgentMeta({ agent }: { agent: SubAgent }) {
+function AgentMeta({ agent, compact }: { agent: SubAgent; compact: boolean }) {
   const isDone = agent.status !== 'in_progress'
   const [now, setNow] = useState(() => Date.now())
   const updateNow = useCallback(() => setNow(Date.now()), [])
@@ -137,10 +139,13 @@ function AgentMeta({ agent }: { agent: SubAgent }) {
     ? (agent.durationMs ?? clientMs)
     : Math.max(clientMs ?? 0, agent.durationMs ?? 0) || undefined
   const meta = [
-    agent.toolCount
+    agent.model ? formatSubagentModel(agent.model) : null,
+    !compact && agent.toolCount
       ? `${agent.toolCount} tool${agent.toolCount === 1 ? '' : 's'}`
       : null,
-    agent.tokens ? `${formatTokens(agent.tokens)} tokens` : null,
+    agent.tokens
+      ? `${formatTokens(agent.tokens)}${compact ? '' : ' tokens'}`
+      : null,
     elapsedMs !== undefined ? formatAgentElapsed(elapsedMs) : null,
   ].filter(Boolean)
 
@@ -198,13 +203,15 @@ const AgentItem = memo(function AgentItem({
               <>
                 <span
                   className={cn(
-                    'font-semibold',
-                    isMobile ? 'max-w-24 truncate' : 'shrink-0'
+                    'shrink-0 font-semibold',
+                    isMobile && 'max-w-24 truncate'
                   )}
                 >
                   {agent.label}
                 </span>
-                <span className="shrink-0 text-muted-foreground/60">›</span>
+                {agent.prompt ? (
+                  <span className="shrink-0 text-muted-foreground/60">›</span>
+                ) : null}
               </>
             )}
             <span className="truncate text-muted-foreground">
@@ -216,7 +223,7 @@ const AgentItem = memo(function AgentItem({
               )}
             </span>
           </span>
-          <AgentMeta agent={agent} />
+          <AgentMeta agent={agent} compact={isMobile} />
           <ChevronRight
             className={cn(
               'h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-200',

@@ -228,4 +228,21 @@ describe('eventToShortcutString', () => {
 
     expect(Object.fromEntries(definitions)).toEqual(DEFAULT_KEYBINDINGS)
   })
+
+  it('keeps Full access approval off the redo chord and unique among defaults', () => {
+    expect(DEFAULT_KEYBINDINGS.approve_plan_yolo).toBe('mod+shift+alt+y')
+    const shortcuts = Object.values(DEFAULT_KEYBINDINGS).filter(Boolean)
+    expect(new Set(shortcuts).size).toBe(shortcuts.length)
+    expect(shortcuts).not.toContain('mod+y')
+  })
+})
+
+describe('close session keybinding description', () => {
+  it('describes the current close behavior instead of the old project picker', () => {
+    const definition = KEYBINDING_DEFINITIONS.find(
+      d => d.action === 'close_session_or_worktree'
+    )
+    expect(definition?.description).not.toMatch(/project picker/i)
+    expect(definition?.description).toMatch(/selected worktree/)
+  })
 })

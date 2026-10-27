@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { MessageItem } from './MessageItem'
+import { formatLocalTime } from './time-utils'
 import type {
   ChatMessage,
   ReviewFinding,
@@ -459,6 +460,42 @@ describe('MessageItem', () => {
     expect(screen.getByText('Raptors')).toBeVisible()
   })
 
+  it('renders inline numbered questions as options that send the answer', async () => {
+    const user = userEvent.setup()
+    const onSendAnswer = vi.fn()
+    const message: ChatMessage = {
+      id: 'assistant-question',
+      session_id: 'session-1',
+      role: 'assistant',
+      content:
+        'Which layout?\n\nReply with a number:\n\n1. Grid\n2. List\n\n## Recap\n\n- Waiting for your choice.',
+      timestamp: 1,
+      tool_calls: [],
+    }
+    const { rerender } = render(
+      <MessageItem
+        {...baseProps}
+        message={message}
+        onSendAnswer={onSendAnswer}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /^2\.\s?List$/ }))
+    expect(onSendAnswer).toHaveBeenCalledWith('2. List')
+
+    rerender(
+      <MessageItem
+        {...baseProps}
+        message={message}
+        hasFollowUpMessage
+        onSendAnswer={onSendAnswer}
+      />
+    )
+    expect(
+      screen.queryByRole('button', { name: /^2\.\s?List$/ })
+    ).not.toBeInTheDocument()
+  })
+
   it('renders assistant duration in mm:ss format when minutes are non-zero', () => {
     render(<MessageItem {...baseProps} durationMs={145_000} />)
 
@@ -469,6 +506,81 @@ describe('MessageItem', () => {
     render(<MessageItem {...baseProps} durationMs={23_000} />)
 
     expect(screen.getByText('23s')).toBeVisible()
+  })
+
+  it('keeps the local receive time hidden until the assistant message is hovered', () => {
+    const timestamp = 1_700_000_000
+    render(
+      <MessageItem
+        {...baseProps}
+        durationMs={23_000}
+        message={{
+          ...baseMessage,
+          content: 'Done.',
+          timestamp,
+          tool_calls: [],
+          content_blocks: [{ type: 'text', text: 'Done.' }],
+        }}
+      />
+    )
+
+    const receiveTime = screen.getByText(
+      (_, element) =>
+        element?.textContent === ` · ${formatLocalTime(timestamp)}`
+    )
+
+    expect(receiveTime).toHaveClass(
+      'opacity-0',
+      '[@media(pointer:fine)]:group-hover/message:opacity-100'
+    )
+    expect(receiveTime.closest('[class~="group/message"]')).not.toBeNull()
+    expect(screen.getByText('23s').parentElement).toContainElement(receiveTime)
+  })
+
+  it('toggles the receive time when the duration is tapped', () => {
+    const timestamp = 1_700_000_000
+    render(
+      <MessageItem
+        {...baseProps}
+        durationMs={23_000}
+        message={{
+          ...baseMessage,
+          content: 'Done.',
+          timestamp,
+          tool_calls: [],
+          content_blocks: [{ type: 'text', text: 'Done.' }],
+        }}
+      />
+    )
+    const receiveTime = screen.getByText(
+      (_, element) =>
+        element?.textContent === ` · ${formatLocalTime(timestamp)}`
+    )
+
+    fireEvent.click(screen.getByText('23s'))
+    expect(receiveTime).not.toHaveClass('opacity-0')
+
+    fireEvent.click(screen.getByText('23s'))
+    expect(receiveTime).toHaveClass('opacity-0')
+  })
+
+  it('omits the receive time when the message has no timestamp', () => {
+    render(
+      <MessageItem
+        {...baseProps}
+        durationMs={23_000}
+        message={{
+          ...baseMessage,
+          content: 'Done.',
+          timestamp: 0,
+          tool_calls: [],
+          content_blocks: [{ type: 'text', text: 'Done.' }],
+        }}
+      />
+    )
+
+    expect(screen.getByText('23s')).toBeVisible()
+    expect(screen.queryByText(/·/)).not.toBeInTheDocument()
   })
 
   it('copies an assistant response to the clipboard', async () => {

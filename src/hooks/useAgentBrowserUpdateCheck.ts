@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { invoke } from '@/lib/transport'
+import { updateTargetLabel } from '@/lib/environment'
 import { queryClient } from '@/lib/query-client'
 import { invalidateAllMcpServers } from '@/services/mcp'
 import { usePreferences } from '@/services/preferences'
@@ -26,13 +27,14 @@ export function useAgentBrowserUpdateCheck() {
       if (checkedRef.current) return
       checkedRef.current = true
 
+      const name = `Agent Browser (${updateTargetLabel()})`
       try {
         const status = await invoke<AgentBrowserUpdateStatus>(
           'check_agent_browser_update'
         )
         if (!status.updateAvailable || !status.latestVersion) return
 
-        toast.info('Agent Browser update available', {
+        toast.info(`${name} update available`, {
           id: UPDATE_TOAST_ID,
           description: `${status.currentVersion ?? 'Installed version'} → ${status.latestVersion}`,
           duration: Infinity,
@@ -43,7 +45,7 @@ export function useAgentBrowserUpdateCheck() {
               // action buttons. Dismiss the confirmation and use a separate
               // progress toast so the click has immediate visible feedback.
               toast.dismiss(UPDATE_TOAST_ID)
-              const toastId = toast.loading('Updating Agent Browser…', {
+              const toastId = toast.loading(`Updating ${name}…`, {
                 id: UPDATE_PROGRESS_TOAST_ID,
                 duration: Infinity,
               })
@@ -53,9 +55,9 @@ export function useAgentBrowserUpdateCheck() {
                   await invoke('install_agent_browser_mcp')
                   queryClient.setQueryData(['agentBrowserStatus'], updated)
                   invalidateAllMcpServers()
-                  toast.success('Agent Browser updated', { id: toastId })
+                  toast.success(`${name} updated`, { id: toastId })
                 } catch (error) {
-                  toast.error(`Agent Browser update failed: ${error}`, {
+                  toast.error(`${name} update failed: ${error}`, {
                     id: toastId,
                   })
                 }

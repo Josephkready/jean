@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { FileIcon, FolderIcon, Loader2 } from '@/components/icons/reicon'
-import { invoke } from '@/lib/transport'
+import { invokeForOptionalServer } from '@/lib/transport'
 import {
   Dialog,
   DialogContent,
@@ -12,6 +12,7 @@ import { Markdown } from '@/components/ui/markdown'
 import { cn } from '@/lib/utils'
 import { getExtension, getExtensionColor } from '@/lib/file-colors'
 import { getFilename } from '@/lib/path-utils'
+import { usePreferences } from '@/services/preferences'
 import {
   Tooltip,
   TooltipTrigger,
@@ -34,6 +35,8 @@ interface FileMentionBadgeProps {
   sourceProjectName?: string
   /** Whether this is a directory mention */
   isDirectory?: boolean
+  /** Remote Jean server that owns the file; omitted for the active transport */
+  serverId?: string
 }
 
 function isAbsolutePath(path: string): boolean {
@@ -55,13 +58,17 @@ export function FileMentionBadge({
   sourceRootPath,
   sourceProjectName,
   isDirectory = false,
+  serverId,
 }: FileMentionBadgeProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [content, setContent] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { data: preferences } = usePreferences()
+  const showFullPath = preferences?.show_full_file_path ?? false
 
   const filename = getFilename(path)
+  const displayName = showFullPath ? path : filename
   const extension = getExtension(path)
 
   const handleOpen = useCallback(async () => {
@@ -79,9 +86,11 @@ export function FileMentionBadge({
         const absolutePath = isAbsolutePath(path)
           ? path
           : joinPath(sourceRootPath ?? worktreePath, path)
-        const fileContent = await invoke<string>('read_file_content', {
-          path: absolutePath,
-        })
+        const fileContent = await invokeForOptionalServer<string>(
+          serverId,
+          'read_file_content',
+          { path: absolutePath }
+        )
         setContent(fileContent)
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
@@ -89,7 +98,15 @@ export function FileMentionBadge({
         setIsLoading(false)
       }
     }
-  }, [content, isLoading, isDirectory, path, sourceRootPath, worktreePath])
+  }, [
+    content,
+    isLoading,
+    isDirectory,
+    path,
+    serverId,
+    sourceRootPath,
+    worktreePath,
+  ])
 
   return (
     <>
@@ -115,8 +132,13 @@ export function FileMentionBadge({
                 )}
               />
             )}
-            <span className="text-xs font-medium truncate max-w-[120px]">
-              {isDirectory ? `${filename}/` : filename}
+            <span
+              className={cn(
+                'text-xs font-medium truncate',
+                showFullPath ? 'max-w-[240px]' : 'max-w-[120px]'
+              )}
+            >
+              {isDirectory ? `${displayName}/` : displayName}
             </span>
           </button>
         </TooltipTrigger>

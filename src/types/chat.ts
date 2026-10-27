@@ -60,11 +60,38 @@ export type Backend =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'antigravity'
+  | 'muse'
 
 /** Wire-compatible execution policies. Plan remains a read-only workflow. */
 export type ExecutionMode = 'plan' | 'build' | 'yolo' | 'supervised' | 'auto'
 export type PermissionMode = Exclude<ExecutionMode, 'plan'>
+
+/**
+ * Full argument bundle passed to the `send_chat_message` mutation. Captured per
+ * session so a background re-send (e.g. auto-continue after a usage limit
+ * resets) can replay the exact send without the active-session UI.
+ */
+export interface SendMessageArgs {
+  sessionId: string
+  worktreeId: string
+  worktreePath: string
+  message: string
+  model?: string
+  executionMode?: ExecutionMode
+  thinkingLevel?: ThinkingLevel
+  effortLevel?: EffortLevel
+  parallelExecutionPrompt?: string
+  aiLanguage?: string
+  allowedTools?: string[]
+  mcpConfig?: string
+  chromeEnabled?: boolean
+  customProfileName?: string
+  backend?: string
+  /** When false, skip the end-of-turn recap instruction. */
+  includeRecap?: boolean
+}
 
 export function getSupportedPermissionModes(
   backend: Backend | undefined
@@ -171,7 +198,14 @@ export interface PlanToolInput {
   plan_preview?: string
   explanation?: string
   steps?: PlanStep[]
-  source?: 'claude' | 'codex' | 'grok' | 'kimi' | 'antigravity'
+  source?:
+    | 'claude'
+    | 'codex'
+    | 'grok'
+    | 'kimi'
+    | 'antigravity'
+    | 'muse'
+    | 'devin'
 }
 
 /**
@@ -292,8 +326,15 @@ export interface Session {
   grok_session_id?: string
   /** Kimi Code ACP session ID for resuming conversations */
   kimi_session_id?: string
+  /** Devin session ID for resuming conversations */
+  devin_session_id?: string
+  devin_location?: 'local' | 'cloud'
+  devin_config_options?: DevinConfigOption[] | null
+  devin_config_overrides?: Record<string, string>
   /** Antigravity CLI conversation ID used for conversation continuity. */
   antigravity_session_id?: string
+  /** Muse Code MSP session ID for resuming conversations */
+  muse_session_id?: string | null
   /** Selected model for this session */
   selected_model?: string
   /** Selected thinking level for this session */
@@ -1333,8 +1374,10 @@ export interface SubAgent {
   status: 'in_progress' | 'completed' | 'errored' | 'interrupted'
   /** Completion message from agents_states */
   message?: string
-  /** Bold label before the prompt (e.g. Claude subagent model or type) */
+  /** Bold label before the prompt (e.g. Claude subagent model or Codex codename) */
   label?: string
+  /** Model the agent runs on, when the backend reports one */
+  model?: string
   /** Number of tool calls the agent made (Claude only) */
   toolCount?: number
   /** Context tokens of the agent's latest API call (Claude only) */
@@ -1437,7 +1480,8 @@ export interface PendingTextFile {
   /**
    * Set when this chip holds rows picked from a chat table. `rows` are body
    * row indices in table order; `notes` maps a row index to the user's note
-   * for that row. In-memory only (not restored on restart).
+   * for that row. Persisted with UI state so the chip and table stay linked
+   * after a restart.
    */
   tableRows?: {
     tableKey: string
@@ -1513,6 +1557,8 @@ export interface PendingFile {
   extension: string
   /** Whether this is a directory mention */
   isDirectory: boolean
+  /** Uploaded attachment, not an @mention, so input edits do not remove it */
+  attached?: boolean
 }
 
 // ============================================================================
@@ -1871,4 +1917,17 @@ export interface LabelData {
   color: string
   /** Show this worktree label as a project-view filter tab when used in the current project */
   pinned?: boolean
+}
+
+/** ACP-advertised controls; Jean must not invent supported values. */
+export interface DevinConfigOption {
+  id: string
+  name: string
+  category?: string
+  type: string
+  currentValue: string
+  options: (
+    | { value: string; name: string }
+    | { name: string; options: { value: string; name: string }[] }
+  )[]
 }

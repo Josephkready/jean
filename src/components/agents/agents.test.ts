@@ -10,13 +10,21 @@ import {
   agentRowDot,
   agentServers,
   filterAgentsByServer,
+  splitCoordinators,
 } from './AgentsSidebar'
-import { agentStatusLabel, agentSubtitle, findAgent } from './agents'
+import {
+  agentStatusLabel,
+  agentSubtitle,
+  findAgent,
+  visibleAgentTabs,
+  withRunningAgents,
+} from './agents'
 import { describeApproval, formatRelative } from './AgentActivity'
-import { taskStatusLabel } from './AgentTasks'
+import { groupTasks, taskStatusLabel } from './AgentTasks'
 import { formatInterval } from './AgentSchedules'
 import { notificationPreview, splitNotifications } from './AgentInbox'
 import { enabledAgentServers } from './agents-feature'
+import { agentRunSummary } from './agent-config'
 
 function agent(overrides: Partial<AgentSummary>): AgentSummary {
   return {
@@ -28,7 +36,6 @@ function agent(overrides: Partial<AgentSummary>): AgentSummary {
     icon: 'jean',
     rolePrompt: '',
     worktreeId: '__jean_agent__',
-    paused: false,
     maxWakesPerHour: 12,
     builtin: true,
     status: 'idle',
@@ -42,15 +49,17 @@ function agent(overrides: Partial<AgentSummary>): AgentSummary {
     runningTasks: 0,
     unreadNotifications: 0,
     activity: null,
+    backend: null,
+    model: null,
+    effort: null,
+    thinkingLevel: null,
+    skills: [],
     ...overrides,
   }
 }
 
 describe('agentStatusLabel', () => {
-  it('puts paused and approvals before other states', () => {
-    expect(
-      agentStatusLabel(agent({ status: 'paused', pendingApprovals: 2 }))
-    ).toBe('Paused')
+  it('puts approvals before other states', () => {
     expect(
       agentStatusLabel(agent({ status: 'working', pendingApprovals: 2 }))
     ).toBe('Needs approval (2)')
@@ -76,7 +85,7 @@ describe('agentStatusLabel', () => {
     expect(agentStatusLabel(agent({ activeDelegations: 3 }))).toBe(
       'Following 3 sessions'
     )
-    expect(agentStatusLabel(agent({}))).toBe('Idle')
+    expect(agentStatusLabel(agent({}))).toBeNull()
   })
 })
 
@@ -102,7 +111,30 @@ describe('formatRelative', () => {
 })
 
 describe('describeApproval', () => {
-  it('names the action and its worktree', () => {
+  it('names agent self-management approvals', () => {
+    const approval: AgentApproval = {
+      id: 4,
+      agentId: 'helper',
+      tool: 'agent_update',
+      args: { agentId: 'reviewer', targetName: 'Reviewer', name: 'Docs' },
+      status: 'pending',
+      result: null,
+      createdAt: 0,
+    }
+    expect(describeApproval(approval)).toBe('Update agent Reviewer')
+    expect(describeApproval({ ...approval, tool: 'agent_delete' })).toBe(
+      'Delete agent Reviewer'
+    )
+    expect(
+      describeApproval({
+        ...approval,
+        tool: 'agent_revert',
+        args: { agentId: 'reviewer' },
+      })
+    ).toBe('Undo the last change to another agent')
+  })
+
+  it('names the action and its worktree by name', () => {
     const approval: AgentApproval = {
       id: 1,
       agentId: 'jean',
@@ -112,10 +144,34 @@ describe('describeApproval', () => {
       result: null,
       createdAt: 0,
     }
-    expect(describeApproval(approval)).toBe('Permanently delete worktree wt-1')
-    expect(describeApproval({ ...approval, tool: 'custom', args: {} })).toBe(
-      'custom'
+    // Names, never IDs
+    expect(describeApproval(approval, 'feature-x')).toBe(
+      'Permanently delete worktree feature-x'
     )
+    expect(describeApproval(approval)).toBe('Permanently delete a worktree')
+    expect(
+      describeApproval({
+        ...approval,
+        tool: 'push_worktree',
+        args: { worktreePath: '/home/me/jean/app/fix-login/' },
+      })
+    ).toBe('Push worktree fix-login')
+    expect(
+      describeApproval(
+        { ...approval, tool: 'remove_project', args: { projectId: 'p-1' } },
+        'my-app'
+      )
+    ).toBe('Remove project my-app')
+    expect(
+      describeApproval({
+        ...approval,
+        tool: 'remove_project',
+        args: { projectId: 'p-1' },
+      })
+    ).toBe('Remove a project')
+    expect(
+      describeApproval({ ...approval, tool: 'custom_tool', args: {} })
+    ).toBe('custom tool')
   })
 })
 
@@ -168,8 +224,28 @@ describe('multi-server agents', () => {
     expect(remote.tasksWorktreeId).toBe('srv:__agent_tasks_jean__')
     expect(remote.homeSessionId).toBe('srv:s1')
     expect(remote.serverName).toBe('Home server')
+    expect(remote.backend).toBeNull()
+    expect(remote.skills).toEqual([])
     expect(agentServerId(remote.id)).toBe('srv')
     expect(agentServerId(local.id)).toBe('local')
+  })
+
+  it('defaults the run configuration of agents from an older server', () => {
+    const {
+      backend: _backend,
+      model: _model,
+      effort: _effort,
+      thinkingLevel: _thinkingLevel,
+      skills: _skills,
+      ...old
+    } = agent({ id: 'reviewer' })
+    const remote = scopeAgentSummary('srv', 'Old server', old)
+    expect(remote.backend).toBeNull()
+    expect(remote.model).toBeNull()
+    expect(remote.effort).toBeNull()
+    expect(remote.thinkingLevel).toBeNull()
+    expect(remote.skills).toEqual([])
+    expect(agentRunSummary(remote)).toBeNull()
   })
 
   it('loads agents from online servers and skips failing ones', async () => {
@@ -223,9 +299,6 @@ describe('enabledAgentServers', () => {
 
 describe('agent rows', () => {
   it('shows what needs the user first, then the latest activity', () => {
-    expect(agentSubtitle(agent({ status: 'paused', activity: 'x' }))).toBe(
-      'Stopped'
-    )
     expect(agentSubtitle(agent({ pendingApprovals: 1 }))).toBe(
       'Needs your approval'
     )
@@ -236,6 +309,18 @@ describe('agent rows', () => {
       'Coordinates'
     )
     expect(agentSubtitle(agent({}))).toBe('No activity yet')
+    expect(
+      agentSubtitle(agent({ status: 'working', activity: 'Old reply' }))
+    ).toBe('Working…')
+  })
+
+  it('marks agents whose home chat is running as working', () => {
+    const idle = agent({ id: 'a', homeSessionId: 's1' })
+    const other = agent({ id: 'c', homeSessionId: 's3' })
+    const result = withRunningAgents([idle, other], new Set(['s1']))
+    expect(result?.map(a => a.status)).toEqual(['working', 'idle'])
+    const list = [idle]
+    expect(withRunningAgents(list, new Set())).toBe(list)
   })
 
   it('marks unread messages and things that need the user', () => {
@@ -243,9 +328,6 @@ describe('agent rows', () => {
     expect(
       agentRowDot(agent({ unreadNotifications: 2, pendingApprovals: 1 }))
     ).toBe('attention')
-    expect(agentRowDot(agent({ status: 'paused', pendingApprovals: 1 }))).toBe(
-      null
-    )
     expect(agentRowDot(agent({}))).toBe(null)
   })
 })
@@ -256,5 +338,67 @@ describe('notificationPreview', () => {
       'Disk check: ok'
     )
     expect(notificationPreview('   ')).toBe('')
+  })
+})
+
+describe('splitCoordinators', () => {
+  it('puts built-in coordinators apart from user agents, keeping order', () => {
+    const { coordinators, custom } = splitCoordinators([
+      agent({ id: 'reviewer', builtin: false }),
+      agent({}),
+      agent({ id: 'docs', builtin: false }),
+    ])
+    expect(coordinators.map(a => a.id)).toEqual(['jean'])
+    expect(custom.map(a => a.id)).toEqual(['reviewer', 'docs'])
+  })
+})
+
+describe('groupTasks', () => {
+  it('separates running and waiting tasks from finished ones', () => {
+    const task = (id: number, status: string) =>
+      ({ id, status }) as Parameters<typeof groupTasks>[0][number]
+    const { active, finished } = groupTasks([
+      task(1, 'done'),
+      task(2, 'running'),
+      task(3, 'failed'),
+      task(4, 'waiting'),
+      task(5, 'cancelled'),
+    ])
+    expect(active.map(t => t.id)).toEqual([2, 4])
+    expect(finished.map(t => t.id)).toEqual([1, 3, 5])
+  })
+})
+
+describe('visibleAgentTabs', () => {
+  it('shows only Schedules by default', () => {
+    expect(visibleAgentTabs(false, agent({}), 'schedules')).toEqual([
+      'schedules',
+    ])
+  })
+
+  it('adds Inbox while it has unread messages or is open', () => {
+    expect(
+      visibleAgentTabs(false, agent({ unreadNotifications: 2 }), 'schedules')
+    ).toEqual(['inbox', 'schedules'])
+    expect(visibleAgentTabs(false, agent({}), 'inbox')).toEqual([
+      'inbox',
+      'schedules',
+    ])
+  })
+
+  it('hides advanced tabs even when one was open', () => {
+    expect(visibleAgentTabs(false, agent({}), 'memory')).not.toContain('memory')
+  })
+
+  it('shows every tab in advanced mode', () => {
+    expect(visibleAgentTabs(true, agent({}), 'schedules')).toEqual([
+      'inbox',
+      'tasks',
+      'subagents',
+      'schedules',
+      'activity',
+      'memory',
+      'settings',
+    ])
   })
 })

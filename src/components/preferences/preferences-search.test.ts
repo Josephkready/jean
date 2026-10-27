@@ -11,6 +11,8 @@ const nativeOnlyEntryIds = [
   'cursor-cli',
   'pi-cli',
   'kimi-cli',
+  'muse-cli',
+  'devin-cli',
   'github-cli',
   'coderabbit-cli',
   'general-troubleshooting',
@@ -68,6 +70,16 @@ describe('preferences search index', () => {
     ).toBe(true)
   })
 
+  it('finds the server preview hostname in web access', () => {
+    setTauriInternals(false)
+
+    expect(
+      searchPreferenceEntries('preview hostname').some(
+        entry => entry.id === 'general-browser'
+      )
+    ).toBe(true)
+  })
+
   it('routes backend searches to dedicated backend panes', () => {
     setTauriInternals(true)
 
@@ -77,6 +89,10 @@ describe('preferences search index', () => {
     expect(searchPreferenceEntries('cursor model')[0]?.pane).toBe('cursor')
     expect(searchPreferenceEntries('pi model')[0]?.pane).toBe('pi')
     expect(searchPreferenceEntries('kimi model')[0]?.pane).toBe('kimi')
+    expect(searchPreferenceEntries('muse model')[0]?.pane).toBe('muse')
+    expect(searchPreferenceEntries('META_API_KEY')[0]?.pane).toBe('muse')
+    expect(searchPreferenceEntries('devin login')[0]?.pane).toBe('devin')
+    expect(searchPreferenceEntries('devin beta')[0]?.pane).toBe('devin')
     expect(searchPreferenceEntries('github login')[0]?.pane).toBe('github')
     expect(searchPreferenceEntries('coderabbit login')[0]?.pane).toBe(
       'coderabbit'
@@ -92,10 +108,33 @@ describe('preferences search index', () => {
     expect(searchPreferenceEntries('ghostty web')[0]?.pane).toBe('terminal')
   })
 
+  it('finds chat file-path and spellcheck settings', () => {
+    setTauriInternals(false)
+
+    expect(
+      searchPreferenceEntries('spellcheck').some(
+        entry => entry.id === 'general-chat'
+      )
+    ).toBe(true)
+    expect(
+      searchPreferenceEntries('full file paths').some(
+        entry => entry.id === 'general-chat'
+      )
+    ).toBe(true)
+  })
+
   it('returns relevant appearance hits for font queries', () => {
     setTauriInternals(false)
     const results = searchPreferenceEntries('appearance font')
 
     expect(results.some(entry => entry.id === 'appearance-fonts')).toBe(true)
+  })
+
+  it('finds the collapsed sidebar edge setting', () => {
+    setTauriInternals(false)
+
+    expect(searchPreferenceEntries('screen edge')[0]?.id).toBe(
+      'appearance-sidebar'
+    )
   })
 })

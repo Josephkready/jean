@@ -5,8 +5,15 @@ import {
   RefreshCw,
   AlertCircle,
 } from '@/components/icons/reicon'
-import { isGhAuthError } from '@/services/github'
+import { githubItemKey, isGhAuthError } from '@/services/github'
+import {
+  isSameGitHubCreateTarget,
+  reusesPrimaryGitHubSource,
+} from '@/lib/remote-worktree-sources'
 import { GhAuthError } from '@/components/shared/GhAuthError'
+import { isGlabAuthError } from '@/services/glab-cli'
+import { GlabAuthError } from '@/components/shared/GlabAuthError'
+import { providerLabels } from '@/services/git-provider'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -22,6 +29,7 @@ import { SelectAllControl } from './ItemSelectCheckbox'
 import { useMultiSelect } from './hooks/useMultiSelect'
 import type { GitHubIssue } from '@/types/github'
 import type { GetContextLinkMatches } from './ContextLinkBadge'
+import type { GitProvider } from '@/types/provider'
 
 export interface GitHubIssuesTabProps {
   searchQuery: string
@@ -38,18 +46,28 @@ export interface GitHubIssuesTabProps {
   setSelectedIndex: (index: number) => void
   onSelectIssue: (issue: GitHubIssue, background?: boolean) => void
   onInvestigateIssue: (issue: GitHubIssue, background?: boolean) => void
-  onInvestigateIssueInNewSession?: (issue: GitHubIssue) => void
   onBulkInvestigateIssues?: (issues: GitHubIssue[]) => void | Promise<void>
   onPreviewIssue: (issue: GitHubIssue) => void
   creatingFromNumber: number | null
+  creatingFromRepo?: string | null
+  showSource?: boolean
+  hasMultipleGitHubRemotes?: boolean
+  primaryGitHubRemote?: string | null
   isBulkInvestigating?: boolean
   searchInputRef: React.RefObject<HTMLInputElement | null>
-  onGhLogin: () => void
-  isGhInstalled: boolean
+  onLogin: () => void
+  isCliInstalled: boolean
+  provider?: GitProvider
+  /**
+   * Whether the git-host provider has been resolved. While false the provider
+   * still defaults to `github`, so we defer the auth-error branch to avoid a
+   * transient "Sign in to GitHub" flash on GitLab projects.
+   */
+  providerResolved?: boolean
   getContextMatches?: GetContextLinkMatches
 }
 
-const getIssueKey = (issue: GitHubIssue) => issue.number
+const getIssueKey = (issue: GitHubIssue) => githubItemKey(issue)
 
 export function GitHubIssuesTab({
   searchQuery,
@@ -66,16 +84,22 @@ export function GitHubIssuesTab({
   setSelectedIndex,
   onSelectIssue,
   onInvestigateIssue,
-  onInvestigateIssueInNewSession,
   onBulkInvestigateIssues,
   onPreviewIssue,
   creatingFromNumber,
+  creatingFromRepo = null,
+  showSource = false,
+  hasMultipleGitHubRemotes = false,
+  primaryGitHubRemote = null,
   isBulkInvestigating = false,
   searchInputRef,
-  onGhLogin,
-  isGhInstalled,
+  onLogin,
+  isCliInstalled,
+  provider = 'github',
+  providerResolved = true,
   getContextMatches,
 }: GitHubIssuesTabProps) {
+  const labels = providerLabels(provider)
   const multi = useMultiSelect(issues, getIssueKey)
   const matchesByNumber = useMemo(
     () =>
@@ -180,9 +204,20 @@ export function GitHubIssuesTab({
           </div>
         )}
 
+        {error && !providerResolved && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        )}
+
         {error &&
-          (isGhAuthError(error) ? (
-            <GhAuthError onLogin={onGhLogin} isGhInstalled={isGhInstalled} />
+          providerResolved &&
+          ((provider === 'gitlab' ? isGlabAuthError(error) : isGhAuthError(error)) ? (
+            provider === 'gitlab' ? (
+              <GlabAuthError onLogin={onLogin} isGlabInstalled={isCliInstalled} />
+            ) : (
+              <GhAuthError onLogin={onLogin} isGhInstalled={isCliInstalled} />
+            )
           ) : (
             <div className="flex flex-col items-center justify-center py-8 px-4 text-center">
               <AlertCircle className="h-5 w-5 text-destructive mb-2" />
@@ -206,40 +241,50 @@ export function GitHubIssuesTab({
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             <span className="ml-2 text-sm text-muted-foreground">
-              Searching GitHub...
+              Searching {labels.name}...
             </span>
           </div>
         )}
 
         {!isLoading && !error && issues.length > 0 && (
           <div>
-            {issues.map((issue, index) => (
-              <IssueItem
-                key={issue.number}
-                issue={issue}
-                index={index}
-                isSelected={index === selectedIndex}
-                isCreating={creatingFromNumber === issue.number}
-                contextMatches={matchesByNumber.get(issue.number)}
-                isChecked={multi.isChecked(issue.number)}
-                onCheckedChange={checked => multi.toggle(issue.number, checked)}
-                onMouseEnter={() => setSelectedIndex(index)}
-                onClick={bg => onSelectIssue(issue, bg)}
-                onInvestigate={bg => onInvestigateIssue(issue, bg)}
-                onInvestigateInNewSession={
-                  onInvestigateIssueInNewSession
-                    ? () => onInvestigateIssueInNewSession(issue)
-                    : undefined
-                }
-                onPreview={() => onPreviewIssue(issue)}
-                onLabelClick={handleLabelClick}
-              />
-            ))}
+            {issues.map((issue, index) => {
+              const key = githubItemKey(issue)
+              const showExisting = reusesPrimaryGitHubSource(
+                issue,
+                hasMultipleGitHubRemotes,
+                primaryGitHubRemote
+              )
+              return (
+                <IssueItem
+                  key={key}
+                  issue={issue}
+                  index={index}
+                  isSelected={index === selectedIndex}
+                  isCreating={isSameGitHubCreateTarget(
+                    issue,
+                    creatingFromNumber,
+                    creatingFromRepo
+                  )}
+                  contextMatches={
+                    showExisting ? matchesByNumber.get(issue.number) : undefined
+                  }
+                  isChecked={multi.isChecked(key)}
+                  onCheckedChange={checked => multi.toggle(key, checked)}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                  onClick={bg => onSelectIssue(issue, bg)}
+                  onInvestigate={bg => onInvestigateIssue(issue, bg)}
+                  onPreview={() => onPreviewIssue(issue)}
+                  onLabelClick={handleLabelClick}
+                  showSource={showSource}
+                />
+              )
+            })}
             {isSearching && (
               <div className="flex items-center justify-center py-2">
                 <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
                 <span className="ml-1.5 text-xs text-muted-foreground">
-                  Searching GitHub for more results...
+                  Searching {labels.name} for more results...
                 </span>
               </div>
             )}

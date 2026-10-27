@@ -41,10 +41,13 @@ import { useAvailableGrokModels } from '@/services/grok-cli'
 import { useAvailableKimiModels } from '@/services/kimi-cli'
 import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
 import {
+  MUSE_FALLBACK_MODELS,
+  useAvailableMuseModels,
+} from '@/services/muse-cli'
+import {
   getCatalogModelOptions,
   getCatalogDefaultModelOptions,
   getCatalogModelFastInfo,
-  getCatalogModelReasoning,
   useModelCatalog,
 } from '@/services/model-catalog'
 import {
@@ -94,6 +97,7 @@ import {
   isGrokModel,
   isKimiModel,
   isAntigravityCliModel,
+  isMuseModel,
   isPiModel,
   type MagicPrompts,
   type MagicPromptModels,
@@ -105,7 +109,6 @@ import {
   type MagicPromptExecutionMode,
   type MagicCodeReviewConfig,
   type CliBackend,
-  type CustomCliProfile,
 } from '@/types/preferences'
 import { cn } from '@/lib/utils'
 import {
@@ -116,6 +119,7 @@ import {
   codeReviewConfigKey,
   resolveCodeReviewConfigs,
 } from '@/lib/code-review-configs'
+import { getMagicPromptModelReasoning } from './magic-prompt-reasoning'
 
 interface VariableInfo {
   name: string
@@ -546,7 +550,7 @@ const PROMPT_SECTIONS: PromptSection[] = [
         key: 'parallel_execution',
         label: 'Parallel Execution',
         description:
-          'System prompt appended to every chat session. Encourages sub-agent parallelization.',
+          'Sub-agent prompting for every chat session. Clear this prompt to tell the model not to spawn Task sub-agents.',
         variables: [],
         defaultValue: DEFAULT_PARALLEL_EXECUTION_PROMPT,
       },
@@ -606,56 +610,9 @@ const PROMPT_SECTIONS: PromptSection[] = [
 const PROMPT_CONFIGS = PROMPT_SECTIONS.flatMap(s => s.configs)
 const PROMPT_CONFIG_KEYS = new Set(PROMPT_CONFIGS.map(config => config.key))
 const MAGIC_PROMPT_HIGHLIGHT_DURATION_MS = 1800
-const BACKEND_EFFORT_FALLBACK = {
-  type: 'effort' as const,
-  default: 'high',
-  levels: [
-    { value: 'low', label: 'Low', description: 'Light' },
-    { value: 'medium', label: 'Medium', description: 'Moderate' },
-    { value: 'high', label: 'High', description: 'Deep' },
-    { value: 'xhigh', label: 'Extra high', description: 'Extra deep' },
-  ],
-}
-// Antigravity CLI only accepts --effort low|medium|high; Adaptive omits the flag.
-const ANTIGRAVITY_EFFORT_FALLBACK = {
-  type: 'effort' as const,
-  default: 'adaptive',
-  levels: [
-    {
-      value: 'adaptive',
-      label: 'Adaptive/Default',
-      description: 'Model default (no forced level)',
-    },
-    { value: 'low', label: 'Low', description: 'Light' },
-    { value: 'medium', label: 'Medium', description: 'Moderate' },
-    { value: 'high', label: 'High', description: 'Deep' },
-  ],
-}
-
-function getMagicPromptModelReasoning(
-  catalog: Parameters<typeof getCatalogModelReasoning>[0],
-  backend: CliBackend,
-  model: string,
-  provider: string | null | undefined,
-  profiles: CustomCliProfile[]
-) {
-  const profile =
-    backend === 'claude' && provider
-      ? profiles.find(candidate => candidate.name === provider)
-      : undefined
-  // Custom providers can remap Claude aliases to arbitrary models. Without
-  // provider-specific catalog metadata, Anthropic effort levels are unsafe.
-  if (profile) return null
-  const reasoning = getCatalogModelReasoning(catalog, backend, model)
-  if (reasoning !== undefined) return reasoning
-  if (backend === 'antigravity') return ANTIGRAVITY_EFFORT_FALLBACK
-  return ['opencode', 'pi', 'grok', 'kimi'].includes(backend)
-    ? BACKEND_EFFORT_FALLBACK
-    : undefined
-}
 
 function getMagicPromptReasoningDefaults(
-  catalog: Parameters<typeof getCatalogModelReasoning>[0],
+  catalog: Parameters<typeof getMagicPromptModelReasoning>[0],
   backend: CliBackend,
   models: MagicPromptModels
 ): MagicPromptReasoningEfforts {
@@ -675,7 +632,7 @@ function getMagicPromptReasoningDefaults(
 }
 
 function makeCodeReviewConfig(
-  catalog: Parameters<typeof getCatalogModelReasoning>[0],
+  catalog: Parameters<typeof getMagicPromptModelReasoning>[0],
   backend: CliBackend,
   model: MagicPromptModel
 ): MagicCodeReviewConfig {
@@ -735,8 +692,13 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   const { data: availableGrokModels } = useAvailableGrokModels()
   const { data: availableKimiModels } = useAvailableKimiModels()
   const { data: availableAntigravityModels } = useAvailableAntigravityModels()
+  const { data: availableMuseModels } = useAvailableMuseModels()
   const { data: modelCatalog } = useModelCatalog()
   const { installedBackends } = useInstalledBackends()
+  const magicPromptBackends = useMemo(
+    () => installedBackends.filter(backend => backend !== 'devin'),
+    [installedBackends]
+  )
 
   const claudeModelOptions = useMemo(
     () =>
@@ -845,6 +807,15 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     }))
   }, [availableAntigravityModels])
 
+  const museModelOptions = useMemo(
+    () =>
+      (availableMuseModels ?? MUSE_FALLBACK_MODELS).map(model => ({
+        value: model.id as MagicPromptModel,
+        label: model.label || model.id,
+      })),
+    [availableMuseModels]
+  )
+
   const currentPrompts = preferences?.magic_prompts ?? DEFAULT_MAGIC_PROMPTS
   const currentModels =
     preferences?.magic_prompt_models ?? DEFAULT_MAGIC_PROMPT_MODELS
@@ -888,8 +859,10 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
       DEFAULT_MAGIC_PROMPT_MODES[selectedConfig.modeKey])
     : undefined
   // Resolve effective backend for model filtering: per-operation override > global default_backend
-  const effectiveBackend =
+  const rawEffectiveBackend =
     currentBackend ?? preferences?.default_backend ?? 'claude'
+  const effectiveBackend =
+    rawEffectiveBackend === 'devin' ? 'claude' : rawEffectiveBackend
   const modelMatchesEffectiveBackend = (model: string | undefined): boolean => {
     if (!model) return false
     switch (effectiveBackend) {
@@ -909,6 +882,8 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
         return isKimiModel(model)
       case 'antigravity':
         return isAntigravityCliModel(model)
+      case 'muse':
+        return isMuseModel(model)
       case 'claude':
         return (
           !isCodexModel(model) &&
@@ -918,7 +893,8 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
           !isCommandCodeModel(model) &&
           !isGrokModel(model) &&
           !isKimiModel(model) &&
-          !isAntigravityCliModel(model)
+          !isAntigravityCliModel(model) &&
+          !isMuseModel(model)
         )
       default:
         return true
@@ -937,6 +913,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     if (effectiveBackend === 'kimi') return kimiModelOptions[0]?.value
     if (effectiveBackend === 'antigravity')
       return antigravityModelOptions[0]?.value
+    if (effectiveBackend === 'muse') return museModelOptions[0]?.value
     return selectedConfig.defaultModel ?? rawCurrentModel
   })()
   const modelReasoning = currentModel
@@ -972,6 +949,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   const currentModelIsAntigravity = currentModel
     ? isAntigravityCliModel(currentModel)
     : false
+  const currentModelIsMuse = currentModel ? isMuseModel(currentModel) : false
 
   const filteredClaudeOptions = useMemo(() => {
     if (
@@ -983,7 +961,8 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
       currentModelIsPi ||
       currentModelIsGrok ||
       currentModelIsKimi ||
-      currentModelIsAntigravity
+      currentModelIsAntigravity ||
+      currentModelIsMuse
     ) {
       return claudeModelOptions
     }
@@ -1022,6 +1001,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     currentModelIsGrok,
     currentModelIsKimi,
     currentModelIsAntigravity,
+    currentModelIsMuse,
     profiles,
   ])
 
@@ -1035,10 +1015,12 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
       if (backend === 'grok') return grokModelOptions
       if (backend === 'kimi') return kimiModelOptions
       if (backend === 'antigravity') return antigravityModelOptions
+      if (backend === 'muse') return museModelOptions
       return opencodeModelOptions
     },
     [
       antigravityModelOptions,
+      museModelOptions,
       codexModelOptions,
       commandCodeModelOptions,
       cursorModelOptions,
@@ -1142,8 +1124,12 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
       codeReviewConfigs.map(config => config.backend)
     )
     const orderedBackends = [
-      ...installedBackends.filter(backend => !representedBackends.has(backend)),
-      ...installedBackends.filter(backend => representedBackends.has(backend)),
+      ...magicPromptBackends.filter(
+        backend => !representedBackends.has(backend)
+      ),
+      ...magicPromptBackends.filter(backend =>
+        representedBackends.has(backend)
+      ),
     ]
     for (const backend of orderedBackends) {
       const model = getReviewModelOptions(backend).find(
@@ -1172,7 +1158,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     codeReviewConfigs,
     getReviewModelOptions,
     getReviewReasoning,
-    installedBackends,
+    magicPromptBackends,
     saveCodeReviewConfigs,
   ])
 
@@ -1425,6 +1411,8 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
           defaultModel = kimiModelOptions[0]?.value
         } else if (backend === 'antigravity') {
           defaultModel = antigravityModelOptions[0]?.value
+        } else if (backend === 'muse') {
+          defaultModel = museModelOptions[0]?.value
         }
       }
       const reasoning = defaultModel
@@ -1479,6 +1467,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
       grokModelOptions,
       kimiModelOptions,
       antigravityModelOptions,
+      museModelOptions,
       opencodeModelOptions,
     ]
   )
@@ -1517,7 +1506,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   const handleApplyToAll = useCallback(() => {
     if (!preferences || !bulkSelection) return
     const { backend } = bulkSelection
-    if (!installedBackends.includes(backend)) return
+    if (backend === 'devin' || !magicPromptBackends.includes(backend)) return
     const model = ((bulkFast && bulkFastModel) ||
       bulkSelection.model) as MagicPromptModel
     const models = { ...currentModels }
@@ -1551,7 +1540,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     bulkFast,
     bulkFastModel,
     bulkMode,
-    installedBackends,
+    magicPromptBackends,
     currentModels,
     currentBackends,
     currentModes,
@@ -1850,7 +1839,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {installedBackends.map(backend => (
+                            {magicPromptBackends.map(backend => (
                               <SelectItem key={backend} value={backend}>
                                 <BackendLabel backend={backend} />
                               </SelectItem>
@@ -1997,26 +1986,26 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                     aria-label="Backend"
                     size="sm"
                     className="w-full min-w-0 text-xs"
-                    hideIcon={installedBackends.length <= 1}
+                    hideIcon={magicPromptBackends.length <= 1}
                   >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {installedBackends.includes('claude') && (
+                    {magicPromptBackends.includes('claude') && (
                       <SelectItem value="claude">Claude</SelectItem>
                     )}
-                    {installedBackends.includes('codex') && (
+                    {magicPromptBackends.includes('codex') && (
                       <SelectItem value="codex">Codex</SelectItem>
                     )}
-                    {installedBackends.includes('opencode') && (
+                    {magicPromptBackends.includes('opencode') && (
                       <SelectItem value="opencode">OpenCode</SelectItem>
                     )}
-                    {installedBackends.includes('cursor') && (
+                    {magicPromptBackends.includes('cursor') && (
                       <SelectItem value="cursor">
                         <BackendLabel backend="cursor" />
                       </SelectItem>
                     )}
-                    {installedBackends.includes('pi') && (
+                    {magicPromptBackends.includes('pi') && (
                       <SelectItem
                         value="pi"
                         aria-label={getBackendPlainLabel('pi')}
@@ -2024,7 +2013,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                         <BackendLabel backend="pi" />
                       </SelectItem>
                     )}
-                    {installedBackends.includes('commandcode') && (
+                    {magicPromptBackends.includes('commandcode') && (
                       <SelectItem
                         value="commandcode"
                         aria-label={getBackendPlainLabel('commandcode')}
@@ -2032,7 +2021,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                         <BackendLabel backend="commandcode" />
                       </SelectItem>
                     )}
-                    {installedBackends.includes('grok') && (
+                    {magicPromptBackends.includes('grok') && (
                       <SelectItem
                         value="grok"
                         aria-label={getBackendPlainLabel('grok')}
@@ -2040,7 +2029,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                         <BackendLabel backend="grok" />
                       </SelectItem>
                     )}
-                    {installedBackends.includes('kimi') && (
+                    {magicPromptBackends.includes('kimi') && (
                       <SelectItem
                         value="kimi"
                         aria-label={getBackendPlainLabel('kimi')}
@@ -2048,12 +2037,20 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                         <BackendLabel backend="kimi" />
                       </SelectItem>
                     )}
-                    {installedBackends.includes('antigravity') && (
+                    {magicPromptBackends.includes('antigravity') && (
                       <SelectItem
                         value="antigravity"
                         aria-label={getBackendPlainLabel('antigravity')}
                       >
                         <BackendLabel backend="antigravity" />
+                      </SelectItem>
+                    )}
+                    {installedBackends.includes('muse') && (
+                      <SelectItem
+                        value="muse"
+                        aria-label={getBackendPlainLabel('muse')}
+                      >
+                        <BackendLabel backend="muse" />
                       </SelectItem>
                     )}
                   </SelectContent>
@@ -2118,6 +2115,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                             ...grokModelOptions,
                             ...kimiModelOptions,
                             ...antigravityModelOptions,
+                            ...museModelOptions,
                           ]
                           return (
                             allOptions.find(o => o.value === currentModel)
@@ -2139,7 +2137,12 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                                               /^antigravity\//,
                                               ''
                                             )
-                                          : currentModel)
+                                          : isMuseModel(currentModel)
+                                            ? currentModel.replace(
+                                                /^muse\//,
+                                                ''
+                                              )
+                                            : currentModel)
                           )
                         })()}
                       </span>
@@ -2159,7 +2162,9 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                                     ? kimiModelOptions
                                     : effectiveBackend === 'antigravity'
                                       ? antigravityModelOptions
-                                      : opencodeModelOptions
+                                      : effectiveBackend === 'muse'
+                                        ? museModelOptions
+                                        : opencodeModelOptions
                       ).length > 1 && (
                         <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-50" />
                       )}
@@ -2381,6 +2386,32 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                             heading={<BackendLabel backend="antigravity" />}
                           >
                             {antigravityModelOptions.map(opt => (
+                              <CommandItem
+                                key={opt.value}
+                                value={`${opt.label} ${opt.value}`}
+                                onSelect={() => {
+                                  handleModelChange(opt.value)
+                                  setModelPopoverOpen(false)
+                                }}
+                              >
+                                <span className="text-xs">{opt.label}</span>
+                                <Check
+                                  className={cn(
+                                    'ml-auto h-3 w-3',
+                                    currentModel === opt.value
+                                      ? 'opacity-100'
+                                      : 'opacity-0'
+                                  )}
+                                />
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        )}
+                        {effectiveBackend === 'muse' && (
+                          <CommandGroup
+                            heading={<BackendLabel backend="muse" />}
+                          >
+                            {museModelOptions.map(opt => (
                               <CommandItem
                                 key={opt.value}
                                 value={`${opt.label} ${opt.value}`}

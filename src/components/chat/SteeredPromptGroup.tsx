@@ -117,6 +117,7 @@ export const SteeredPromptGroup = memo(function SteeredPromptGroup({
                         key={`file:${path}`}
                         path={path}
                         worktreePath={worktreePath}
+                        serverId={serverId}
                       />
                     ))}
                   </div>

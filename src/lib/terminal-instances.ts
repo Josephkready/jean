@@ -25,6 +25,7 @@ import type * as GhosttyWebModule from 'ghostty-web'
 import { openExternal } from '@/lib/platform'
 import { attachOrphanCompositionEndGuard } from '@/lib/terminal-composition-guard'
 import { LocalTerminalLinkProvider } from '@/lib/terminal-local-links'
+import { registerOsc52ClipboardHandler } from '@/lib/terminal-osc52'
 import { ensureTerminalFontLoaded } from '@/lib/terminal-font-loading'
 import {
   invoke,
@@ -697,6 +698,8 @@ interface TerminalKeyboardState {
   /** Saved flag values from kitty keyboard protocol pushes. */
   kittyStack: number[]
   focusReporting: boolean
+  /** DECSET 2004. The program asked to receive pastes wrapped in CSI 200~/201~. */
+  bracketedPaste: boolean
   /** Trailing partial escape sequence carried over between output chunks. */
   tail: string
 }
@@ -720,6 +723,7 @@ function getKeyboardState(terminalId: string): TerminalKeyboardState {
     kittyFlags: 0,
     kittyStack: [],
     focusReporting: false,
+    bracketedPaste: false,
     tail: '',
   }
   keyboardStates.set(terminalId, created)
@@ -764,10 +768,16 @@ export function trackTerminalKeyboardMode(
     const enabled = action === 'h'
     for (const mode of (params ?? '').split(';')) {
       if (mode === '1004') state.focusReporting = enabled
+      else if (mode === '2004') state.bracketedPaste = enabled
     }
   }
 
   state.tail = (text.match(PARTIAL_TAIL)?.[0] ?? '').slice(-MAX_TAIL_LENGTH)
+}
+
+/** True after the PTY enables bracketed paste (CSI ? 2004 h) and before it disables it. */
+export function terminalAcceptsBracketedPaste(terminalId: string): boolean {
+  return keyboardStates.get(terminalId)?.bracketedPaste ?? false
 }
 
 export function acceptsModifierEncodedKeys(terminalId: string): boolean {
@@ -1028,6 +1038,7 @@ async function createTerminalForRenderer(
       return preferences?.editor
     })
   )
+  registerOsc52ClipboardHandler(terminal)
   return { terminal, fitAddon, appearance }
 }
 

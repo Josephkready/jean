@@ -33,13 +33,19 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useChatStore } from '@/store/chat-store'
-import { useWorktrees } from '@/services/projects'
+import { useProjects, useWorktrees } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { parseServerResourceKey } from '@/lib/server-resource'
 import {
+  DEFAULT_MAGIC_PROMPT_MODELS,
   DEFAULT_MAGIC_PROMPT_MODES,
   DEFAULT_REVIEW_COMMENTS_PROMPT,
+  resolveMagicPromptBackend,
+  resolveMagicPromptProvider,
 } from '@/types/preferences'
+import { useInstalledBackends } from '@/hooks/useInstalledBackends'
+import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBackendModelPicker'
+import type { InvestigateOverride } from '@/components/chat/hooks/useMagicCommands'
 import { Markdown } from '@/components/ui/markdown'
 import { cn } from '@/lib/utils'
 import type {
@@ -113,9 +119,18 @@ function sortByNewestDate<T>(items: T[], getDate: (item: T) => string): T[] {
   )
 }
 
-function previewLine(body: string): string {
+export function previewLine(body: string): string {
+  // Bots (e.g. CodeRabbit) prefix bodies with HTML comments, badges, and
+  // collapsed <details> blocks; skip them so the preview shows readable text.
+  let text = body.replace(/<!--[\s\S]*?-->/g, '')
+  // Remove innermost <details> blocks first so nested blocks are fully removed.
+  const innermostDetails = /<details\b(?:(?!<details\b)[\s\S])*?<\/details>/gi
+  while (innermostDetails.test(text)) {
+    text = text.replace(innermostDetails, '')
+  }
+  text = text.replace(/<[^>]+>/g, '')
   const firstLine =
-    body
+    text
       .split('\n')
       .map(l => l.trim())
       .find(l => l.length > 0) ?? ''
@@ -251,7 +266,10 @@ export function ReviewCommentsDialog() {
     ? parseServerResourceKey(selectedWorktreeId)?.serverId
     : undefined
   const { data: preferences } = usePreferences(serverId)
+  const { data: projects } = useProjects()
+  const { installedBackends } = useInstalledBackends({ serverId })
   const worktree = worktrees?.find(w => w.id === selectedWorktreeId) ?? null
+  const project = projects?.find(p => p.id === worktree?.project_id)
 
   const prNumber = worktree?.pr_number
   const worktreePath = worktree?.path
@@ -263,6 +281,9 @@ export function ReviewCommentsDialog() {
   const [tab, setTab] = useState<CommentTab>('inline')
   const [activeIndex, setActiveIndex] = useState(0)
   const activeRowRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  // null = use Magic Prompt settings for review comments
+  const [modelOverride, setModelOverride] =
+    useState<InvestigateOverride | null>(null)
 
   // Inline code comments state
   const [comments, setComments] = useState<GitHubReviewComment[]>([])
@@ -286,6 +307,7 @@ export function ReviewCommentsDialog() {
     setPhase('loading')
     setError(null)
     setIsSending(false)
+    setModelOverride(null)
     setComments([])
     setSelected(new Set())
     setExpanded(new Set())
@@ -545,12 +567,37 @@ export function ReviewCommentsDialog() {
     preferences?.magic_prompt_modes?.review_comments_mode ??
     DEFAULT_MAGIC_PROMPT_MODES.review_comments_mode
 
+  // Mirrors handleReviewComments resolution in useInvestigateHandlers
+  const settingsModel =
+    preferences?.magic_prompt_models?.review_comments_model ??
+    DEFAULT_MAGIC_PROMPT_MODELS.review_comments_model
+  const settingsBackend =
+    resolveMagicPromptBackend(
+      preferences?.magic_prompt_backends,
+      'review_comments_backend',
+      project?.default_backend ?? preferences?.default_backend
+    ) ?? 'claude'
+  const pickerBackend = modelOverride?.backend ?? settingsBackend
+  const pickerModel = modelOverride?.model ?? settingsModel
+  const settingsProvider = resolveMagicPromptProvider(
+    preferences?.magic_prompt_providers,
+    'review_comments_provider',
+    preferences?.default_provider
+  )
+  const pickerProvider =
+    pickerBackend === 'claude' &&
+    settingsProvider &&
+    settingsProvider !== '__anthropic__'
+      ? settingsProvider
+      : null
+
   const dispatchReviewCommentsPrompts = useCallback(
     (detail: {
       prompt?: string
       prompts?: string[]
       executionMode?: 'plan' | 'build' | 'yolo'
     }) => {
+      const fullDetail = { ...detail, override: modelOverride ?? undefined }
       setIsSending(false)
       setReviewCommentsModalOpen(false)
 
@@ -558,7 +605,7 @@ export function ReviewCommentsDialog() {
       if (chatState.activeWorktreePath) {
         window.dispatchEvent(
           new CustomEvent('magic-command', {
-            detail: { command: 'review-comments', ...detail },
+            detail: { command: 'review-comments', ...fullDetail },
           })
         )
         return
@@ -568,7 +615,7 @@ export function ReviewCommentsDialog() {
       if (worktreeId && worktree?.path) {
         useChatStore
           .getState()
-          .setPendingMagicCommand({ command: 'review-comments', ...detail })
+          .setPendingMagicCommand({ command: 'review-comments', ...fullDetail })
         window.dispatchEvent(
           new CustomEvent('open-session-modal', {
             detail: {
@@ -580,7 +627,12 @@ export function ReviewCommentsDialog() {
         )
       }
     },
-    [selectedWorktreeId, setReviewCommentsModalOpen, worktree?.path]
+    [
+      selectedWorktreeId,
+      setReviewCommentsModalOpen,
+      worktree?.path,
+      modelOverride,
+    ]
   )
 
   const handleSendToChat = useCallback(() => {
@@ -1064,7 +1116,27 @@ export function ReviewCommentsDialog() {
             )}
 
             {/* Footer actions */}
-            <div className="flex shrink-0 justify-end gap-2 pt-2 pb-[env(safe-area-inset-bottom)]">
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 pt-2 pb-[env(safe-area-inset-bottom)]">
+              <div
+                className="mr-auto min-w-0"
+                onKeyDown={event => event.stopPropagation()}
+              >
+                <DesktopBackendModelPicker
+                  triggerClassName="!flex max-w-full"
+                  disabled={isSending}
+                  selectedBackend={pickerBackend}
+                  selectedModel={pickerModel}
+                  selectedProvider={pickerProvider}
+                  installedBackends={installedBackends}
+                  customCliProfiles={preferences?.custom_cli_profiles ?? []}
+                  onModelChange={model =>
+                    setModelOverride({ backend: pickerBackend, model })
+                  }
+                  onBackendModelChange={(backend, model) =>
+                    setModelOverride({ backend, model })
+                  }
+                />
+              </div>
               <Button
                 variant="outline"
                 size="sm"

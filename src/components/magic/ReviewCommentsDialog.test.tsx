@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { render, screen, waitFor } from '@/test/test-utils'
-import { ReviewCommentsDialog } from './ReviewCommentsDialog'
+import { ReviewCommentsDialog, previewLine } from './ReviewCommentsDialog'
 
 const mocks = vi.hoisted(() => {
   let reviewCommentsModalOpen = true
@@ -48,7 +48,27 @@ vi.mock('@/store/chat-store', () => ({
   },
 }))
 
+vi.mock('@/hooks/useInstalledBackends', () => ({
+  useInstalledBackends: () => ({ installedBackends: ['claude'] }),
+}))
+
+vi.mock('@/components/chat/toolbar/DesktopBackendModelPicker', () => ({
+  DesktopBackendModelPicker: ({
+    onBackendModelChange,
+  }: {
+    onBackendModelChange: (backend: string, model: string) => void
+  }) => (
+    <button
+      type="button"
+      onClick={() => onBackendModelChange('codex', 'gpt-6.1-sol')}
+    >
+      pick codex
+    </button>
+  ),
+}))
+
 vi.mock('@/services/projects', () => ({
+  useProjects: () => ({ data: [] }),
   useWorktrees: () => ({
     data: [
       {
@@ -233,6 +253,48 @@ describe('ReviewCommentsDialog', () => {
     }
   })
 
+  it('sends the picked backend and model, and resets it on reopen', async () => {
+    const user = userEvent.setup()
+    const magicCommand = vi.fn()
+    window.addEventListener('magic-command', magicCommand)
+
+    try {
+      const { rerender } = render(<ReviewCommentsDialog />)
+      await screen.findByRole('button', { name: /send to chat/i })
+
+      await user.click(screen.getByRole('button', { name: 'pick codex' }))
+      await user.click(screen.getByRole('button', { name: /send to chat/i }))
+
+      await waitFor(() => {
+        expect(magicCommand).toHaveBeenCalledTimes(1)
+      })
+      expect(
+        (magicCommand.mock.calls[0]?.[0] as CustomEvent).detail.override
+      ).toEqual({ backend: 'codex', model: 'gpt-6.1-sol' })
+
+      mocks.resetReviewCommentsModalOpen(false)
+      rerender(<ReviewCommentsDialog />)
+      mocks.resetReviewCommentsModalOpen()
+      rerender(<ReviewCommentsDialog />)
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /send to chat/i })
+        ).toBeEnabled()
+      })
+      await user.click(screen.getByRole('button', { name: /send to chat/i }))
+
+      await waitFor(() => {
+        expect(magicCommand).toHaveBeenCalledTimes(2)
+      })
+      expect(
+        (magicCommand.mock.calls[1]?.[0] as CustomEvent).detail.override
+      ).toBeUndefined()
+    } finally {
+      window.removeEventListener('magic-command', magicCommand)
+    }
+  })
+
   it('uses the configured review comments execution mode', async () => {
     const user = userEvent.setup()
     const magicCommand = vi.fn()
@@ -332,5 +394,27 @@ describe('ReviewCommentsDialog', () => {
     expect(screen.getByText('Outdated')).toBeInTheDocument()
     // Only open comments stay pre-selected
     expect(screen.getByText('2 of 4 selected')).toBeInTheDocument()
+  })
+})
+
+describe('previewLine', () => {
+  it('skips HTML comments, nested details blocks, and tags in bot comments', () => {
+    const body = [
+      '<!-- coderabbit-ai-generated:v1 -->',
+      '',
+      '<details>',
+      '<summary>Supported by static analysis</summary>',
+      '<details><summary>Inner</summary>script output</details>',
+      'trailing',
+      '</details>',
+      '',
+      '**<picture><img src="x.svg" alt=""></picture> Minor** · **Quick win**',
+    ].join('\n')
+
+    expect(previewLine(body)).toBe('** Minor** · **Quick win**')
+  })
+
+  it('keeps the first line of plain comments', () => {
+    expect(previewLine('\n## Fix the bug\nmore')).toBe('Fix the bug')
   })
 })

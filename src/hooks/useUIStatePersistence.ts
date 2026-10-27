@@ -22,6 +22,7 @@ import type {
   PendingSkill,
   PendingTextFile,
   ReadTextResponse,
+  SendMessageArgs,
 } from '@/types/chat'
 import type {
   PendingImageDraft,
@@ -68,12 +69,24 @@ function serializePendingTextFiles(
   const out: Record<string, PendingTextFileDraft[]> = {}
   for (const [sessionId, textFiles] of Object.entries(pendingTextFiles)) {
     if (textFiles.length === 0) continue
-    out[sessionId] = textFiles.map(({ id, path, filename, size }) => ({
-      id,
-      path,
-      filename,
-      size,
-    }))
+    out[sessionId] = textFiles.map(
+      ({ id, path, filename, size, tableRows }) => ({
+        id,
+        path,
+        filename,
+        size,
+        ...(tableRows && {
+          table_rows: {
+            table_key: tableRows.tableKey,
+            rows: tableRows.rows,
+            ...(tableRows.notes &&
+              Object.keys(tableRows.notes).length > 0 && {
+                notes: tableRows.notes,
+              }),
+          },
+        }),
+      })
+    )
   }
   return out
 }
@@ -170,14 +183,34 @@ export function useUIStatePersistence() {
       pendingFiles,
       pendingSkills,
       dismissedSetupScripts,
+      collapsedQueuedPromptsSessions,
       reviewSidebarVisible,
       lastOpenedPerProject,
+      autoResume,
+      lastSentArgs,
     } = useChatStore.getState()
+    // Persist only armed sessions that still have replayable send args.
+    const autoResumeForPersist = Object.entries(autoResume).flatMap(
+      ([sessionId, resumeAtMs]) => {
+        const sendArgs = lastSentArgs[sessionId]
+        return sendArgs
+          ? [
+              {
+                session_id: sessionId,
+                resume_at_ms: resumeAtMs,
+                send_args: sendArgs,
+              },
+            ]
+          : []
+      }
+    )
     const { selectedProjectId } = useProjectsStore.getState()
     const {
       sessionTerminalIds,
       sessionPrimarySurface,
       seenFailedWorkflowRunIds,
+      agentUpdatesSeenAt,
+      gitDiffViewMode,
     } = useUIStore.getState()
     const { terminals, activeTerminalIds } = useTerminalStore.getState()
     const shouldPersistTerminalRuntime = !isLocalBackend()
@@ -229,11 +262,15 @@ export function useUIStatePersistence() {
             source_project_name: file.sourceProjectName,
             extension: file.extension,
             is_directory: file.isDirectory,
+            attached: file.attached,
           })),
         ])
       ),
       pending_skills: pendingSkills,
       dismissed_setup_scripts: Object.keys(dismissedSetupScripts),
+      collapsed_queued_prompts_sessions: Object.keys(
+        collapsedQueuedPromptsSessions
+      ),
       // Review sidebar visibility
       review_sidebar_visible: reviewSidebarVisible,
       // Modal terminal drawer state
@@ -261,6 +298,9 @@ export function useUIStatePersistence() {
         ])
       ),
       seen_failed_workflow_run_ids: seenFailedWorkflowRunIds,
+      agent_updates_seen_at: agentUpdatesSeenAt,
+      auto_resume: autoResumeForPersist,
+      git_diff_view_mode: gitDiffViewMode,
       version: 1, // Reset for first release
     }
   }, [])
@@ -377,6 +417,13 @@ export function useUIStatePersistence() {
       useUIStore.getState().setZenMode(uiState.zen_mode)
     }
 
+    if (
+      uiState.git_diff_view_mode === 'list' ||
+      uiState.git_diff_view_mode === 'tree'
+    ) {
+      useUIStore.getState().setGitDiffViewMode(uiState.git_diff_view_mode)
+    }
+
     // Restore active project first (selectProject clears selectedWorktreeId)
     // This must happen BEFORE restoring the active worktree
     if (uiState.active_project_id) {
@@ -473,6 +520,7 @@ export function useUIStatePersistence() {
                 sourceProjectName: file.source_project_name,
                 extension: file.extension,
                 isDirectory: file.is_directory,
+                attached: file.attached,
               },
             ]
           : []
@@ -492,6 +540,15 @@ export function useUIStatePersistence() {
     })
     if (Object.keys(dismissedSetupScripts).length > 0) {
       useChatStore.setState({ dismissedSetupScripts })
+    }
+    const collapsedQueuedPromptsSessions = Object.fromEntries(
+      (uiState.collapsed_queued_prompts_sessions ?? []).map(sessionId => [
+        sessionId,
+        true,
+      ])
+    )
+    if (Object.keys(collapsedQueuedPromptsSessions).length > 0) {
+      useChatStore.setState({ collapsedQueuedPromptsSessions })
     }
 
     // Restore unsent image attachments (files already on disk)
@@ -538,6 +595,13 @@ export function useUIStatePersistence() {
             filename: tf.filename,
             size: tf.size ?? 0,
             content,
+            ...(tf.table_rows && {
+              tableRows: {
+                tableKey: tf.table_rows.table_key,
+                rows: tf.table_rows.rows,
+                notes: tf.table_rows.notes ?? {},
+              },
+            }),
           })
           if (!tf.content) {
             needsContentHydration.push({
@@ -958,6 +1022,34 @@ export function useUIStatePersistence() {
         .setSeenFailedWorkflowRunIds(seenFailedWorkflowRunIds)
     }
 
+    const agentUpdatesSeenAt = uiState.agent_updates_seen_at ?? {}
+    if (Object.keys(agentUpdatesSeenAt).length > 0) {
+      useUIStore.getState().setAgentUpdatesSeenAt(agentUpdatesSeenAt)
+    }
+
+    // Restore armed auto-continue sessions (sessionId → reset epoch ms) plus
+    // their replayable send args. The watcher (useAutoResume) fires them.
+    const persistedAutoResume = uiState.auto_resume ?? []
+    if (persistedAutoResume.length > 0) {
+      const autoResume: Record<string, number> = {}
+      const lastSentArgs: Record<string, SendMessageArgs> = {}
+      for (const entry of persistedAutoResume) {
+        if (!entry?.session_id || !entry.send_args) continue
+        if (typeof entry.resume_at_ms !== 'number') continue
+        autoResume[entry.session_id] = entry.resume_at_ms
+        lastSentArgs[entry.session_id] = entry.send_args
+      }
+      if (Object.keys(autoResume).length > 0) {
+        logger.debug('Restoring armed auto-continue sessions', {
+          count: Object.keys(autoResume).length,
+        })
+        useChatStore.setState(state => ({
+          autoResume: { ...state.autoResume, ...autoResume },
+          lastSentArgs: { ...state.lastSentArgs, ...lastSentArgs },
+        }))
+      }
+    }
+
     // Restore browser pane state (per-worktree tabs + 3-surface visibility)
     const persistedBrowserTabs = uiState.browser_tabs ?? {}
     const browserActiveTabIds = uiState.browser_active_tab_ids ?? {}
@@ -1123,6 +1215,8 @@ export function useUIStatePersistence() {
     let prevSessionPrimarySurface = useUIStore.getState().sessionPrimarySurface
     let prevSeenFailedWorkflowRunIds =
       useUIStore.getState().seenFailedWorkflowRunIds
+    let prevAgentUpdatesSeenAt = useUIStore.getState().agentUpdatesSeenAt
+    let prevGitDiffViewMode = useUIStore.getState().gitDiffViewMode
     let prevWorktreeId = useChatStore.getState().activeWorktreeId
     let prevWorktreePath = useChatStore.getState().activeWorktreePath
     let prevLastActiveWorktreeId = useChatStore.getState().lastActiveWorktreeId
@@ -1134,8 +1228,11 @@ export function useUIStatePersistence() {
     let prevPendingSkills = useChatStore.getState().pendingSkills
     let prevDismissedSetupScripts =
       useChatStore.getState().dismissedSetupScripts
+    let prevCollapsedQueuedPromptsSessions =
+      useChatStore.getState().collapsedQueuedPromptsSessions
     let prevReviewSidebarVisible = useChatStore.getState().reviewSidebarVisible
     let prevLastOpenedPerProject = useChatStore.getState().lastOpenedPerProject
+    let prevAutoResume = useChatStore.getState().autoResume
     let prevTerminalInstances = useTerminalStore.getState().terminals
     let prevTerminalActiveIds = useTerminalStore.getState().activeTerminalIds
     let prevBrowserTabs = useBrowserStore.getState().tabs
@@ -1165,15 +1262,23 @@ export function useUIStatePersistence() {
         state.sessionPrimarySurface !== prevSessionPrimarySurface
       const seenFailedWorkflowRunIdsChanged =
         state.seenFailedWorkflowRunIds !== prevSeenFailedWorkflowRunIds
+      const agentUpdatesSeenAtChanged =
+        state.agentUpdatesSeenAt !== prevAgentUpdatesSeenAt
+      const gitDiffViewModeChanged =
+        state.gitDiffViewMode !== prevGitDiffViewMode
 
       if (
         sessionTerminalIdsChanged ||
         sessionPrimarySurfaceChanged ||
-        seenFailedWorkflowRunIdsChanged
+        seenFailedWorkflowRunIdsChanged ||
+        agentUpdatesSeenAtChanged ||
+        gitDiffViewModeChanged
       ) {
         prevSessionTerminalIds = state.sessionTerminalIds
         prevSessionPrimarySurface = state.sessionPrimarySurface
         prevSeenFailedWorkflowRunIds = state.seenFailedWorkflowRunIds
+        prevAgentUpdatesSeenAt = state.agentUpdatesSeenAt
+        prevGitDiffViewMode = state.gitDiffViewMode
         debouncedSaveRef.current?.()
       }
     })
@@ -1196,10 +1301,14 @@ export function useUIStatePersistence() {
       const pendingSkillsChanged = state.pendingSkills !== prevPendingSkills
       const dismissedSetupScriptsChanged =
         state.dismissedSetupScripts !== prevDismissedSetupScripts
+      const collapsedQueuedPromptsChanged =
+        state.collapsedQueuedPromptsSessions !==
+        prevCollapsedQueuedPromptsSessions
       const reviewSidebarChanged =
         state.reviewSidebarVisible !== prevReviewSidebarVisible
       const lastOpenedChanged =
         state.lastOpenedPerProject !== prevLastOpenedPerProject
+      const autoResumeChanged = state.autoResume !== prevAutoResume
 
       if (
         worktreeChanged ||
@@ -1210,8 +1319,10 @@ export function useUIStatePersistence() {
         pendingFilesChanged ||
         pendingSkillsChanged ||
         dismissedSetupScriptsChanged ||
+        collapsedQueuedPromptsChanged ||
         reviewSidebarChanged ||
-        lastOpenedChanged
+        lastOpenedChanged ||
+        autoResumeChanged
       ) {
         prevWorktreeId = state.activeWorktreeId
         prevWorktreePath = state.activeWorktreePath
@@ -1223,8 +1334,11 @@ export function useUIStatePersistence() {
         prevPendingFiles = state.pendingFiles
         prevPendingSkills = state.pendingSkills
         prevDismissedSetupScripts = state.dismissedSetupScripts
+        prevCollapsedQueuedPromptsSessions =
+          state.collapsedQueuedPromptsSessions
         prevReviewSidebarVisible = state.reviewSidebarVisible
         prevLastOpenedPerProject = state.lastOpenedPerProject
+        prevAutoResume = state.autoResume
         debouncedSaveRef.current?.()
       }
     })

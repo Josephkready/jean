@@ -16,7 +16,9 @@ const BACKENDS: CliBackend[] = [
   'commandcode',
   'grok',
   'kimi',
+  'devin',
   'antigravity',
+  'muse',
 ]
 
 const status = Object.fromEntries(
@@ -76,9 +78,17 @@ vi.mock('@/services/kimi-cli', () => ({
   useKimiCliStatus: () => statusQuery('kimi'),
   useKimiCliAuth: () => authQuery('kimi'),
 }))
+vi.mock('@/services/devin-cli', () => ({
+  useDevinCliStatus: () => statusQuery('devin'),
+  useDevinCliAuth: () => authQuery('devin'),
+}))
 vi.mock('@/services/antigravity-cli', () => ({
   useAntigravityCliStatus: () => statusQuery('antigravity'),
   useAntigravityCliAuth: () => authQuery('antigravity'),
+}))
+vi.mock('@/services/muse-cli', () => ({
+  useMuseCliStatus: () => statusQuery('muse'),
+  useMuseCliAuth: () => authQuery('muse'),
 }))
 
 describe('isBackendUsable', () => {
@@ -119,6 +129,8 @@ describe('useInstalledBackends', () => {
     auth.claude.authenticated = true
     status.opencode.installed = true
     auth.opencode.authenticated = true
+    status.devin.installed = true
+    auth.devin.authenticated = true
     status.cursor.installed = true
     // cursor not authenticated — still listed
 
@@ -128,7 +140,28 @@ describe('useInstalledBackends', () => {
       'claude',
       'opencode',
       'cursor',
+      'devin',
     ])
+  })
+
+  it('lists installed Muse after the other backends', () => {
+    status.claude.installed = true
+    status.muse.installed = true
+
+    const { result } = renderHook(() => useInstalledBackends())
+
+    expect(result.current.installedBackends).toEqual(['claude', 'muse'])
+  })
+
+  it('reports Muse auth only when installed', () => {
+    status.muse.installed = true
+    auth.muse.authenticated = true
+    const { result } = renderHook(() => useBackendAuthStatuses())
+    expect(result.current.authByBackend.muse).toBe(true)
+
+    status.muse.installed = false
+    const { result: uninstalled } = renderHook(() => useBackendAuthStatuses())
+    expect(uninstalled.current.authByBackend.muse).toBeUndefined()
   })
 
   it('lists installed Antigravity even when not authenticated', () => {

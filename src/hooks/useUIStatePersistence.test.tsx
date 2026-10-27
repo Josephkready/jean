@@ -112,6 +112,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
       pendingFiles: {},
       pendingSkills: {},
       dismissedSetupScripts: {},
+      collapsedQueuedPromptsSessions: {},
     })
     useProjectsStore.setState({
       projectCanvasSettings: {},
@@ -351,6 +352,29 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
     })
   })
 
+  it('restores collapsed queued prompts panels after a reload', async () => {
+    mockUseUIState.mockReturnValue({
+      data: buildUiState({ collapsed_queued_prompts_sessions: ['session-1'] }),
+      isSuccess: true,
+    })
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useChatStore.getState().collapsedQueuedPromptsSessions).toEqual({
+        'session-1': true,
+      })
+    })
+  })
+
   it('restores unsent image and pasted-text attachments', async () => {
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       if (command === 'get_active_terminals') return []
@@ -382,6 +406,11 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
               path: '/tmp/pasted-texts/paste-1.txt',
               filename: 'paste-1.txt',
               size: 12,
+              table_rows: {
+                table_key: 'msg-1:0',
+                rows: [0, 2],
+                notes: { 2: 'check this' },
+              },
             },
           ],
         },
@@ -420,6 +449,11 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
             filename: 'paste-1.txt',
             size: 19,
             content: 'hydrated paste body',
+            tableRows: {
+              tableKey: 'msg-1:0',
+              rows: [0, 2],
+              notes: { 2: 'check this' },
+            },
           },
         ],
       })
@@ -552,6 +586,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
       filename: 'paste-1.txt',
       size: 12,
       content: 'pasted body',
+      tableRows: { tableKey: 'msg-1:0', rows: [1], notes: {} },
     })
     // Loading placeholders must not be persisted.
     useChatStore.getState().addPendingImage('session-1', {
@@ -582,6 +617,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
                 path: '/tmp/pasted-texts/paste-1.txt',
                 filename: 'paste-1.txt',
                 size: 12,
+                table_rows: { table_key: 'msg-1:0', rows: [1] },
               },
             ],
           },

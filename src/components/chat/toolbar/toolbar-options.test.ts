@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEVIN_MODEL_OPTIONS,
   ANTIGRAVITY_EFFORT_LEVEL_OPTIONS,
   EFFORT_LEVEL_OPTIONS,
+  MUSE_EFFORT_LEVEL_OPTIONS,
   PI_EFFORT_LEVEL_OPTIONS,
   THINKING_LEVEL_OPTIONS,
   withAdaptiveEffortOption,
@@ -9,11 +11,23 @@ import {
 
 describe('ANTIGRAVITY_EFFORT_LEVEL_OPTIONS', () => {
   it('matches the agy --effort contract', () => {
-    expect(ANTIGRAVITY_EFFORT_LEVEL_OPTIONS.map(option => option.value)).toEqual([
-      'adaptive',
+    expect(
+      ANTIGRAVITY_EFFORT_LEVEL_OPTIONS.map(option => option.value)
+    ).toEqual(['adaptive', 'low', 'medium', 'high'])
+  })
+})
+
+describe('MUSE_EFFORT_LEVEL_OPTIONS', () => {
+  it('matches the Muse reasoningEffort contract in CLI order', () => {
+    expect(MUSE_EFFORT_LEVEL_OPTIONS.map(option => option.value)).toEqual([
+      'none',
+      'minimal',
       'low',
       'medium',
       'high',
+      'xhigh',
+      'max',
+      'ultra',
     ])
   })
 })
@@ -27,6 +41,14 @@ describe('PI_EFFORT_LEVEL_OPTIONS', () => {
       'medium',
       'high',
       'xhigh',
+    ])
+  })
+})
+
+describe('DEVIN_MODEL_OPTIONS', () => {
+  it('exposes the Devin configured default model', () => {
+    expect(DEVIN_MODEL_OPTIONS).toEqual([
+      { value: 'devin/default', label: 'Configured default' },
     ])
   })
 })
@@ -47,7 +69,9 @@ describe('Adaptive/Default thinking/effort option (Antigravity only)', () => {
       { value: 'high', label: 'High', description: 'Deep' },
     ]
     expect(
-      withAdaptiveEffortOption(base, 'claude-opus-4-8').map(level => level.value)
+      withAdaptiveEffortOption(base, 'claude-opus-4-8').map(
+        level => level.value
+      )
     ).toEqual(['medium', 'high'])
     const antigravityLevels = withAdaptiveEffortOption(
       base,

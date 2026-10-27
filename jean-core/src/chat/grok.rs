@@ -1599,7 +1599,7 @@ fn build_grok_args(
     grok_session_id: Option<&str>,
     working_dir: &str,
 ) -> Vec<String> {
-    let effective_mode = execution_mode.unwrap_or("plan");
+    let effective_mode = execution_mode.unwrap_or("build");
     let mut args = vec![
         "--no-auto-update".to_string(),
         "-p".to_string(),
@@ -3596,7 +3596,7 @@ fn selected_permission_option(params: &Value, allow: bool) -> Option<String> {
 }
 
 fn is_plan_execution_mode(execution_mode: Option<&str>) -> bool {
-    matches!(execution_mode, Some("plan") | None)
+    execution_mode == Some("plan")
 }
 
 /// Whether a Grok tool name mutates the workspace / plan state (blocked in plan mode).
@@ -3927,7 +3927,7 @@ fn handle_acp_client_request(
 }
 
 fn grok_execution_mode_instruction(execution_mode: Option<&str>) -> Option<&'static str> {
-    match execution_mode.unwrap_or("plan") {
+    match execution_mode.unwrap_or("build") {
         "build" | "supervised" | "auto" => Some(
             "You are in BUILD MODE. Start implementing immediately. \
              This instruction supersedes any earlier plan-mode state or instructions. \
@@ -5766,6 +5766,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             status: super::super::types::RunStatus::Completed,
             assistant_message_id: Some("a-err".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: None,
@@ -5775,7 +5776,9 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             cursor_chat_id: None,
             grok_session_id: Some("grok-hist-err".to_string()),
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
         let message = parse_grok_run_to_message(&lines, &run).unwrap();
@@ -6708,6 +6711,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             status: super::super::types::RunStatus::Completed,
             assistant_message_id: Some("a1".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: Some(42),
@@ -6717,7 +6721,9 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             cursor_chat_id: None,
             grok_session_id: Some("grok-hist-1".to_string()),
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
         let message = parse_grok_run_to_message(&lines, &run).unwrap();
@@ -6746,6 +6752,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             status: super::super::types::RunStatus::Cancelled,
             assistant_message_id: Some("a-cancel".to_string()),
             cancelled: true,
+            provider_rejected: false,
             recovered: true,
             claude_session_id: None,
             pid: None,
@@ -6755,7 +6762,9 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             cursor_chat_id: None,
             grok_session_id: Some("s".to_string()),
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
         let message = parse_grok_run_to_message(&lines, &run).unwrap();
@@ -6824,6 +6833,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             status: super::super::types::RunStatus::Completed,
             assistant_message_id: Some("a-steer".to_string()),
             cancelled: false,
+            provider_rejected: false,
             recovered: false,
             claude_session_id: None,
             pid: Some(42),
@@ -6833,7 +6843,9 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             cursor_chat_id: None,
             grok_session_id: Some("s".to_string()),
             kimi_session_id: None,
+            devin_session_id: None,
             antigravity_session_id: None,
+            muse_session_id: None,
             checkpoint_id: None,
         };
         let message = parse_grok_run_to_message(&lines, &run).unwrap();

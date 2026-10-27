@@ -58,8 +58,8 @@ function renderTab(overrides: Partial<ComponentProps<typeof GitHubIssuesTab>> = 
       creatingFromNumber={null}
       isBulkInvestigating={false}
       searchInputRef={searchInputRef}
-      onGhLogin={vi.fn()}
-      isGhInstalled={true}
+      onLogin={vi.fn()}
+      isCliInstalled={true}
       {...overrides}
     />
   )
@@ -204,11 +204,116 @@ describe('GitHubIssuesTab multi-select', () => {
         creatingFromNumber={null}
         isBulkInvestigating
         searchInputRef={searchInputRef}
-        onGhLogin={vi.fn()}
-        isGhInstalled={true}
+        onLogin={vi.fn()}
+        isCliInstalled={true}
       />
     )
 
     expect(screen.getByRole('button', { name: /starting/i })).toBeDisabled()
+  })
+})
+
+describe('GitHubIssuesTab provider-aware auth errors', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const authError = new Error('GitLab CLI not authenticated. Run glab auth login')
+
+  it('renders the GitLab auth error (not GitHub) for a gitlab provider', () => {
+    renderTab({ error: authError, provider: 'gitlab' })
+
+    expect(
+      screen.getByRole('button', { name: /sign in to gitlab/i })
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /sign in to github/i })
+    ).toBeNull()
+  })
+
+  it('defers the auth-error branch until the provider is resolved', () => {
+    // provider still defaults to `github` while resolving; nothing auth-related
+    // should render yet.
+    renderTab({
+      error: authError,
+      provider: 'github',
+      providerResolved: false,
+    })
+
+    expect(
+      screen.queryByRole('button', { name: /sign in to github/i })
+    ).toBeNull()
+    expect(
+      screen.queryByRole('button', { name: /sign in to gitlab/i })
+    ).toBeNull()
+  })
+
+  it('shows the GitHub auth error once resolved to github', () => {
+    renderTab({
+      error: new Error('GitHub CLI not authenticated. Run gh auth login'),
+      provider: 'github',
+      providerResolved: true,
+    })
+
+    expect(
+      screen.getByRole('button', { name: /sign in to github/i })
+    ).toBeInTheDocument()
+  })
+})
+
+describe('GitHubIssuesTab multi-remote', () => {
+  it('keeps the same issue number distinct and only spins the source being created', async () => {
+    const user = userEvent.setup()
+    const onBulkInvestigateIssues = vi.fn()
+    renderTab({
+      showSource: true,
+      hasMultipleGitHubRemotes: true,
+      primaryGitHubRemote: 'origin',
+      creatingFromNumber: 12,
+      creatingFromRepo: 'octocat/jean',
+      onBulkInvestigateIssues,
+      getContextMatches: () => [
+        {
+          worktreeId: 'wt-1',
+          worktreeName: 'origin-twelve',
+          worktreePath: '/repo/origin-twelve',
+        },
+      ],
+      issues: [
+        {
+          number: 12,
+          title: 'Origin twelve',
+          body: '',
+          state: 'OPEN',
+          labels: [],
+          created_at: '2026-01-01T00:00:00Z',
+          author: { login: 'alice' },
+          repo: 'coollabsio/jean',
+          remote: 'origin',
+        },
+        {
+          number: 12,
+          title: 'Fork twelve',
+          body: '',
+          state: 'OPEN',
+          labels: [],
+          created_at: '2026-01-02T00:00:00Z',
+          author: { login: 'bob' },
+          repo: 'octocat/jean',
+          remote: 'fork',
+        },
+      ],
+    })
+
+    expect(screen.getByText('coollabsio/jean')).toBeInTheDocument()
+    expect(screen.getByText('octocat/jean')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Origin twelve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Fork twelve' })).toBeDisabled()
+    expect(screen.getAllByTestId('context-link-badge')).toHaveLength(1)
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all visible issues' })
+    )
+    expect(screen.getByText('2 selected')).toBeInTheDocument()
   })
 })

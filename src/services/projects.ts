@@ -21,12 +21,14 @@ import { logger } from '@/lib/logger'
 import { fileToBase64 } from '@/lib/file-base64'
 import { disposeAllWorktreeTerminals } from '@/lib/terminal-instances'
 import { toastActionLabel } from '@/lib/toast-action-label'
+import { parseUnmanagedWorktreeListing } from '@/lib/import-existing-worktree'
 import type {
   AutoFixStatus,
   AutoFixIssuePreview,
   Project,
   ProjectServer,
   Worktree,
+  UnmanagedWorktreeListing,
   DetectPrResponse,
   LinkWorktreePrResponse,
   WorktreeCreatingEvent,
@@ -55,8 +57,10 @@ import { browserBackend } from '@/hooks/useBrowserPane'
 import { useBrowserStore } from '@/store/browser-store'
 
 import type { AppPreferences } from '@/types/preferences'
-import type { AdvisoryContext } from '@/types/github'
+import type { AdvisoryContext, DiscussionContext } from '@/types/github'
+import type { ProviderConfig } from '@/types/provider'
 import { hasBackend, hasBackendTransport, isNativeApp } from '@/lib/environment'
+import { gitProviderQueryKeys } from '@/services/git-provider'
 import { openExternal, preOpenWindow } from '@/lib/platform'
 import { shouldSuppressAutoFixConflictNotification } from './worktree-conflict-events'
 import { preserveQueryCacheOnError } from '@/lib/query-error'
@@ -903,6 +907,7 @@ export function useCreateWorktree() {
       advisoryContext,
       linearContext,
       sentryContext,
+      discussionContext,
       customName,
       origin,
       background: _background,
@@ -913,6 +918,7 @@ export function useCreateWorktree() {
         number: number
         title: string
         body?: string
+        repo?: string
         comments: {
           body: string
           author: { login: string }
@@ -924,6 +930,7 @@ export function useCreateWorktree() {
         number: number
         title: string
         body?: string
+        repo?: string
         headRefName: string
         baseRefName: string
         comments: {
@@ -973,6 +980,8 @@ export function useCreateWorktree() {
         permalink: string
         content: string
       }
+      /** GitHub discussion context to attach to the new worktree */
+      discussionContext?: DiscussionContext
       /** Custom worktree name (used when retrying after path conflict) */
       customName?: string
       /** Origin/category for the worktree */
@@ -1004,6 +1013,7 @@ export function useCreateWorktree() {
         advisoryContext,
         linearContext,
         sentryContext,
+        discussionContext,
         customName,
         origin,
         autoOpenInJean: !_background,
@@ -1115,6 +1125,7 @@ export function useCreateWorktreeFromExistingBranch() {
         number: number
         title: string
         body?: string
+        repo?: string
         comments: {
           body: string
           author: { login: string }
@@ -1125,6 +1136,7 @@ export function useCreateWorktreeFromExistingBranch() {
         number: number
         title: string
         body?: string
+        repo?: string
         headRefName: string
         baseRefName: string
         comments: {
@@ -1694,20 +1706,31 @@ export function useWorktreeEvents() {
         invalidateProjectLists(queryClient)
 
         const toastId = `teardown-${id}`
+        const teardownPrefix = 'Teardown script failed:'
+        const isTeardownFailure = error.startsWith(teardownPrefix)
         toast.error('Failed to delete worktree', {
           id: toastId,
-          description: error,
+          // Keep the description short: the toast also holds two buttons, and
+          // a long script error squeezes the text into a thin column.
+          description: isTeardownFailure
+            ? 'The teardown script failed. View the output for details.'
+            : error,
           duration: Infinity,
           action: {
             label: toastActionLabel('View Output'),
             onClick: () =>
               window.dispatchEvent(
                 new CustomEvent('show-teardown-output', {
-                  detail: { output: error, success: false },
+                  detail: {
+                    output: isTeardownFailure
+                      ? error.slice(teardownPrefix.length).trim()
+                      : error,
+                    success: false,
+                  },
                 })
               ),
           },
-          ...(error.startsWith('Teardown script failed:')
+          ...(isTeardownFailure
             ? {
                 cancel: {
                   label: 'Delete without teardown',
@@ -2175,6 +2198,35 @@ export function useImportWorktree() {
       logger.error('Failed to import worktree', { error })
       toast.error('Failed to import worktree', { description: message })
     },
+  })
+}
+
+export function unmanagedWorktreesQueryKey(projectId: string) {
+  return [...projectsQueryKeys.all, 'unmanaged-worktrees', projectId] as const
+}
+
+/**
+ * Git worktrees for a project that Jean is not already tracking.
+ * Read-only. Import still goes through `useImportWorktree`.
+ */
+export function useUnmanagedWorktrees(
+  projectId: string | null,
+  enabled = true
+) {
+  return useQuery({
+    queryKey: unmanagedWorktreesQueryKey(projectId ?? ''),
+    queryFn: async (): Promise<UnmanagedWorktreeListing> => {
+      if (!isTauri() || !projectId) {
+        return { worktrees: [], blockedPaths: [] }
+      }
+
+      logger.debug('Listing unmanaged worktrees', { projectId })
+      const listing = await invoke<unknown>('list_unmanaged_worktrees', {
+        projectId,
+      })
+      return parseUnmanagedWorktreeListing(listing)
+    },
+    enabled: enabled && !!projectId,
   })
 }
 
@@ -2712,6 +2764,7 @@ export interface JeanConfig {
     run: string | string[] | null
   }
   ports?: PortEntry[] | null
+  provider?: ProviderConfig | null
 }
 
 /**
@@ -2763,6 +2816,9 @@ export function useSaveJeanConfig() {
       queryClient.invalidateQueries({ queryKey: ['jean-config', projectPath] })
       queryClient.invalidateQueries({ queryKey: ['run-scripts'] })
       queryClient.invalidateQueries({ queryKey: ['ports'] })
+      // A saved `provider` block changes git-host resolution; refresh it so
+      // useProjectGitProvider does not stay stale for up to 5 minutes.
+      queryClient.invalidateQueries({ queryKey: gitProviderQueryKeys.all })
     },
     onError: error => {
       toast.error('Failed to save jean.json', {
@@ -3121,6 +3177,43 @@ export async function updateWorktreeCachedStatus(
  * Hook to fetch available branches for a project
  * Fetches from origin first, then returns remote branches (or local if no remote)
  */
+export interface RemoteBranchRef {
+  remote: string
+  name: string
+  qualified: string
+}
+
+/**
+ * Remote-tracking branches for the New Worktree dialog.
+ * Fetches every configured remote and keeps same-named branches distinct.
+ */
+export function useWorktreeBranches(projectId: string | null) {
+  return useQuery({
+    queryKey: [
+      ...projectsQueryKeys.detail(projectId ?? ''),
+      'remote-branches',
+    ] as const,
+    queryFn: async (): Promise<RemoteBranchRef[]> => {
+      if (!isTauri() || !projectId) {
+        return []
+      }
+
+      try {
+        logger.debug('Fetching remote branches for project', { projectId })
+        return await invoke<RemoteBranchRef[]>('list_worktree_branches', {
+          projectId,
+        })
+      } catch (error) {
+        logger.error('Failed to load remote branches', { error, projectId })
+        throw error
+      }
+    },
+    enabled: !!projectId,
+    staleTime: 1000 * 30,
+    gcTime: 1000 * 60 * 5,
+  })
+}
+
 export function useProjectBranches(projectId: string | null) {
   return useQuery({
     queryKey: [
@@ -3173,6 +3266,7 @@ export function useUpdateProjectSettings() {
       sentryAuthToken,
       sentryOrganizationSlug,
       sentryProjectSlug,
+      sentryProjects,
       autoFixSettings,
     }: {
       projectId: string
@@ -3189,6 +3283,7 @@ export function useUpdateProjectSettings() {
       sentryAuthToken?: string
       sentryOrganizationSlug?: string
       sentryProjectSlug?: string
+      sentryProjects?: Project['sentry_projects']
       autoFixSettings?: Project['auto_fix_settings']
       linkedProjectIds?: string[]
     }): Promise<Project> => {
@@ -3230,6 +3325,7 @@ export function useUpdateProjectSettings() {
           sentryAuthToken,
           sentryOrganizationSlug,
           sentryProjectSlug,
+          sentryProjects,
           autoFixSettings,
           linkedProjectIds: resourceLinkedProjectIds,
         }

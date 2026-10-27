@@ -518,6 +518,88 @@ describe('ToolCallInline', () => {
     }
   )
 
+  it.each([
+    ['read_file', { path: '/repo/src/app.ts' }, 'Read', 'app.ts'],
+    ['read', { path: '/repo/src/lib.ts' }, 'Read', 'lib.ts'],
+    [
+      'write_file',
+      { path: '/repo/src/new.ts', content: 'export {}' },
+      'Write',
+      'new.ts',
+    ],
+    ['write', { path: '/repo/src/other.ts', content: '' }, 'Write', 'other.ts'],
+    [
+      'edit_file',
+      { path: '/repo/src/app.ts', old_str: 'old', new_str: 'new' },
+      'Edit',
+      'app.ts',
+    ],
+    ['bash', { command: 'bun test' }, 'Bash', 'bun test'],
+    ['exec_command', { cmd: 'git status' }, 'Bash', 'git status'],
+    ['grep', { pattern: 'needle', path: '/repo' }, 'Grep', '"needle" in /repo'],
+    ['web_search', { query: 'Muse Code docs' }, 'Web Search', 'Muse Code docs'],
+    [
+      'web_fetch',
+      { url: 'https://dev.meta.ai' },
+      'Web Fetch',
+      'https://dev.meta.ai',
+    ],
+    [
+      'apply_patch',
+      { patch: '--- a/src/app.ts\n+++ b/src/app.ts\n@@\n-old\n+new\n' },
+      'Apply Patch',
+      '1 file',
+    ],
+  ])(
+    'renders Muse %s with the common renderer',
+    (name, input, label, detail) => {
+      render(<ToolCallInline toolCall={{ id: `muse-${name}`, name, input }} />)
+
+      expect(screen.getByText(label)).toBeInTheDocument()
+      expect(screen.getByText(detail)).toBeInTheDocument()
+      expect(screen.queryByText(/unhandled tool/i)).not.toBeInTheDocument()
+    }
+  )
+
+  it('maps Muse edit_file old_str/new_str onto the Edit diff fields', () => {
+    expect(
+      normalizeToolCallForDisplay('edit_file', {
+        path: '/repo/src/app.ts',
+        old_str: 'const a = 1',
+        new_str: 'const a = 2',
+      })
+    ).toMatchObject({
+      name: 'Edit',
+      input: {
+        file_path: '/repo/src/app.ts',
+        old_string: 'const a = 1',
+        new_string: 'const a = 2',
+      },
+    })
+  })
+
+  it.each([
+    ['write_todos', 'Write Todos'],
+    ['search', 'Search'],
+    ['code_exec', 'Code Exec'],
+  ])(
+    'renders native Muse tool %s as %s without an unhandled warning',
+    (name, label) => {
+      render(
+        <ToolCallInline
+          toolCall={{
+            id: `muse-${name}`,
+            name,
+            input: { description: 'Native Muse operation' },
+          }}
+        />
+      )
+
+      expect(screen.getByText(label)).toBeInTheDocument()
+      expect(screen.queryByText(/unhandled tool/i)).not.toBeInTheDocument()
+    }
+  )
+
   it('renders FileChange diffs without duplicate raw output', () => {
     const { container } = render(
       <ToolCallInline
@@ -1280,7 +1362,7 @@ describe('tool error indicator', () => {
 })
 
 describe('summarizeToolCall', () => {
-  it('labels Codex sub-agent activity with the agent path', () => {
+  it('labels Codex sub-agent activity with the codename and model', () => {
     expect(
       summarizeToolCall({
         id: 'sa1',
@@ -1289,10 +1371,22 @@ describe('summarizeToolCall', () => {
           type: 'sub_agent_activity',
           kind: 'started',
           prompt: '/root/demo_one',
+          agent_path: '/root/demo_one',
           receiver_thread_ids: ['t1'],
         },
       })
-    ).toEqual({ label: 'Spawn Agent', detail: '/root/demo_one' })
+    ).toEqual({ label: 'Spawn Agent', detail: 'demo_one' })
+    expect(
+      summarizeToolCall({
+        id: 'sa2',
+        name: 'SpawnAgent',
+        input: {
+          type: 'sub_agent_activity',
+          prompt: '/root/demo_one',
+          model: 'gpt-5.4',
+        },
+      })
+    ).toEqual({ label: 'Spawn Agent', detail: 'demo_one · gpt-5.4' })
   })
 
   it('uses the same friendly labels as the tool rows', () => {

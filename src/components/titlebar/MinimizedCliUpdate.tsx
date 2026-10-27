@@ -17,11 +17,12 @@ export function MinimizedCliUpdate() {
     <button
       type="button"
       onClick={restore}
-      aria-label={`${update.name} update: ${accessibleStatus}`}
+      aria-label={`${update.name} update (${update.target}): ${accessibleStatus}`}
       className="mr-1.5 flex items-center gap-1.5 rounded-md bg-primary/15 px-1.5 py-0.5 text-[0.625rem] font-medium text-primary transition-colors hover:bg-primary/25 cursor-pointer"
     >
       <LoaderCircle className="size-3 animate-spin" aria-hidden />
       <span>{update.name}</span>
+      <span className="opacity-70">{update.target}</span>
       <span>{status}</span>
     </button>
   )

@@ -147,6 +147,10 @@ pub struct JeanConfig {
     pub scripts: JeanScripts,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ports: Option<Vec<PortEntry>>,
+    /// Optional git hosting provider binding (GitHub / GitLab, incl. self-hosted host).
+    /// Absent → auto-detect from the origin remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<super::provider::ProviderConfig>,
 }
 
 /// Run script(s) — supports both a single string and an array of strings
@@ -176,6 +180,42 @@ pub struct JeanScripts {
     pub teardown: Option<String>,
     /// Script(s) to run the dev environment — string or array of strings
     pub run: Option<RunScript>,
+}
+
+/// One Sentry project assigned to a Jean project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SentryProjectLink {
+    pub organization_slug: String,
+    pub project_slug: String,
+}
+
+impl SentryProjectLink {
+    pub fn new(organization_slug: impl Into<String>, project_slug: impl Into<String>) -> Self {
+        Self {
+            organization_slug: organization_slug.into(),
+            project_slug: project_slug.into(),
+        }
+    }
+}
+
+/// Drop blank entries and repeated organization/project pairs, keeping the first of each.
+pub fn normalize_sentry_project_links(links: Vec<SentryProjectLink>) -> Vec<SentryProjectLink> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for link in links {
+        let organization_slug = link.organization_slug.trim().to_string();
+        let project_slug = link.project_slug.trim().to_string();
+        if organization_slug.is_empty() || project_slug.is_empty() {
+            continue;
+        }
+        if seen.insert(format!("{organization_slug}/{project_slug}")) {
+            normalized.push(SentryProjectLink {
+                organization_slug,
+                project_slug,
+            });
+        }
+    }
+    normalized
 }
 
 /// A git project that has been added to Jean, or a folder for organizing projects
@@ -237,9 +277,14 @@ pub struct Project {
     /// Sentry organization slug used by the Issues API
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sentry_organization_slug: Option<String>,
-    /// Sentry project slug mapped to this Jean project
+    /// Sentry project slug mapped to this Jean project.
+    /// Kept in sync with the first entry of `sentry_projects` for older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sentry_project_slug: Option<String>,
+    /// Sentry projects whose issues are shown for this Jean project.
+    /// Empty means fall back to the single slug pair above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sentry_projects: Vec<SentryProjectLink>,
     /// Sentry region API base URL (auto-resolved from the org on first use)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sentry_base_url: Option<String>,
@@ -252,6 +297,36 @@ pub struct Project {
     /// SSH target when this project is a managed server (None = git repository)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ProjectServer>,
+}
+
+impl Project {
+    /// Assigned Sentry projects. A stored list wins. Otherwise the legacy slug pair is one entry.
+    pub fn effective_sentry_links(&self) -> Vec<SentryProjectLink> {
+        let stored = normalize_sentry_project_links(self.sentry_projects.clone());
+        if !stored.is_empty() {
+            return stored;
+        }
+        normalize_sentry_project_links(vec![SentryProjectLink::new(
+            self.sentry_organization_slug.clone().unwrap_or_default(),
+            self.sentry_project_slug.clone().unwrap_or_default(),
+        )])
+    }
+
+    pub fn set_sentry_project_links(&mut self, links: Vec<SentryProjectLink>) {
+        let links = normalize_sentry_project_links(links);
+        match links.first() {
+            Some(first) => {
+                self.sentry_organization_slug = Some(first.organization_slug.clone());
+                self.sentry_project_slug = Some(first.project_slug.clone());
+            }
+            None => {
+                self.sentry_organization_slug = None;
+                self.sentry_project_slug = None;
+            }
+        }
+        self.sentry_projects = links;
+        self.sentry_base_url = None;
+    }
 }
 
 /// Project data used by the sidebar and initial bootstrap.
@@ -811,6 +886,7 @@ mod tests {
                 }],
                 reviews: vec![],
                 diff: None,
+                repo: None,
             }),
             security_context: None,
             advisory_context: None,

@@ -2,7 +2,10 @@ import React, { type RefObject } from 'react'
 import { act, renderHook } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { toast } from 'sonner'
 import { useChatStore } from '@/store/chat-store'
+import { useTerminalStore } from '@/store/terminal-store'
+import { useUIStore } from '@/store/ui-store'
 import { invoke } from '@/lib/transport'
 import { defaultPreferences, type AppPreferences } from '@/types/preferences'
 import type {
@@ -120,6 +123,11 @@ describe('useInvestigateHandlers', () => {
       errors: {},
       lastSentMessages: {},
     })
+    useUIStore.setState({
+      sessionPrimarySurface: {},
+      sessionTerminalIds: {},
+    })
+    useTerminalStore.setState({ runningTerminals: new Set() })
   })
 
   it.each([
@@ -148,8 +156,58 @@ describe('useInvestigateHandlers', () => {
         }),
         expect.any(Object)
       )
+      expect(invoke).not.toHaveBeenCalledWith(
+        'terminal_write',
+        expect.anything()
+      )
     }
   )
+
+  it('writes the rendered investigate prompt into a running native CLI pty', async () => {
+    useUIStore.getState().setSessionPrimarySurface('base-session', 'terminal')
+    useUIStore.getState().setSessionTerminalId('base-session', 'term-1')
+    useTerminalStore.getState().setTerminalRunning('term-1', true)
+    vi.mocked(invoke).mockImplementation(async name =>
+      name === 'list_loaded_issue_contexts'
+        ? ([{ number: 42 }] as never)
+        : (undefined as never)
+    )
+    const { result, sendMessage } = renderHandlers()
+
+    await act(async () => {
+      await result.current.handleInvestigate('issue')
+    })
+
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+    expect(invoke).toHaveBeenCalledWith(
+      'terminal_write',
+      expect.objectContaining({
+        terminalId: 'term-1',
+        data: expect.stringContaining('#42'),
+      })
+    )
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('toasts and does not write when the native CLI pty has exited', async () => {
+    useUIStore.getState().setSessionPrimarySurface('base-session', 'terminal')
+    useUIStore.getState().setSessionTerminalId('base-session', 'term-1')
+    useTerminalStore.getState().setTerminalRunning('term-1', false)
+    vi.mocked(invoke).mockImplementation(async name =>
+      name === 'list_loaded_issue_contexts'
+        ? ([{ number: 42 }] as never)
+        : (undefined as never)
+    )
+    const { result, sendMessage } = renderHandlers()
+
+    await act(async () => {
+      await result.current.handleInvestigate('issue')
+    })
+
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+    expect(invoke).not.toHaveBeenCalledWith('terminal_write', expect.anything())
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('exited'))
+  })
 
   it('uses the dedicated Sentry prompt and execution settings', async () => {
     vi.mocked(invoke).mockImplementation(async command => {
@@ -395,6 +453,58 @@ describe('useInvestigateHandlers', () => {
     )
   })
 
+  it('uses magic prompt effort for Muse Sentry investigation and drops thinking levels', async () => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === 'get_sentry_issue_context_contents') {
+        return [
+          {
+            id: '789',
+            shortId: 'COOLIFY-MUSE',
+            title: 'Muse crash',
+            permalink: 'https://sentry.io/issues/789',
+            content: '# Sentry context\n\nStack trace',
+          },
+        ] as never
+      }
+      return undefined as never
+    })
+    const preferences: AppPreferences = {
+      ...defaultPreferences,
+      magic_prompt_models: {
+        ...defaultPreferences.magic_prompt_models,
+        investigate_sentry_issue_model: 'muse/muse-spark-1.2',
+      },
+      magic_prompt_backends: {
+        ...defaultPreferences.magic_prompt_backends,
+        investigate_sentry_issue_backend: 'muse',
+      },
+      magic_prompt_modes: {
+        ...defaultPreferences.magic_prompt_modes,
+        investigate_sentry_issue_mode: 'yolo',
+      },
+      magic_prompt_efforts: {
+        ...defaultPreferences.magic_prompt_efforts,
+        investigate_sentry_issue_effort: 'ultra',
+      },
+    }
+    const { result, sendMessage } = renderHandlers({ preferences })
+
+    await act(async () => {
+      await result.current.handleInvestigate('sentry-issue')
+    })
+
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'muse/muse-spark-1.2',
+        backend: 'muse',
+        executionMode: 'yolo',
+        effortLevel: 'ultra',
+        thinkingLevel: undefined,
+      }),
+      expect.any(Object)
+    )
+  })
+
   it('keeps the session UI execution mode in sync with separate review comment send mode', async () => {
     const { result, sendMessage } = renderHandlers({ executionMode: 'yolo' })
 
@@ -424,6 +534,28 @@ describe('useInvestigateHandlers', () => {
     )
     expect(useChatStore.getState().executionModes['comment-session-2']).toBe(
       'yolo'
+    )
+  })
+
+  it('uses backend and model override for review comments', async () => {
+    const { result, sendMessage } = renderHandlers()
+
+    await act(async () => {
+      await result.current.handleReviewComments(['fix one'], {
+        override: { backend: 'codex', model: 'gpt-6.1-sol' },
+      })
+    })
+
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'comment-session-1',
+        backend: 'codex',
+        model: 'gpt-6.1-sol',
+      }),
+      expect.any(Object)
+    )
+    expect(useChatStore.getState().selectedBackends['comment-session-1']).toBe(
+      'codex'
     )
   })
 

@@ -7,6 +7,7 @@ use super::types::{
     PermissionDenial, PermissionDeniedEvent, SubagentUsage, ThinkingLevel, ToolCall, UsageData,
 };
 use crate::http_server::EmitExt;
+use crate::projects::github_discussions::get_discussion_context_paths;
 use crate::projects::github_issues::{
     get_github_contexts_dir, get_preferred_issue_refs, get_preferred_pr_refs,
     get_session_advisory_refs, get_session_security_refs,
@@ -30,7 +31,7 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - Write detailed specs upfront to reduce ambiguity\n\
 - Keep plans concise but complete enough for zero-context handoff (Full access/Build in a new worktree must not require re-scanning the repo). Prefer short wording over thin checklists.\n\
 - When the current execution mode is plan, use the backend's native plan tool/UI call when available (Claude ExitPlanMode, Codex `<proposed_plan>` / collaboration Plan mode, Cursor/OpenCode equivalent), not plain text only.\n\
-- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline as a short numbered list of options (1, 2, 3...) and tell the user to reply with a number.\n\
+- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline in this exact format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options, one option per line. Jean shows these options as buttons. If you end with a `## Recap`, put this question at the end of the recap, not before it.\n\
 - For Codex specifically, when the current execution mode is plan: do not write plan files or code; when the plan is ready wrap it in `<proposed_plan>...</proposed_plan>` so Jean can show the approval UI. Do not use the `update_plan` checklist tool in plan mode.\n\
 - Every Codex response that contains or revises a plan while the current execution mode is plan must use a complete `<proposed_plan>` block (or a native plan item); do not provide plain-text-only plans, and do not attempt file writes.\n\
 - Use a plain-text Unresolved Questions section only for non-actionable notes or when the backend cannot ask interactively.\n\
@@ -42,19 +43,14 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - Skip only for trivial edits to code already read this session.\n\
 - Do NOT use Context7 — WebSearch only.\n\
 \n\
-### 3. Subagent Strategy to keep main context window clean\n\
-- Offload research, exploration, and parallel analysis to subagents\n\
-- For complex problems, throw more compute at it via subagents\n\
-- One task per subagent for focused execution\n\
-\n\
-### 4. Self-Improvement Loop\n\
+### 3. Self-Improvement Loop\n\
 - Only update '.ai/lessons.md' for general, project-wide learning that applies across features\n\
 - Do not add feature-specific, bug-fix-specific, or small/local lessons\n\
 - Remove narrow or specific entries when you detect them\n\
 - Review lessons at session start for relevant project\n\
 - Keep '.ai/lessons.md' concise by merging duplicate rules and removing obsolete entries\n\
 \n\
-### 5. Verification Before Done\n\
+### 4. Verification Before Done\n\
 - Never mark a task complete without proving it works\n\
 - Diff behavior between main and your changes when relevant\n\
 - Ask yourself: \"Would a staff engineer approve this?\"\n\
@@ -63,16 +59,20 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - Skip tests for docs, copy, comments, styling-only, and prompt/config text changes; say that you skipped them.\n\
 - Do not re-run a passing check when the code it covers has not changed since.\n\
 - Write new tests only for behavior that can break silently: business logic, parsing/serialization, state transitions, persistence, and a regression test for each fixed bug.\n\
-- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called. Verify UI changes in the running app instead.\n\
-- If a UI check needs a browser and no other browser tool is available, use the Agent Browser.\n\
+- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called.\n\
+- ALWAYS use a browser when the user asks for it, or when the task is visual: copy or match a style from a reference, compare with another page or screenshot, or fix a layout or visual bug.\n\
+- Also use a browser when the change has runtime UI behavior that typecheck, lint, or tests cannot prove: new or changed user flows, or state/interaction logic.\n\
+- In all other cases, do NOT open a browser. Examples: small copy/text edits, small class or prop tweaks that you did not have to match to a reference, refactors with no behavior change, backend-only changes. For these, a typecheck or the narrowest test is enough. Say \"Not tested in browser\" in the recap.\n\
+- Before you open a browser on your own decision (not a user request), state in one line why a cheaper check is not enough.\n\
+- If a UI check needs a browser and no other browser tool is available, use the Agent Browser. Check only the changed area, not the full app.\n\
 \n\
-### 6. Demand Elegance (Balanced)\n\
+### 5. Demand Elegance (Balanced)\n\
 - For non-trivial changes: pause and ask \"is there a more elegant way?\"\n\
 - If a fix feels hacky: \"Knowing everything I know now, implement the elegant solution\"\n\
 - Skip this for simple, obvious fixes - don't over-engineer\n\
 - Challenge your own work before presenting it\n\
 \n\
-### 7. Autonomous Bug Fixing\n\
+### 6. Autonomous Bug Fixing\n\
 - When given a bug report: just fix it. Don't ask for hand-holding\n\
 - Point at logs, errors, failing tests -> then resolve them\n\
 - Zero context switching required from the user\n\
@@ -91,7 +91,7 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 ## Core Principles\n\
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.\n\
 - **VERY IMPORTANT: Keep Code Simple**: Do not over-engineer. Always implement the simplest maintainable solution. Avoid extra abstractions, frameworks, configuration, or future-proofing unless clearly required.\n\
-- **Clickable References**: When output mentions issues, PRs, security advisories/alerts, Linear issues, or other external resources, include clickable links when available so users can open them directly.\n\
+- **Clickable References**: When output mentions issues, PRs, security advisories/alerts, Linear issues, Sentry issues, or other external resources, include clickable links when available so users can open them directly.\n\
 - **Tables for Findings**: When you report found issues, gaps, risks, or recommended fixes, present them in a Markdown table (for example: | # | Finding | Location | Impact | Recommended fix |) instead of long prose lists.\n\
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.\n\
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.\n\
@@ -103,6 +103,7 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.\n\
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.\n\
 - If already in a Jean worktree or base/main workspace, continue in the current workspace.\n\
+- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.\n\
 \n\
 ## Jean Run Environment\n\
 - When you need to test a running app (UI, HTTP, browser, smoke, e2e), call Jean MCP `get_run_environments` first (pass this worktreeId when known).\n\
@@ -115,21 +116,21 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - After each finished task, please write a few bullet points on how to test the changes.";
 
 fn execution_mode_instruction(execution_mode: Option<&str>) -> Option<&'static str> {
-    match execution_mode.unwrap_or("plan") {
+    match execution_mode.unwrap_or("build") {
         "build" | "auto" | "supervised" => Some(
             "You are in BUILD MODE. Start implementing immediately. \
              Do NOT enter plan mode and do NOT use ExitPlanMode unless the user explicitly asks \
              for a new plan. If a required decision is missing, use AskUserQuestion instead of \
-             ExitPlanMode; if AskUserQuestion is not in your tool set, ask inline with a short \
-             numbered list of options and have the user reply with a number.",
+             ExitPlanMode; if AskUserQuestion is not in your tool set, ask inline: the question, \
+             then the line `Reply with a number:`, then a numbered list (1., 2., 3.) of options.",
         ),
         "yolo" => Some(
             "You are in FULL ACCESS MODE. Start implementing immediately. \
              Do NOT enter plan mode and do NOT use ExitPlanMode unless the user explicitly asks \
              for a new plan. Do not ask for confirmation before routine implementation steps. \
              If a required decision is missing, use AskUserQuestion instead of ExitPlanMode; \
-             if AskUserQuestion is not in your tool set, ask inline with a short numbered list \
-             of options and have the user reply with a number.",
+             if AskUserQuestion is not in your tool set, ask inline: the question, then the line \
+             `Reply with a number:`, then a numbered list (1., 2., 3.) of options.",
         ),
         _ => None,
     }
@@ -432,7 +433,7 @@ fn split_fast_model(model: &str) -> (&str, bool) {
 }
 
 fn claude_permission_mode(execution_mode: Option<&str>) -> &'static str {
-    match execution_mode.unwrap_or("plan") {
+    match execution_mode.unwrap_or("build") {
         "supervised" => "default",
         "build" => "acceptEdits",
         "auto" => "auto",
@@ -677,6 +678,7 @@ fn build_claude_args(
     effort_level: Option<&EffortLevel>,
     allowed_tools: Option<&[String]>,
     parallel_execution_prompt: Option<&str>,
+    agent_system_prompt: Option<&str>,
     ai_language: Option<&str>,
     mcp_config: Option<&str>,
     chrome_enabled: bool,
@@ -778,7 +780,7 @@ fn build_claude_args(
     // In build/yolo, remove ExitPlanMode entirely so Claude can't loop back
     // into plan-approval after the user already approved one.
     if matches!(
-        execution_mode.unwrap_or("plan"),
+        execution_mode.unwrap_or("build"),
         "build" | "yolo" | "auto" | "supervised"
     ) {
         args.push("--disallowedTools".to_string());
@@ -875,16 +877,27 @@ fn build_claude_args(
         }
     }
 
-    // Allow embedded/resolved CLI binaries without approval via --allowedTools
-    // Claude wraps paths with spaces in quotes, so use glob patterns to match
-    let gh_binary = crate::gh_cli::config::resolve_gh_binary(app);
-    let gh_path_str = gh_binary.to_string_lossy();
-    args.push("--allowedTools".to_string());
-    args.push(format!("Bash(*{gh_path_str}*)"));
-    // Also allow the Jean-managed path pattern when user configured system PATH gh
-    if !gh_path_str.contains("gh-cli/gh") {
+    // Allow embedded/resolved CLI binaries without approval via --allowedTools.
+    // Claude wraps paths with spaces in quotes, so use glob patterns to match.
+    // Only pre-approve `gh` when it is actually installed.
+    if let Some(gh_binary) = crate::gh_cli::config::resolve_available_gh_binary(app) {
+        let gh_path_str = gh_binary.to_string_lossy();
         args.push("--allowedTools".to_string());
-        args.push("Bash(*gh-cli/gh*)".to_string());
+        args.push(format!("Bash(*{gh_path_str}*)"));
+        // Also allow the Jean-managed path pattern when user configured system PATH gh
+        if !gh_path_str.contains("gh-cli/gh") {
+            args.push("--allowedTools".to_string());
+            args.push("Bash(*gh-cli/gh*)".to_string());
+        }
+    }
+    if let Some(glab_binary) = crate::glab_cli::config::resolve_available_glab_binary(app) {
+        let glab_path_str = glab_binary.to_string_lossy();
+        args.push("--allowedTools".to_string());
+        args.push(format!("Bash(*{glab_path_str}*)"));
+        if !glab_path_str.contains("glab-cli/glab") {
+            args.push("--allowedTools".to_string());
+            args.push("Bash(*glab-cli/glab*)".to_string());
+        }
     }
     args.push("--allowedTools".to_string());
     args.push("Bash(*claude-cli/claude*)".to_string());
@@ -911,39 +924,40 @@ fn build_claude_args(
         }
     }
 
-    // Global system prompt from preferences (like ~/.claude/CLAUDE.md)
-    // Falls back to DEFAULT_GLOBAL_SYSTEM_PROMPT when not set (null = use default)
-    if let Ok(prefs_path) = crate::get_preferences_path(app) {
-        if let Ok(contents) = std::fs::read_to_string(&prefs_path) {
-            if let Ok(prefs) = serde_json::from_str::<crate::AppPreferences>(&contents) {
-                let prompt = crate::projects::server_system_prompt(app, worktree_id)
-                    .unwrap_or_else(|| {
-                        prefs
-                            .magic_prompts
-                            .global_system_prompt
-                            .as_deref()
-                            .map(|s| s.trim())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or(DEFAULT_GLOBAL_SYSTEM_PROMPT)
-                            .to_string()
-                    });
-                system_prompt_parts
-                    .push(crate::apply_agent_browser_preference(prompt, Some(&prefs)));
-            }
-        }
-    }
+    // Sub-agent policy before the global prompt so a user-authored global
+    // prompt has the last word. An empty parallel prompt is fan-out off.
+    // The previous built-in default, which embedded the sub-agent section, is
+    // treated as "use the current default" so that section stays on the toggle.
+    debug_assert_eq!(
+        DEFAULT_GLOBAL_SYSTEM_PROMPT,
+        crate::default_global_system_prompt()
+    );
+    let global_prompt = crate::get_preferences_path(app)
+        .ok()
+        .and_then(|prefs_path| std::fs::read_to_string(prefs_path).ok())
+        .and_then(|contents| serde_json::from_str::<crate::AppPreferences>(&contents).ok())
+        .map(|prefs| {
+            let prompt =
+                crate::projects::server_system_prompt(app, worktree_id).unwrap_or_else(|| {
+                    crate::effective_global_system_prompt(
+                        prefs.magic_prompts.global_system_prompt.as_deref(),
+                    )
+                });
+            crate::apply_agent_browser_preference(prompt, Some(&prefs))
+        })
+        .unwrap_or_default();
+    super::push_subagent_policy_before_global(
+        &mut system_prompt_parts,
+        parallel_execution_prompt,
+        global_prompt,
+    );
 
     if let Some(mode_instruction) = execution_mode_instruction(execution_mode) {
         system_prompt_parts.push(mode_instruction.to_string());
     }
 
-    // Parallel execution prompt - encourages sub-agent parallelization
-    if let Some(prompt) = parallel_execution_prompt {
-        let prompt = prompt.trim();
-        if !prompt.is_empty() {
-            system_prompt_parts.push(prompt.to_string());
-        }
-    }
+    // Agent role prompt. Kept after the global prompt, separate from fan-out.
+    super::push_trimmed_prompt(&mut system_prompt_parts, agent_system_prompt);
 
     // Per-project custom system prompt + linked project instructions
     if let Ok(data) = load_projects_data(app) {
@@ -973,15 +987,8 @@ fn build_claude_args(
         }
     }
 
-    // Embedded gh CLI path - tell Claude to use the app's bundled binary
-    let gh_binary = crate::gh_cli::config::resolve_gh_binary(app);
-    if gh_binary != std::path::PathBuf::from("gh") {
-        system_prompt_parts.push(format!(
-            "When running GitHub CLI commands, use the full path to the embedded binary: {}\n\
-             Do NOT use bare `gh` — always use the full path above.",
-            gh_binary.display()
-        ));
-    }
+    // GitHub CLI: path hint when installed; forbid discovery when it is not.
+    crate::gh_cli::config::append_gh_cli_system_prompt(&mut system_prompt_parts, app);
 
     // Embedded Claude CLI path - tell Claude to use the app's bundled binary
     if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(app) {
@@ -1007,7 +1014,7 @@ fn build_claude_args(
 
     // End-of-turn recap instruction (compact view surfaces this block).
     // Magic release notes skip this — the recap would cover the actual notes.
-    if super::should_include_recap_instruction(app, include_recap) {
+    if include_recap {
         system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
     }
 
@@ -1159,6 +1166,8 @@ fn build_claude_args(
         }
     }
 
+    all_context_paths.extend(get_discussion_context_paths(app, session_id, worktree_id));
+
     // Check for attached saved context files
     if let Ok(app_data_dir) = app.path().app_data_dir() {
         let saved_contexts_dir = app_data_dir.join("session-context");
@@ -1225,6 +1234,13 @@ fn build_claude_args(
                     s.contains("git-context") && s.contains("-advisory-")
                 })
                 .count();
+            let discussion_count = all_context_paths
+                .iter()
+                .filter(|p| {
+                    let s = p.to_string_lossy();
+                    s.contains("git-context") && s.contains("-discussion-")
+                })
+                .count();
             let linear_count = all_context_paths
                 .iter()
                 .filter(|p| {
@@ -1264,6 +1280,7 @@ fn build_claude_args(
                     || pr_count > 0
                     || security_count > 0
                     || advisory_count > 0
+                    || discussion_count > 0
                     || linear_count > 0
                     || saved_context_count > 0
                 {
@@ -1282,6 +1299,10 @@ fn build_claude_args(
                     if advisory_count > 0 {
                         combined_content
                             .push_str(&format!("- {} Security Advisory(s)\n", advisory_count));
+                    }
+                    if discussion_count > 0 {
+                        combined_content
+                            .push_str(&format!("- {discussion_count} GitHub Discussion(s)\n"));
                     }
                     if linear_count > 0 {
                         combined_content.push_str(&format!("- {} Linear Issue(s)\n", linear_count));
@@ -1355,7 +1376,7 @@ fn build_claude_args(
     ));
     env_vars.push((
         "JEAN_EXECUTION_MODE".to_string(),
-        execution_mode.unwrap_or("plan").to_string(),
+        execution_mode.unwrap_or("build").to_string(),
     ));
     if let Some(claude_sid) = existing_claude_session_id {
         env_vars.push(("JEAN_CLAUDE_SESSION_ID".to_string(), claude_sid.to_string()));
@@ -1495,6 +1516,20 @@ fn permission_prompt_args(
 /// The process reads from an input file and writes to an output file.
 /// Jean tails the output file for real-time updates.
 #[allow(clippy::too_many_arguments)]
+/// Whether a new Claude run should use the steerable detached host.
+/// Unix only (WSL/Windows keep the `cat |` pipeline), opt-in via
+/// `claude_auto_steer_enabled`, and only for CLIs that support
+/// `--replay-user-messages` (older PATH installs fall back).
+fn use_claude_host(app: &tauri::AppHandle, cli_path: &std::path::Path) -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
+    let enabled = crate::load_preferences_sync(app)
+        .map(|p| p.claude_auto_steer_enabled)
+        .unwrap_or(false);
+    enabled && claude_cli_supports_flag(cli_path, super::claude_host::REPLAY_USER_MESSAGES_FLAG)
+}
+
 pub fn execute_claude_detached(
     app: &tauri::AppHandle,
     session_id: &str,
@@ -1509,6 +1544,7 @@ pub fn execute_claude_detached(
     effort_level: Option<&EffortLevel>,
     allowed_tools: Option<&[String]>,
     parallel_execution_prompt: Option<&str>,
+    agent_system_prompt: Option<&str>,
     ai_language: Option<&str>,
     mcp_config: Option<&str>,
     chrome_enabled: bool,
@@ -1554,6 +1590,7 @@ pub fn execute_claude_detached(
         effort_level,
         allowed_tools,
         parallel_execution_prompt,
+        agent_system_prompt,
         ai_language,
         mcp_config,
         chrome_enabled,
@@ -1580,16 +1617,37 @@ pub fn execute_claude_detached(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // Spawn detached process
-    let pid = spawn_detached_claude(
-        &cli_path,
-        &args,
-        input_file,
-        output_file,
-        working_dir,
-        &env_refs,
-    )
-    .map_err(|e| {
+    // Spawn detached process: through the steerable host when enabled
+    // (Unix + CLI supports --replay-user-messages), else the plain pipeline.
+    let spawned = if use_claude_host(app, &cli_path) {
+        #[cfg(unix)]
+        {
+            let mut host_args = args.clone();
+            host_args.push(super::claude_host::REPLAY_USER_MESSAGES_FLAG.to_string());
+            super::claude_host::spawn_claude_host(
+                app,
+                session_id,
+                &cli_path,
+                &host_args,
+                input_file,
+                output_file,
+                working_dir,
+                &env_refs,
+            )
+        }
+        #[cfg(not(unix))]
+        unreachable!("use_claude_host is false on non-Unix")
+    } else {
+        spawn_detached_claude(
+            &cli_path,
+            &args,
+            input_file,
+            output_file,
+            working_dir,
+            &env_refs,
+        )
+    };
+    let pid = spawned.map_err(|e| {
         let error_msg = format!("Failed to start Claude CLI: {e}");
         log::error!("{error_msg}");
         let _ = app.emit_all(
@@ -1803,6 +1861,10 @@ pub fn tail_claude_output(
     // CLI starts a new turn when the task finishes, and its first `result`
     // can even arrive after that turn. Wait for the process to exit instead.
     let mut background_wait = BackgroundWait::default();
+    // Host-backed runs (steerable) can have several `result` lines; only the
+    // host's exit marker ends them. Detected from the host's start marker.
+    let mut host_backed = false;
+    let mut host_exited = false;
 
     // Optional raw-stream dump for diagnosing new event shapes (Monitor, etc.).
     // Enable with JEAN_DUMP_STREAM=1.
@@ -1843,6 +1905,16 @@ pub fn tail_claude_output(
 
             // Skip metadata header (our own, not Claude output)
             if line.contains("\"_run_meta\"") {
+                continue;
+            }
+
+            // Claude host markers (our own, not Claude output)
+            if let Some(marker) = super::claude_host::host_marker_type(&line) {
+                if marker == super::claude_host::HOST_EXIT_TYPE {
+                    host_exited = true;
+                } else {
+                    host_backed = true;
+                }
                 continue;
             }
 
@@ -1998,6 +2070,22 @@ pub fn tail_claude_output(
             }
 
             match msg_type {
+                "steered_user_message" => {
+                    // Written by the Claude host when the CLI consumed a steer.
+                    if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
+                        content_blocks.push(ContentBlock::UserInput {
+                            text: text.to_string(),
+                        });
+                        let _ = app.emit_all(
+                            "chat:steered",
+                            &serde_json::json!({
+                                "session_id": session_id,
+                                "worktree_id": worktree_id,
+                                "text": text,
+                            }),
+                        );
+                    }
+                }
                 "assistant" => {
                     // Route assistant text to a Monitor's event log when this
                     // turn is a per-notification wake-up:
@@ -2766,8 +2854,16 @@ pub fn tail_claude_output(
             }
         }
 
-        // Check if completed
-        if completed {
+        // Check if completed. Host-backed runs end at the host exit marker
+        // (a pending steer can start another turn after a `result`).
+        if host_exited {
+            if !saw_final_result {
+                // Claude exited without a result: same as a dead process.
+                cancelled = true;
+            }
+            break;
+        }
+        if completed && !host_backed {
             break;
         }
 
@@ -3118,6 +3214,106 @@ fn backgrounded_task_tool_use_id(msg: &serde_json::Value) -> Option<&str> {
 mod tests {
     use super::*;
 
+    const HOST_TURN_ONE: &str = r#"{"_run_meta":true}
+{"type":"jean_claude_host_start"}
+{"type":"system","subtype":"init","session_id":"cs-1"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]},"session_id":"cs-1"}
+{"type":"steered_user_message","text":"also echo"}
+{"type":"assistant","message":{"content":[{"type":"text","text":" second"}]},"session_id":"cs-1"}
+{"type":"result","subtype":"success","result":"first","usage":{"input_tokens":10,"output_tokens":2}}
+"#;
+
+    fn tail_fixture(
+        name: &str,
+        initial: &str,
+        append_later: Option<&'static str>,
+    ) -> ClaudeResponse {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tauri::AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        let output = tmp.path().join("run-1.jsonl");
+        std::fs::write(&output, initial).unwrap();
+        let _guard = super::super::registry::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let session_id = format!("claude-host-tail-{name}");
+        let pid = std::process::id();
+        assert!(super::super::registry::register_detached_process(
+            session_id.clone(),
+            pid
+        ));
+        let writer = append_later.map(|later| {
+            let output = output.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(output)
+                    .unwrap();
+                f.write_all(later.as_bytes()).unwrap();
+            })
+        });
+        let response = tail_claude_output(&app, &session_id, "wt-1", &output, pid).unwrap();
+        if let Some(writer) = writer {
+            writer.join().unwrap();
+        }
+        super::super::registry::unregister_process(&session_id);
+        response
+    }
+
+    #[test]
+    fn host_backed_tail_ends_at_exit_marker_and_sums_usage() {
+        let fixture = format!(
+            "{HOST_TURN_ONE}{}\n{}\n",
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":3}}"#,
+            r#"{"type":"jean_claude_host_exit","code":0}"#
+        );
+        let response = tail_fixture("sum", &fixture, None);
+
+        assert!(!response.cancelled);
+        assert_eq!(response.content, "first second");
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.input_tokens, 15);
+        assert_eq!(usage.output_tokens, 5);
+        assert!(matches!(
+            &response.content_blocks[1],
+            ContentBlock::UserInput { text } if text == "also echo"
+        ));
+    }
+
+    #[test]
+    fn host_backed_tail_does_not_stop_at_first_result() {
+        let response = tail_fixture(
+            "multi",
+            HOST_TURN_ONE,
+            Some(concat!(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":" third"}]}}"#,
+                "\n",
+                r#"{"type":"result","subtype":"success","usage":{"input_tokens":1}}"#,
+                "\n",
+                r#"{"type":"jean_claude_host_exit","code":0}"#,
+                "\n"
+            )),
+        );
+
+        assert!(!response.cancelled);
+        assert_eq!(response.content, "first second third");
+    }
+
+    #[test]
+    fn host_exit_without_result_counts_as_cancelled() {
+        let fixture = concat!(
+            r#"{"type":"jean_claude_host_start"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#,
+            "\n",
+            r#"{"type":"jean_claude_host_exit","code":1}"#,
+            "\n"
+        );
+        let response = tail_fixture("noresult", fixture, None);
+        assert!(response.cancelled);
+    }
+
     #[test]
     fn backgrounded_task_tool_use_id_detects_background_tasks_only() {
         // Real events from Claude Code 2.1.304 `--print` runs (issue #14).
@@ -3438,7 +3634,7 @@ mod tests {
         assert_eq!(claude_permission_mode(Some("auto")), "auto");
         assert_eq!(claude_permission_mode(Some("build")), "acceptEdits");
         assert_eq!(claude_permission_mode(Some("plan")), "plan");
-        assert_eq!(claude_permission_mode(None), "plan");
+        assert_eq!(claude_permission_mode(None), "acceptEdits");
         assert!(claude_allows_all_bash(Some("yolo")));
         assert!(!claude_allows_all_bash(Some("build")));
     }
@@ -3597,6 +3793,7 @@ mod tests {
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("<proposed_plan>"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Every Codex response that contains or revises a plan while the current execution mode is plan"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("OpenCode question"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("then the line `Reply with a number:`"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean Worktree Policy"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Do NOT create git worktrees manually"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean MCP/tools"));
@@ -3624,6 +3821,15 @@ mod tests {
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
             .contains("Remove narrow or specific entries when you detect them"));
         assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("After ANY correction from the user"));
+        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Subagent Strategy"));
+        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("throw more compute at it via subagents"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("### 3. Self-Improvement Loop"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("### 6. Autonomous Bug Fixing"));
+        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("### 7. Autonomous Bug Fixing"));
+        assert_eq!(
+            DEFAULT_GLOBAL_SYSTEM_PROMPT,
+            crate::default_global_system_prompt()
+        );
     }
 
     #[test]

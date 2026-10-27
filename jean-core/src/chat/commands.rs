@@ -64,7 +64,8 @@ const CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT: &str = "\
 
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.
-- If already in a Jean worktree or base/main workspace, continue in the current workspace.";
+- If already in a Jean worktree or base/main workspace, continue in the current workspace.
+- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.";
 const CODEX_DEFAULT_PLAN_MODE_PROMPT: &str = "\
 ## Plan Mode
 
@@ -85,13 +86,6 @@ Jean may hand this plan to a zero-context agent in a new worktree. Status lines 
 - Include: goal/outcome, key decisions from the interview, concrete files/areas to touch, ordered implementation steps with enough approach detail, risks/edge cases, and how to verify.
 - Prefer a structured body (headings/bullets). Concise writing is good; incomplete handoff plans are not.
 - After answering questions, re-emit the full detailed body in a complete `<proposed_plan>` block — never end on explanation-only or checklist-only content.";
-const DEFAULT_PARALLEL_EXECUTION_PROMPT: &str = r#"In plan mode, structure plans so subagents can work simultaneously. In build/execute mode, use subagents in parallel for faster implementation.
-
-When launching multiple Task subagents, prefer sending them in a single message rather than sequentially. Group independent work items (e.g., editing separate files, researching unrelated questions) into parallel Task calls. Only sequence Tasks when one depends on another's output.
-
-Instruct each sub-agent to briefly outline its approach before implementing, so it can course-correct early without formal plan mode overhead.
-
-When specifying subagent_type for Task tool calls, always use the fully qualified name exactly as listed in the system prompt (e.g., "code-simplifier:code-simplifier", not just "code-simplifier"). If the agent type contains a colon, include the full namespace:name string."#;
 
 /// Sessions currently being drained by the backend queue processor.
 ///
@@ -150,7 +144,7 @@ fn clear_stale_pending_cancel_before_send(session_id: &str) {
 }
 
 fn codex_execution_mode_instruction(execution_mode: Option<&str>) -> Option<&'static str> {
-    match execution_mode.unwrap_or("plan") {
+    match execution_mode.unwrap_or("build") {
         "build" | "supervised" | "auto" => Some(
             "You are in BUILD MODE. Start implementing immediately. \
              This current BUILD MODE instruction supersedes any earlier plan-mode \
@@ -175,7 +169,7 @@ fn codex_execution_mode_instruction(execution_mode: Option<&str>) -> Option<&'st
 }
 
 fn codex_default_global_system_prompt(execution_mode: Option<&str>) -> String {
-    match execution_mode.unwrap_or("plan") {
+    match execution_mode.unwrap_or("build") {
         "build" | "yolo" | "supervised" | "auto" => CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT.to_string(),
         _ => CODEX_DEFAULT_PLAN_MODE_PROMPT.to_string(),
     }
@@ -188,6 +182,7 @@ fn is_codex_default_global_system_prompt(prompt: &str) -> bool {
     }
 
     trimmed == crate::default_global_system_prompt().trim()
+        || crate::is_legacy_default_global_system_prompt(trimmed)
         || trimmed == CODEX_DEFAULT_PLAN_MODE_PROMPT.trim()
         || trimmed == CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT.trim()
         || (trimmed.contains("### 1. Plan Mode Default")
@@ -238,7 +233,9 @@ pub(crate) fn resolve_default_backend(app: &AppHandle, worktree_id: Option<&str>
         "commandcode" => Backend::Commandcode,
         "grok" => Backend::Grok,
         "kimi" => Backend::Kimi,
+        "devin" => Backend::Devin,
         "antigravity" => Backend::Antigravity,
+        "muse" => Backend::Muse,
         _ => Backend::Claude,
     };
 
@@ -261,7 +258,9 @@ pub(crate) fn resolve_default_backend(app: &AppHandle, worktree_id: Option<&str>
                         "commandcode" => Backend::Commandcode,
                         "grok" => Backend::Grok,
                         "kimi" => Backend::Kimi,
+                        "devin" => Backend::Devin,
                         "antigravity" => Backend::Antigravity,
+                        "muse" => Backend::Muse,
                         "claude" => Backend::Claude,
                         _ => resolved,
                     };
@@ -288,13 +287,21 @@ pub(crate) fn resolve_magic_prompt_backend(
             "commandcode" => return Backend::Commandcode,
             "grok" => return Backend::Grok,
             "kimi" => return Backend::Kimi,
+            // Devin ACP is wired for interactive chat. One-shot JSON magic
+            // prompts need a separate `devin --print` extractor before they
+            // can safely be enabled.
+            "devin" => return Backend::Claude,
             "antigravity" => return Backend::Antigravity,
+            "muse" => return Backend::Muse,
             "codex" => return Backend::Codex,
             "claude" => return Backend::Claude,
             _ => {}
         }
     }
-    resolve_default_backend(app, worktree_id)
+    match resolve_default_backend(app, worktree_id) {
+        Backend::Devin => Backend::Claude,
+        backend => backend,
+    }
 }
 
 fn infer_backend_from_model(model: &str, fallback: Backend) -> Backend {
@@ -310,8 +317,12 @@ fn infer_backend_from_model(model: &str, fallback: Backend) -> Backend {
         Backend::Grok
     } else if model.starts_with("kimi/") {
         Backend::Kimi
+    } else if model.starts_with("devin/") {
+        Backend::Devin
     } else if model.starts_with("antigravity/") {
         Backend::Antigravity
+    } else if crate::is_muse_model(model) {
+        Backend::Muse
     } else if crate::is_codex_model(model) {
         Backend::Codex
     } else {
@@ -372,7 +383,21 @@ fn should_clear_stale_resumed_claude_session(
         && !has_usage
 }
 
-fn default_model_for_backend(
+/// Undo only this turn's input: cancellation can finish after a replacement send.
+fn undo_cancelled_user_message(session: &mut Session, user_message_id: &str) -> bool {
+    if session
+        .messages
+        .last()
+        .is_some_and(|message| message.role == MessageRole::User && message.id == user_message_id)
+    {
+        session.messages.pop();
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn default_model_for_backend(
     backend: &Backend,
     preferences: &crate::AppPreferences,
 ) -> Option<String> {
@@ -384,7 +409,9 @@ fn default_model_for_backend(
         Backend::Commandcode => &preferences.selected_commandcode_model,
         Backend::Grok => &preferences.selected_grok_model,
         Backend::Kimi => &preferences.selected_kimi_model,
+        Backend::Devin => &preferences.selected_devin_model,
         Backend::Antigravity => &preferences.selected_antigravity_model,
+        Backend::Muse => &preferences.selected_muse_model,
         Backend::Claude => &preferences.selected_model,
     };
 
@@ -403,11 +430,7 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 }
 
 fn resolve_global_system_prompt(preferences_prompt: Option<&str>) -> String {
-    preferences_prompt
-        .map(str::trim)
-        .filter(|prompt| !prompt.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(crate::default_global_system_prompt)
+    crate::effective_global_system_prompt(preferences_prompt)
 }
 
 /// Default policy for sessions without a selection. Server projects start in
@@ -424,8 +447,12 @@ fn default_execution_mode_for_worktree(
     }
 }
 
-/// Workflow policy for a new session: worktree/preference default, or Plan when
-/// the backend does not support that default.
+/// Workflow policy for a new session.
+///
+/// Uses the worktree or preference default when that backend supports it.
+/// Plan is opt-in, so a saved Plan default and any unsupported policy fall
+/// through to Build, then Full access. Cursor has no Build mode, so that
+/// fallback is Full access rather than Plan.
 pub(crate) fn default_execution_policy(
     app: &AppHandle,
     worktree_id: &str,
@@ -434,11 +461,20 @@ pub(crate) fn default_execution_policy(
 ) -> String {
     let policy = default_execution_mode_for_worktree(app, worktree_id, preferences_default)
         .unwrap_or_else(|| "yolo".to_string());
-    if validate_execution_policy(&policy, backend).is_ok() {
-        policy
-    } else {
-        "plan".to_string()
+    implement_execution_policy(&policy, backend)
+}
+
+/// New-session policy that never selects Plan.
+pub(crate) fn implement_execution_policy(policy: &str, backend: &Backend) -> String {
+    if policy != "plan" && validate_execution_policy(policy, backend).is_ok() {
+        return policy.to_string();
     }
+    for candidate in ["build", "yolo", "supervised", "auto"] {
+        if validate_execution_policy(candidate, backend).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    "yolo".to_string()
 }
 
 /// Global system prompt for a session: server projects use the server prompt instead.
@@ -514,24 +550,21 @@ fn build_kimi_system_prompt(
     worktree_id: &str,
     ai_language: Option<&str>,
     parallel_prompt: Option<&str>,
+    agent_prompt: Option<&str>,
     include_recap: bool,
+    local_files_available: bool,
 ) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(language) = ai_language.map(str::trim).filter(|value| !value.is_empty()) {
         parts.push(format!("Respond to the user in {language}."));
     }
     let preferences = crate::load_preferences_sync(app).ok();
-    parts.push(resolve_session_global_system_prompt(
-        app,
-        worktree_id,
-        preferences.as_ref(),
-    ));
-    if let Some(prompt) = parallel_prompt
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        parts.push(prompt.to_string());
-    }
+    super::push_subagent_policy_before_global(
+        &mut parts,
+        parallel_prompt,
+        resolve_session_global_system_prompt(app, worktree_id, preferences.as_ref()),
+    );
+    super::push_trimmed_prompt(&mut parts, agent_prompt);
     if let Ok(data) = load_projects_data(app) {
         if let Some(worktree) = data.find_worktree(worktree_id) {
             if let Some(project) = data.find_project(&worktree.project_id) {
@@ -551,7 +584,7 @@ fn build_kimi_system_prompt(
                     .filter(|path| !path.is_empty())
                     .map(|path| format!("- {path}"))
                     .collect::<Vec<_>>();
-                if !paths.is_empty() {
+                if local_files_available && !paths.is_empty() {
                     parts.push(format!(
                         "This project is linked to other projects for cross-project context. Check these directories for instructions and documentation:\n{}",
                         paths.join("\n")
@@ -560,14 +593,8 @@ fn build_kimi_system_prompt(
             }
         }
     }
-    let gh_binary = crate::gh_cli::config::resolve_gh_binary(app);
-    if gh_binary != std::path::PathBuf::from("gh") {
-        parts.push(format!(
-            "When running GitHub CLI commands, use this binary: {}. Do not use bare `gh`.",
-            gh_binary.display()
-        ));
-    }
-    if super::should_include_recap_instruction(app, include_recap) {
+    crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, app);
+    if include_recap {
         parts.push(super::RECAP_INSTRUCTION.to_string());
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
@@ -1074,7 +1101,9 @@ pub async fn create_session(
         Some("commandcode") => Backend::Commandcode,
         Some("grok") => Backend::Grok,
         Some("kimi") => Backend::Kimi,
+        Some("devin") => Backend::Devin,
         Some("antigravity") => Backend::Antigravity,
+        Some("muse") => Backend::Muse,
         Some("claude") => Backend::Claude,
         _ => {
             // No explicit backend — check project default, then global preference
@@ -1094,8 +1123,12 @@ pub async fn create_session(
                     resolved = Backend::Grok;
                 } else if prefs.default_backend == "kimi" {
                     resolved = Backend::Kimi;
+                } else if prefs.default_backend == "devin" {
+                    resolved = Backend::Devin;
                 } else if prefs.default_backend == "antigravity" {
                     resolved = Backend::Antigravity;
+                } else if prefs.default_backend == "muse" {
+                    resolved = Backend::Muse;
                 }
             }
             // Check project-level override
@@ -1118,7 +1151,9 @@ pub async fn create_session(
                             "commandcode" => Backend::Commandcode,
                             "grok" => Backend::Grok,
                             "kimi" => Backend::Kimi,
+                            "devin" => Backend::Devin,
                             "antigravity" => Backend::Antigravity,
+                            "muse" => Backend::Muse,
                             "claude" => Backend::Claude,
                             _ => resolved,
                         };
@@ -1209,6 +1244,7 @@ async fn drain_backend_queue(
             drain_queue_into_codex_turn(&app, &worktree_id, &session_id).await;
             drain_queue_into_opencode_turn(&app, &worktree_id, &worktree_path, &session_id).await;
             drain_queue_into_pi_turn(&app, &worktree_id, &session_id).await;
+            drain_queue_into_claude_turn(&app, &worktree_id, &session_id).await;
             drain_queue_into_grok_turn(&app, &worktree_id, &session_id).await;
             log::trace!("[QueueDrain] session active, stop session={session_id}");
             return;
@@ -1376,14 +1412,13 @@ async fn queued_message_to_send_request(
                 })
         })
     });
-    let parallel_execution_prompt = json_string(queued, "parallelExecutionPrompt").or_else(|| {
-        Some(
-            prefs
-                .as_ref()
-                .and_then(|p| p.magic_prompts.parallel_execution.clone())
-                .unwrap_or_else(|| DEFAULT_PARALLEL_EXECUTION_PROMPT.to_string()),
-        )
-    });
+    let parallel_execution_prompt =
+        json_string(queued, "parallelExecutionPrompt").or_else(|| match prefs.as_ref() {
+            Some(prefs) => crate::resolve_stored_parallel_execution_prompt(
+                prefs.magic_prompts.parallel_execution.as_deref(),
+            ),
+            None => Some(crate::default_parallel_execution_prompt()),
+        });
     let ai_language = json_string(queued, "aiLanguage").or_else(|| {
         prefs
             .as_ref()
@@ -1998,7 +2033,12 @@ fn plan_mode_content_waits_for_approval(
     // (`has_blocking_tool` path via inject_synthetic_plan on plan-like content).
     matches!(
         backend,
-        Backend::Claude | Backend::Codex | Backend::Opencode | Backend::Kimi
+        Backend::Claude
+            | Backend::Codex
+            | Backend::Opencode
+            | Backend::Kimi
+            | Backend::Muse
+            | Backend::Devin
     ) && execution_mode == Some("plan")
         && has_content
         && !has_plan_tool
@@ -2902,7 +2942,9 @@ fn persist_salvaged_resume_id(session: &mut Session, backend: &Backend, sid: &st
         Backend::Commandcode => session.commandcode_session_id = Some(sid.to_string()),
         Backend::Grok => session.grok_session_id = Some(sid.to_string()),
         Backend::Kimi => session.kimi_session_id = Some(sid.to_string()),
+        Backend::Devin => session.devin_session_id = Some(sid.to_string()),
         Backend::Antigravity => session.antigravity_session_id = Some(sid.to_string()),
+        Backend::Muse => session.muse_session_id = Some(sid.to_string()),
     }
 }
 
@@ -2959,6 +3001,9 @@ pub async fn send_chat_message(
         );
         return Err("Session already has an active request".to_string());
     }
+
+    // Drops after the claim below, so agent lists see the run end.
+    let _agents_refresh = crate::agents::RefreshOnDrop::for_worktree(&app, &worktree_id);
 
     // Atomically claim the session's send slot for the duration of this call.
     // Two callers can pass the check above concurrently, but only one can take
@@ -3185,7 +3230,9 @@ pub async fn send_chat_message(
         Some("commandcode") => Backend::Commandcode,
         Some("grok") => Backend::Grok,
         Some("kimi") => Backend::Kimi,
+        Some("devin") => Backend::Devin,
         Some("antigravity") => Backend::Antigravity,
+        Some("muse") => Backend::Muse,
         Some("claude") => Backend::Claude,
         _ => session_backend.clone(),
     };
@@ -3207,6 +3254,11 @@ pub async fn send_chat_message(
         if let Some(prefs) = prefs.as_ref() {
             model = default_model_for_backend(&effective_backend, prefs);
         }
+    }
+    if effective_backend == Backend::Devin
+        && session.devin_location == super::types::DevinLocation::Cloud
+    {
+        model = Some(session.devin_cloud_model());
     }
     log::info!(
         "[SendChat] resolved session={session_id} model={model:?} backend={effective_backend:?} execution_mode={execution_mode:?}"
@@ -3281,9 +3333,23 @@ pub async fn send_chat_message(
     let kimi_session_id = sessions
         .find_session(&session_id)
         .and_then(|s| s.kimi_session_id.clone());
+    let devin_config_overrides = sessions
+        .find_session(&session_id)
+        .map(|session| session.devin_config_overrides.clone())
+        .unwrap_or_default();
+    let devin_location = sessions
+        .find_session(&session_id)
+        .map(|session| session.devin_location)
+        .unwrap_or_default();
+    let devin_session_id = sessions
+        .find_session(&session_id)
+        .and_then(|s| s.devin_session_id.clone());
     let antigravity_session_id = sessions
         .find_session(&session_id)
         .and_then(|s| s.antigravity_session_id.clone());
+    let muse_session_id = sessions
+        .find_session(&session_id)
+        .and_then(|s| s.muse_session_id.clone());
     // Command Code has no native resume id; a non-empty sentinel marks that a
     // prior Command Code turn completed in this worktree, so the next run can
     // pass `-c` (cwd-scoped continue) to resume the conversation.
@@ -3429,11 +3495,21 @@ pub async fn send_chat_message(
     } else {
         kimi_session_id
     };
+    let devin_session_id = if clear_target_resume && effective_backend == Backend::Devin {
+        None
+    } else {
+        devin_session_id
+    };
     let antigravity_session_id = if clear_target_resume && effective_backend == Backend::Antigravity
     {
         None
     } else {
         antigravity_session_id
+    };
+    let muse_session_id = if clear_target_resume && effective_backend == Backend::Muse {
+        None
+    } else {
+        muse_session_id
     };
 
     // Cursor CLI doesn't support thinking/effort levels
@@ -3558,16 +3634,19 @@ pub async fn send_chat_message(
     // is intentionally not stored as the visible user message in metadata.
     run_log::write_input_file(&app, &session_id, &run_id, &message_for_backend)?;
 
-    // Use passed parameter for parallel execution prompt (None = disabled)
-    let parallel_execution_prompt = parallel_execution_prompt.filter(|p| !p.trim().is_empty());
-    // Agent sessions: append the agent prompt (role, tools, memory). Every backend receives this prompt.
-    let parallel_execution_prompt = match crate::agents::system_prompt_for(&app, &worktree_id) {
-        Some(agent_prompt) => Some(match parallel_execution_prompt {
-            Some(prompt) => format!("{prompt}\n\n{agent_prompt}"),
-            None => agent_prompt,
-        }),
-        None => parallel_execution_prompt,
-    };
+    // Use passed parameter for parallel execution prompt (None = disabled).
+    // The agent prompt stays separate so turning fan-out off still injects the
+    // "do not spawn sub-agents" policy instead of treating the agent prompt as
+    // that policy.
+    let parallel_execution_prompt = crate::upgrade_legacy_parallel_execution_prompt(
+        parallel_execution_prompt.filter(|p| !p.trim().is_empty()),
+    );
+    let agent_system_prompt = crate::agents::system_prompt_for_run(
+        &app,
+        &worktree_id,
+        Some(&session_id),
+        Some(message.as_str()),
+    );
 
     // Use passed parameter for Chrome browser integration (default false - beta)
     let chrome = chrome_enabled.unwrap_or(false);
@@ -3592,7 +3671,9 @@ pub async fn send_chat_message(
             Backend::Commandcode => {}
             Backend::Grok => {}
             Backend::Kimi => {}
+            Backend::Devin => {}
             Backend::Antigravity => {}
+            Backend::Muse => {}
         }
     }
     let allowed_tools_for_cli = if final_allowed_tools.is_empty() {
@@ -3634,7 +3715,9 @@ pub async fn send_chat_message(
     let thread_pi_session_id = pi_session_id.clone();
     let thread_grok_session_id = grok_session_id.clone();
     let thread_kimi_session_id = kimi_session_id.clone();
+    let thread_devin_session_id = devin_session_id.clone();
     let thread_antigravity_session_id = antigravity_session_id.clone();
+    let thread_muse_session_id = muse_session_id.clone();
     let thread_commandcode_resume_id = commandcode_resume_id.clone();
     let thread_model = model.clone();
     let thread_execution_mode = execution_mode.clone();
@@ -3642,7 +3725,17 @@ pub async fn send_chat_message(
     let thread_effort_level = effort_level.clone();
     let thread_allowed_tools = allowed_tools_for_cli.clone();
     let thread_parallel_prompt = parallel_execution_prompt.clone();
+    let thread_agent_prompt = agent_system_prompt.clone();
     let thread_ai_language = ai_language.clone();
+    let backend_name = crate::agents::connectors::backend_label(&effective_backend);
+    let mcp_config = crate::agents::connectors::apply_agent_mcp_allowlist(
+        &app,
+        &session_id,
+        &worktree_path,
+        backend_name,
+        mcp_config,
+    )
+    .await;
     // Always inject Jean MCP for backends that honor runtime mcp_config.
     // Claude uses --mcp-config/--strict-mcp-config; Grok/Cursor use the same
     // JSON to decide which servers (including jean) stay enabled for the turn.
@@ -3655,9 +3748,21 @@ pub async fn send_chat_message(
                 .await
                 .or_else(|| mcp_config.clone())
         }
+        Backend::Devin if devin_location == super::types::DevinLocation::Local => {
+            super::jean_mcp::merge_into_mcp_config(&app, &session_id, mcp_config.as_deref())
+                .await
+                .or_else(|| mcp_config.clone())
+        }
+        Backend::Devin => None,
         _ => mcp_config.clone(),
     };
     let thread_custom_profile = custom_profile_name.clone();
+    // Muse takes MCP servers per session (`session/start` config.mcpServers).
+    let thread_muse_mcp_servers = if effective_backend == Backend::Muse {
+        super::jean_mcp::build_jean_mcp_entry(&app, &session_id).await
+    } else {
+        None
+    };
     let thread_codex_provider = if effective_backend == Backend::Codex {
         let prefs_for_codex = crate::load_preferences(app.clone()).await.ok();
         custom_profile_name.as_ref().and_then(|name| {
@@ -3673,7 +3778,8 @@ pub async fn send_chat_message(
     };
     let thread_message = message_for_backend.clone();
     let thread_backend = effective_backend.clone();
-    let thread_include_recap = include_recap.unwrap_or(true);
+    // Agent sessions get their own recap format in the agent prompt.
+    let thread_include_recap = include_recap.unwrap_or(true) && agent_system_prompt.is_none();
     let thread_codex_search = codex_search_enabled;
 
     // For OpenCode sessions: create a cancel flag so we can signal the blocking HTTP thread.
@@ -3748,6 +3854,7 @@ pub async fn send_chat_message(
                         thread_effort_level.as_ref(),
                         thread_allowed_tools.as_deref(),
                         thread_parallel_prompt.as_deref(),
+                        thread_agent_prompt.as_deref(),
                         thread_ai_language.as_deref(),
                         thread_mcp_config.as_deref(),
                         chrome,
@@ -4001,18 +4108,15 @@ pub async fn send_chat_message(
                                     thread_execution_mode.as_deref(),
                                 )
                             });
-                    system_prompt_parts.push(crate::apply_agent_browser_preference(
-                        global_prompt,
-                        preferences.as_ref(),
-                    ));
-
-                    // Parallel execution prompt
-                    if let Some(prompt) = &thread_parallel_prompt {
-                        let prompt = prompt.trim();
-                        if !prompt.is_empty() {
-                            system_prompt_parts.push(prompt.to_string());
-                        }
-                    }
+                    super::push_subagent_policy_before_global(
+                        &mut system_prompt_parts,
+                        thread_parallel_prompt.as_deref(),
+                        crate::apply_agent_browser_preference(global_prompt, preferences.as_ref()),
+                    );
+                    super::push_trimmed_prompt(
+                        &mut system_prompt_parts,
+                        thread_agent_prompt.as_deref(),
+                    );
 
                     // Per-project custom system prompt + linked project instructions
                     if let Ok(data) = load_projects_data(&thread_app) {
@@ -4042,15 +4146,11 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    // Embedded binary path hints
-                    let gh_binary = crate::gh_cli::config::resolve_gh_binary(&thread_app);
-                    if gh_binary != std::path::PathBuf::from("gh") {
-                        system_prompt_parts.push(format!(
-                            "When running GitHub CLI commands, use the full path to the embedded binary: {}\n\
-                             Do NOT use bare `gh` — always use the full path above.",
-                            gh_binary.display()
-                        ));
-                    }
+                    // Embedded binary path hints (gh only when installed)
+                    crate::gh_cli::config::append_gh_cli_system_prompt(
+                        &mut system_prompt_parts,
+                        &thread_app,
+                    );
                     if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
                         if claude_binary.exists() {
                             system_prompt_parts.push(format!(
@@ -4071,7 +4171,7 @@ pub async fn send_chat_message(
                     }
 
                     // End-of-turn recap instruction (compact view surfaces this block)
-                    if super::should_include_recap_instruction(&thread_app, thread_include_recap) {
+                    if thread_include_recap {
                         system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
@@ -4207,6 +4307,14 @@ pub async fn send_chat_message(
                             }
                         }
                     }
+
+                    all_context_paths.extend(
+                        crate::projects::github_discussions::get_discussion_context_paths(
+                            &thread_app,
+                            &thread_session_id,
+                            &thread_worktree_id,
+                        ),
+                    );
 
                     // Saved context files
                     if let Ok(app_data_dir) = thread_app.path().app_data_dir() {
@@ -4388,20 +4496,21 @@ pub async fn send_chat_message(
                     }
 
                     // Global system prompt from preferences, with the shared default fallback.
+                    // Sub-agent policy comes first so a user-authored global prompt wins.
                     let preferences = crate::load_preferences_sync(&thread_app).ok();
-                    system_prompt_parts.push(resolve_session_global_system_prompt(
-                        &thread_app,
-                        &thread_worktree_id,
-                        preferences.as_ref(),
-                    ));
-
-                    // Parallel execution prompt
-                    if let Some(prompt) = &thread_parallel_prompt {
-                        let prompt = prompt.trim();
-                        if !prompt.is_empty() {
-                            system_prompt_parts.push(prompt.to_string());
-                        }
-                    }
+                    super::push_subagent_policy_before_global(
+                        &mut system_prompt_parts,
+                        thread_parallel_prompt.as_deref(),
+                        resolve_session_global_system_prompt(
+                            &thread_app,
+                            &thread_worktree_id,
+                            preferences.as_ref(),
+                        ),
+                    );
+                    super::push_trimmed_prompt(
+                        &mut system_prompt_parts,
+                        thread_agent_prompt.as_deref(),
+                    );
 
                     // Per-project custom system prompt + linked project instructions
                     if let Ok(data) = load_projects_data(&thread_app) {
@@ -4431,15 +4540,11 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    // Embedded binary path hints
-                    let gh_binary = crate::gh_cli::config::resolve_gh_binary(&thread_app);
-                    if gh_binary != std::path::PathBuf::from("gh") {
-                        system_prompt_parts.push(format!(
-                            "When running GitHub CLI commands, use the full path to the embedded binary: {}\n\
-                             Do NOT use bare `gh` — always use the full path above.",
-                            gh_binary.display()
-                        ));
-                    }
+                    // Embedded binary path hints (gh only when installed)
+                    crate::gh_cli::config::append_gh_cli_system_prompt(
+                        &mut system_prompt_parts,
+                        &thread_app,
+                    );
                     if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
                         if claude_binary.exists() {
                             system_prompt_parts.push(format!(
@@ -4460,7 +4565,7 @@ pub async fn send_chat_message(
                     }
 
                     // End-of-turn recap instruction (compact view surfaces this block)
-                    if super::should_include_recap_instruction(&thread_app, thread_include_recap) {
+                    if thread_include_recap {
                         system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
@@ -4594,6 +4699,17 @@ pub async fn send_chat_message(
                         }
                     }
 
+                    for path in crate::projects::github_discussions::get_discussion_context_paths(
+                        &thread_app,
+                        &thread_session_id,
+                        &thread_worktree_id,
+                    ) {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            context_content.push_str(&content);
+                            context_content.push_str("\n\n---\n\n");
+                        }
+                    }
+
                     // Saved context files
                     if let Ok(app_data_dir) = thread_app.path().app_data_dir() {
                         let saved_contexts_dir = app_data_dir.join("session-context");
@@ -4721,18 +4837,16 @@ pub async fn send_chat_message(
                     }
 
                     let preferences = crate::load_preferences_sync(&thread_app).ok();
-                    parts.push(resolve_session_global_system_prompt(
-                        &thread_app,
-                        &thread_worktree_id,
-                        preferences.as_ref(),
-                    ));
-
-                    if let Some(prompt) = &thread_parallel_prompt {
-                        let prompt = prompt.trim();
-                        if !prompt.is_empty() {
-                            parts.push(prompt.to_string());
-                        }
-                    }
+                    super::push_subagent_policy_before_global(
+                        &mut parts,
+                        thread_parallel_prompt.as_deref(),
+                        resolve_session_global_system_prompt(
+                            &thread_app,
+                            &thread_worktree_id,
+                            preferences.as_ref(),
+                        ),
+                    );
+                    super::push_trimmed_prompt(&mut parts, thread_agent_prompt.as_deref());
 
                     if let Ok(data) = load_projects_data(&thread_app) {
                         if let Some(worktree) = data.find_worktree(&thread_worktree_id) {
@@ -4760,14 +4874,7 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    let gh_binary = crate::gh_cli::config::resolve_gh_binary(&thread_app);
-                    if gh_binary != std::path::PathBuf::from("gh") {
-                        parts.push(format!(
-                            "When running GitHub CLI commands, use the full path to the embedded binary: {}\n\
-                             Do NOT use bare `gh` — always use the full path above.",
-                            gh_binary.display()
-                        ));
-                    }
+                    crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, &thread_app);
                     if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
                         if claude_binary.exists() {
                             parts.push(format!(
@@ -4788,7 +4895,7 @@ pub async fn send_chat_message(
                     }
 
                     // End-of-turn recap instruction (compact view surfaces this block)
-                    if super::should_include_recap_instruction(&thread_app, thread_include_recap) {
+                    if thread_include_recap {
                         parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
@@ -4875,7 +4982,12 @@ pub async fn send_chat_message(
                 }
             }
             Backend::Pi => {
-                let pi_system_prompt: Option<String> = {
+                let pi_agent_owns_policy = crate::load_preferences_sync(&thread_app)
+                    .map(|prefs| prefs.pi_agent_owns_policy)
+                    .unwrap_or(false);
+                let pi_system_prompt: Option<String> = if pi_agent_owns_policy {
+                    None
+                } else {
                     use crate::projects::storage::load_projects_data;
 
                     let mut parts: Vec<String> = Vec::new();
@@ -4888,18 +5000,16 @@ pub async fn send_chat_message(
                     }
 
                     let preferences = crate::load_preferences_sync(&thread_app).ok();
-                    parts.push(resolve_session_global_system_prompt(
-                        &thread_app,
-                        &thread_worktree_id,
-                        preferences.as_ref(),
-                    ));
-
-                    if let Some(prompt) = &thread_parallel_prompt {
-                        let prompt = prompt.trim();
-                        if !prompt.is_empty() {
-                            parts.push(prompt.to_string());
-                        }
-                    }
+                    super::push_subagent_policy_before_global(
+                        &mut parts,
+                        thread_parallel_prompt.as_deref(),
+                        resolve_session_global_system_prompt(
+                            &thread_app,
+                            &thread_worktree_id,
+                            preferences.as_ref(),
+                        ),
+                    );
+                    super::push_trimmed_prompt(&mut parts, thread_agent_prompt.as_deref());
 
                     if let Ok(data) = load_projects_data(&thread_app) {
                         if let Some(worktree) = data.find_worktree(&thread_worktree_id) {
@@ -4934,14 +5044,7 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    let gh_binary = crate::gh_cli::config::resolve_gh_binary(&thread_app);
-                    if gh_binary != std::path::PathBuf::from("gh") {
-                        parts.push(format!(
-                            "When running GitHub CLI commands, use the full path to the embedded binary: {}\n\
-                             Do NOT use bare `gh` — always use the full path above.",
-                            gh_binary.display()
-                        ));
-                    }
+                    crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, &thread_app);
                     if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
                         if claude_binary.exists() {
                             parts.push(format!(
@@ -4961,7 +5064,7 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    if super::should_include_recap_instruction(&thread_app, thread_include_recap) {
+                    if thread_include_recap {
                         parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
@@ -4984,6 +5087,7 @@ pub async fn send_chat_message(
                     thread_effort_level.as_ref(),
                     &thread_message,
                     pi_system_prompt.as_deref(),
+                    pi_agent_owns_policy,
                     Some(make_pid_callback()),
                 ) {
                     Ok(response) => Ok((
@@ -5020,18 +5124,16 @@ pub async fn send_chat_message(
                     }
 
                     let preferences = crate::load_preferences_sync(&thread_app).ok();
-                    parts.push(resolve_session_global_system_prompt(
-                        &thread_app,
-                        &thread_worktree_id,
-                        preferences.as_ref(),
-                    ));
-
-                    if let Some(prompt) = &thread_parallel_prompt {
-                        let prompt = prompt.trim();
-                        if !prompt.is_empty() {
-                            parts.push(prompt.to_string());
-                        }
-                    }
+                    super::push_subagent_policy_before_global(
+                        &mut parts,
+                        thread_parallel_prompt.as_deref(),
+                        resolve_session_global_system_prompt(
+                            &thread_app,
+                            &thread_worktree_id,
+                            preferences.as_ref(),
+                        ),
+                    );
+                    super::push_trimmed_prompt(&mut parts, thread_agent_prompt.as_deref());
 
                     if let Ok(data) = load_projects_data(&thread_app) {
                         if let Some(worktree) = data.find_worktree(&thread_worktree_id) {
@@ -5066,14 +5168,7 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    let gh_binary = crate::gh_cli::config::resolve_gh_binary(&thread_app);
-                    if gh_binary != std::path::PathBuf::from("gh") {
-                        parts.push(format!(
-                            "When running GitHub CLI commands, use the full path to the embedded binary: {}\n\
-                             Do NOT use bare `gh` — always use the full path above.",
-                            gh_binary.display()
-                        ));
-                    }
+                    crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, &thread_app);
                     if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
                         if claude_binary.exists() {
                             parts.push(format!(
@@ -5093,7 +5188,7 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    if super::should_include_recap_instruction(&thread_app, thread_include_recap) {
+                    if thread_include_recap {
                         parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
@@ -5170,7 +5265,9 @@ pub async fn send_chat_message(
                     &thread_worktree_id,
                     thread_ai_language.as_deref(),
                     thread_parallel_prompt.as_deref(),
+                    thread_agent_prompt.as_deref(),
                     thread_include_recap,
+                    true,
                 );
                 let effort = thread_effort_level
                     .as_ref()
@@ -5206,13 +5303,70 @@ pub async fn send_chat_message(
                     Err(error) => Err(error),
                 }
             }
+            Backend::Devin => {
+                let system_prompt = build_kimi_system_prompt(
+                    &thread_app,
+                    &thread_worktree_id,
+                    thread_ai_language.as_deref(),
+                    thread_parallel_prompt.as_deref(),
+                    thread_agent_prompt.as_deref(),
+                    thread_include_recap,
+                    devin_location == super::types::DevinLocation::Local,
+                );
+                let loaded_context = super::context_instructions::build_loaded_context_content(
+                    &thread_app,
+                    &thread_session_id,
+                    &thread_worktree_id,
+                );
+                let system_prompt = Some(
+                    [system_prompt.unwrap_or_default(), loaded_context]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                );
+                match super::devin::execute_devin(super::devin::DevinExecutionOptions {
+                    app: &thread_app,
+                    jean_session_id: &thread_session_id,
+                    worktree_id: &thread_worktree_id,
+                    working_dir: std::path::Path::new(&thread_working_dir),
+                    existing_devin_session_id: thread_devin_session_id.as_deref(),
+                    location: devin_location,
+                    config_overrides: &devin_config_overrides,
+                    mcp_config: thread_mcp_config.as_deref(),
+                    output_file: &thread_output_file,
+                    model: thread_model.as_deref(),
+                    execution_mode: thread_execution_mode.as_deref(),
+                    message: &thread_message,
+                    system_prompt: system_prompt.as_deref(),
+                    pid_callback: Some(make_pid_callback()),
+                }) {
+                    Ok(response) => Ok((
+                        0,
+                        UnifiedResponse {
+                            content: response.content,
+                            resume_id: response.session_id,
+                            tool_calls: response.tool_calls,
+                            content_blocks: response.content_blocks,
+                            cancelled: response.cancelled,
+                            waiting_for_plan: false,
+                            error_emitted: false,
+                            usage: response.usage,
+                            backend: Backend::Devin,
+                        },
+                    )),
+                    Err(error) => Err(error),
+                }
+            }
             Backend::Antigravity => {
                 let system_prompt = build_kimi_system_prompt(
                     &thread_app,
                     &thread_worktree_id,
                     thread_ai_language.as_deref(),
                     thread_parallel_prompt.as_deref(),
+                    thread_agent_prompt.as_deref(),
                     thread_include_recap,
+                    true,
                 );
                 let effort = thread_effort_level
                     .as_ref()
@@ -5245,6 +5399,51 @@ pub async fn send_chat_message(
                             error_emitted: false,
                             usage: response.usage,
                             backend: Backend::Antigravity,
+                        },
+                    )),
+                    Err(error) => Err(error),
+                }
+            }
+            Backend::Muse => {
+                let system_prompt = build_kimi_system_prompt(
+                    &thread_app,
+                    &thread_worktree_id,
+                    thread_ai_language.as_deref(),
+                    thread_parallel_prompt.as_deref(),
+                    thread_agent_prompt.as_deref(),
+                    thread_include_recap,
+                    true,
+                );
+                let effort = thread_effort_level
+                    .as_ref()
+                    .and_then(|value| value.effort_value());
+                match super::muse::execute_muse(super::muse::MuseExecutionOptions {
+                    app: &thread_app,
+                    jean_session_id: &thread_session_id,
+                    worktree_id: &thread_worktree_id,
+                    working_dir: std::path::Path::new(&thread_working_dir),
+                    output_file: &thread_output_file,
+                    existing_muse_session_id: thread_muse_session_id.as_deref(),
+                    model: thread_model.as_deref(),
+                    execution_mode: thread_execution_mode.as_deref(),
+                    effort_level: effort,
+                    message: &thread_message,
+                    system_prompt: system_prompt.as_deref(),
+                    mcp_servers: thread_muse_mcp_servers,
+                    pid_callback: Some(make_pid_callback()),
+                }) {
+                    Ok(response) => Ok((
+                        0,
+                        UnifiedResponse {
+                            content: response.content,
+                            resume_id: response.session_id,
+                            tool_calls: response.tool_calls,
+                            content_blocks: response.content_blocks,
+                            cancelled: response.cancelled,
+                            waiting_for_plan: false,
+                            error_emitted: false,
+                            usage: response.usage,
+                            backend: Backend::Muse,
                         },
                     )),
                     Err(error) => Err(error),
@@ -5389,11 +5588,14 @@ pub async fn send_chat_message(
     // Clear registry state owned by this send. After cancel, a newer send may
     // already own ACTIVE_SENDS / CANCEL_FLAGS / PROCESS_REGISTRY for this session,
     // so only remove entries that still match this run (#329).
-    super::registry::cleanup_owned_session_registrations(
-        &session_id,
-        Some(pid),
-        opencode_cancel_flag.as_ref(),
-    );
+    // Devin cleans its own per-turn flag. Do not remove a replacement turn's flag.
+    if effective_backend != Backend::Devin {
+        super::registry::cleanup_owned_session_registrations(
+            &session_id,
+            Some(pid),
+            opencode_cancel_flag.as_ref(),
+        );
+    }
 
     // PID is now persisted via pid_callback immediately after spawn (before tailing).
     // No need to set_pid here — it was already saved for crash recovery.
@@ -5405,8 +5607,12 @@ pub async fn send_chat_message(
     // but are intentionally excluded from visible chat history on reload.
     // Unix Grok/Kimi hosts already write ACP stream JSONL + a result marker — synthetic
     // assistant lines would double content when parse_grok_run_to_message reloads.
-    let skip_synthetic_history =
-        cfg!(unix) && matches!(unified_response.backend, Backend::Grok | Backend::Kimi);
+    let skip_synthetic_history = unified_response.backend == Backend::Devin
+        || (cfg!(unix)
+            && matches!(
+                unified_response.backend,
+                Backend::Grok | Backend::Kimi | Backend::Muse
+            ));
     if matches!(
         unified_response.backend,
         Backend::Opencode
@@ -5415,6 +5621,8 @@ pub async fn send_chat_message(
             | Backend::Commandcode
             | Backend::Grok
             | Backend::Kimi
+            | Backend::Muse
+            | Backend::Devin
     ) && !unified_response.cancelled
         && !skip_synthetic_history
     {
@@ -5533,16 +5741,18 @@ pub async fn send_chat_message(
             .unwrap_or(false);
     let has_resume_worthy_payload = has_assistant_payload || has_persisted_visible_codex_artifacts;
 
-    // Handle error_emitted: backend emitted chat:error during execution (e.g., Codex usage limit).
-    // With no output, treat like undo_send so the user message doesn't persist in history.
+    // Handle error_emitted: backend emitted chat:error during execution (e.g., Claude usage limit).
+    // With no output, keep the user request as a failed attempt. API/MCP sessions cannot
+    // recover it from the composer, and a later backend switch must still see it.
+    // An explicit user cancel still falls through to undo-send and stays out of history.
     // After partial output (e.g. Claude API error / error_max_turns mid-turn), keep the
     // partial reply and resume id by finishing the run as cancelled-with-content below.
     if unified_response.error_emitted && has_assistant_payload {
         unified_response.cancelled = true;
     }
-    if unified_response.error_emitted && !has_assistant_payload {
-        if let Err(e) = run_log_writer.cancel(None, None) {
-            log::warn!("Failed to cancel run log after error: {e}");
+    if unified_response.error_emitted && !has_assistant_payload && !unified_response.cancelled {
+        if let Err(e) = run_log_writer.reject_without_output() {
+            log::warn!("Failed to record provider rejection: {e}");
         }
         log::info!("[SendChat] EXIT session={session_id} reason=error_emitted");
         trigger_backend_queue_drain(
@@ -5621,18 +5831,19 @@ pub async fn send_chat_message(
                         Backend::Kimi => {
                             session.kimi_session_id = Some(resume_id_for_log.clone());
                         }
+                        // Devin saves its ID before prompting. A cancelled worker
+                        // must not replace a newer turn's ID.
+                        Backend::Devin => {}
                         Backend::Antigravity => {
                             session.antigravity_session_id = Some(resume_id_for_log.clone());
+                        }
+                        Backend::Muse => {
+                            session.muse_session_id = Some(resume_id_for_log.clone());
                         }
                     }
                 }
                 // Remove user message (undo send) - allows frontend to restore to input field
-                if session
-                    .messages
-                    .last()
-                    .is_some_and(|m| m.role == MessageRole::User)
-                {
-                    session.messages.pop();
+                if undo_cancelled_user_message(session, &user_message_id) {
                     log::trace!("Removed user message for undo send in session: {session_id}");
                 }
             }
@@ -5777,8 +5988,13 @@ pub async fn send_chat_message(
                     Backend::Kimi => {
                         session.kimi_session_id = Some(resume_id_for_log.clone());
                     }
+                    // Already persisted by the ACP worker before prompting.
+                    Backend::Devin => {}
                     Backend::Antigravity => {
                         session.antigravity_session_id = Some(resume_id_for_log.clone());
+                    }
+                    Backend::Muse => {
+                        session.muse_session_id = Some(resume_id_for_log.clone());
                     }
                 }
             }
@@ -5849,7 +6065,11 @@ pub async fn send_chat_message(
 
     // Claude and Codex send the authoritative completion event after the run log
     // and session metadata are persisted. This also carries plain-text plan state.
-    if matches!(response_backend, Backend::Claude | Backend::Codex) && !was_cancelled {
+    if matches!(
+        response_backend,
+        Backend::Claude | Backend::Codex | Backend::Devin
+    ) && !was_cancelled
+    {
         let _ = app.emit_all(
             "chat:done",
             &serde_json::json!({
@@ -5918,7 +6138,9 @@ pub async fn clear_session_history(
             session.commandcode_session_id = None;
             session.grok_session_id = None;
             session.kimi_session_id = None;
+            session.devin_session_id = None;
             session.antigravity_session_id = None;
+            session.muse_session_id = None;
             session.selected_model = selected_model;
             session.selected_thinking_level = selected_thinking_level;
             session.selected_effort_level = selected_effort_level;
@@ -6018,6 +6240,40 @@ pub async fn set_session_effort_level(
     })
 }
 
+/// Clear the selected thinking level so the session uses the default again
+pub async fn clear_session_thinking_level(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+) -> Result<(), String> {
+    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+        if let Some(session) = sessions.find_session_mut(&session_id) {
+            session.selected_thinking_level = None;
+            Ok(())
+        } else {
+            Err(format!("Session not found: {session_id}"))
+        }
+    })
+}
+
+/// Clear the selected effort level so the session uses the default again
+pub async fn clear_session_effort_level(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+) -> Result<(), String> {
+    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+        if let Some(session) = sessions.find_session_mut(&session_id) {
+            session.selected_effort_level = None;
+            Ok(())
+        } else {
+            Err(format!("Session not found: {session_id}"))
+        }
+    })
+}
+
 /// Set the selected execution mode for a session.
 pub async fn set_session_execution_mode(
     app: AppHandle,
@@ -6065,6 +6321,45 @@ pub async fn set_session_provider(
     })
 }
 
+/// Save an advertised Devin control for the next turn.
+pub async fn set_session_devin_config(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+    config_id: String,
+    value: String,
+) -> Result<(), String> {
+    if super::registry::get_actively_managed_sessions().contains(&session_id) {
+        return Err("Wait for the Devin turn to finish before changing configuration".to_string());
+    }
+    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+        sessions
+            .find_session_mut(&session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?
+            .set_devin_config(config_id, value)
+    })
+}
+
+/// Select local or cloud before a Devin session starts.
+pub async fn set_session_devin_location(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+    location: super::types::DevinLocation,
+) -> Result<(), String> {
+    if super::registry::get_actively_managed_sessions().contains(&session_id) {
+        return Err("Wait for the Devin turn to finish before changing location".to_string());
+    }
+    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+        sessions
+            .find_session_mut(&session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?
+            .set_devin_location(location)
+    })
+}
+
 /// Set the backend for a session
 pub async fn set_session_backend(
     app: AppHandle,
@@ -6085,7 +6380,9 @@ pub async fn set_session_backend(
                 "commandcode" => super::types::Backend::Commandcode,
                 "grok" => super::types::Backend::Grok,
                 "kimi" => super::types::Backend::Kimi,
+                "devin" => super::types::Backend::Devin,
                 "antigravity" => super::types::Backend::Antigravity,
+                "muse" => super::types::Backend::Muse,
                 _ => super::types::Backend::Claude,
             };
             log::trace!("Backend selection saved");
@@ -6127,7 +6424,9 @@ pub fn codex_goal_set(
     if let Some(tid) = thread_id {
         super::codex_server::ensure_running(&app)?;
         let params = codex_goal_set_params(&tid, trimmed);
-        super::codex_server::send_request("thread/goal/set", params)?;
+        let result = super::codex_server::send_request("thread/goal/set", params);
+        super::codex_server::release_usage();
+        result?;
     }
 
     persist_codex_goal(
@@ -6154,8 +6453,9 @@ pub fn codex_goal_get(
         let response = super::codex_server::send_request(
             "thread/goal/get",
             serde_json::json!({ "threadId": tid }),
-        )?;
-        extract_codex_goal_objective(&response)
+        );
+        super::codex_server::release_usage();
+        extract_codex_goal_objective(&response?)
     } else {
         super::storage::with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
             Ok(sessions
@@ -6185,10 +6485,12 @@ pub fn codex_goal_clear(
 
     if let Some(tid) = thread_id {
         super::codex_server::ensure_running(&app)?;
-        super::codex_server::send_request(
+        let result = super::codex_server::send_request(
             "thread/goal/clear",
             serde_json::json!({ "threadId": tid }),
-        )?;
+        );
+        super::codex_server::release_usage();
+        result?;
     }
 
     persist_codex_goal(&app, &worktree_id, &worktree_path, &session_id, None)?;
@@ -6779,8 +7081,11 @@ pub fn save_pasted_file_bytes(
         })
         .take(160)
         .collect();
-    let stored_name = format!("{}-{safe_name}", &Uuid::new_v4().to_string()[..8]);
-    let file_path = get_pastes_dir(app)?.join(&stored_name);
+    // A unique folder per upload keeps the original filename visible in badges.
+    let upload_dir = get_pastes_dir(app)?.join(&Uuid::new_v4().to_string()[..8]);
+    std::fs::create_dir_all(&upload_dir)
+        .map_err(|e| format!("Failed to create upload directory: {e}"))?;
+    let file_path = upload_dir.join(&safe_name);
     crate::platform::write_file_atomically(&file_path, bytes)?;
 
     Ok(SaveTextResponse {
@@ -8030,6 +8335,19 @@ fn execute_summarization_claude(
             .map_err(|e| format!("Failed to parse Antigravity summarization response: {e}"));
     }
 
+    if backend == super::types::Backend::Muse {
+        log::trace!("Executing one-shot Muse summarization");
+        let json_str = super::muse::execute_one_shot_muse(
+            app,
+            prompt,
+            model_str,
+            Some(CONTEXT_SUMMARY_SCHEMA),
+            working_dir,
+        )?;
+        return serde_json::from_str(&json_str)
+            .map_err(|e| format!("Failed to parse Muse summarization response: {e}"));
+    }
+
     let cli_path = resolve_cli_binary(app);
     if !cli_path.exists() {
         return Err("Claude CLI not installed".to_string());
@@ -8325,6 +8643,8 @@ pub async fn get_session_debug_info(
     let cursor_chat_id = session.and_then(|s| s.cursor_chat_id.clone());
     let pi_session_id = session.and_then(|s| s.pi_session_id.clone());
     let grok_session_id = session.and_then(|s| s.grok_session_id.clone());
+    let kimi_session_id = session.and_then(|s| s.kimi_session_id.clone());
+    let devin_session_id = session.and_then(|s| s.devin_session_id.clone());
 
     // Try to find Claude CLI's JSONL file
     let claude_jsonl_file = claude_session_id.as_ref().and_then(|sid| {
@@ -8410,8 +8730,10 @@ pub async fn get_session_debug_info(
         pi_session_id,
         commandcode_session_id: None,
         grok_session_id,
-        kimi_session_id: session.and_then(|s| s.kimi_session_id.clone()),
+        kimi_session_id,
+        devin_session_id,
         antigravity_session_id: session.and_then(|s| s.antigravity_session_id.clone()),
+        muse_session_id: session.and_then(|s| s.muse_session_id.clone()),
         claude_jsonl_file,
         run_log_files,
         total_usage,
@@ -8857,6 +9179,105 @@ pub async fn resume_session(
             continue;
         }
 
+        // === Muse detached MSP-host resume path ===
+        if run.backend == Some(Backend::Muse) {
+            let pid = match run.pid {
+                Some(pid) => pid,
+                None => continue,
+            };
+            let output_file = session_dir.join(format!("{run_id}.jsonl"));
+
+            if let Some(metadata_run) = metadata.find_run_mut(&run_id) {
+                metadata_run.status = RunStatus::Running;
+            }
+            save_metadata(&app, &metadata)?;
+
+            if !super::registry::register_detached_process(session_id.clone(), pid) {
+                log::warn!("Resume Muse session {session_id} was cancelled before tailing started");
+                return Ok(ResumeSessionResponse {
+                    resumed: false,
+                    run_count: 0,
+                });
+            }
+
+            let app_clone = app.clone();
+            let session_id_clone = session_id.clone();
+            let worktree_id_clone = worktree_id.clone();
+            let run_id_clone = run_id.clone();
+            let execution_mode = run.execution_mode.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let emit_done = |app: &tauri::AppHandle, sid: &str, wid: &str| {
+                    let _ = app.emit_all(
+                        "chat:done",
+                        &serde_json::json!({
+                            "session_id": sid,
+                            "worktree_id": wid,
+                            "waiting_for_plan": false,
+                        }),
+                    );
+                };
+
+                let response = match super::muse::tail_muse_output(
+                    &app_clone,
+                    &session_id_clone,
+                    &worktree_id_clone,
+                    &output_file,
+                    pid,
+                ) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        log::error!("Resume Muse tail failed for run {run_id_clone}: {error}");
+                        super::registry::unregister_process(&session_id_clone);
+                        if let Ok(mut writer) =
+                            RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
+                        {
+                            let _ = writer.crash();
+                        }
+                        emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
+                        return;
+                    }
+                };
+                super::registry::unregister_process(&session_id_clone);
+                let response = super::muse::finish_muse_response(
+                    &app_clone,
+                    &session_id_clone,
+                    &worktree_id_clone,
+                    execution_mode.as_deref(),
+                    response,
+                );
+                if response.cancelled {
+                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
+                }
+
+                if let Ok(mut writer) =
+                    RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
+                {
+                    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+                    if let Err(error) =
+                        writer.complete(&assistant_message_id, None, response.usage.clone())
+                    {
+                        log::error!("Failed to mark resumed Muse run completed: {error}");
+                    }
+                }
+
+                if !response.session_id.is_empty() {
+                    if let Err(error) =
+                        with_existing_metadata_mut(&app_clone, &session_id_clone, |metadata| {
+                            metadata.muse_session_id = Some(response.session_id.clone());
+                            if let Some(run) = metadata.find_run_mut(&run_id_clone) {
+                                run.muse_session_id = Some(response.session_id.clone());
+                                run.usage = response.usage.clone();
+                            }
+                        })
+                    {
+                        log::warn!("Failed to persist recovered Muse session id: {error}");
+                    }
+                }
+            });
+            continue;
+        }
+
         // === Grok detached ACP-host resume path ===
         if run.backend == Some(Backend::Grok) {
             let pid = match run.pid {
@@ -9071,9 +9492,13 @@ pub async fn resume_session(
                 let resume_sid = Some(response.session_id.as_str()).filter(|id| !id.is_empty());
                 let finish = if completed {
                     writer.complete(&assistant_message_id, resume_sid, response.usage.clone())
+                } else if response.error_emitted && !has_payload && !response.cancelled {
+                    // Same as send: a provider rejection before output keeps the
+                    // user request. User cancel still goes through cancel().
+                    writer.reject_without_output()
                 } else {
-                    // Process died, user cancelled, or the turn failed: the run did
-                    // not complete. Keep partial output and its resume id.
+                    // Process died or the user cancelled. Keep partial output
+                    // and its resume id when the backend already started.
                     writer.cancel(
                         has_payload.then_some(assistant_message_id.as_str()),
                         resume_sid.filter(|_| has_payload),
@@ -9238,7 +9663,9 @@ pub async fn get_mcp_servers(
         Some("opencode") => crate::opencode_cli::mcp::get_mcp_servers(wt),
         Some("cursor") => crate::cursor_cli::mcp::get_mcp_servers(wt),
         Some("kimi") => crate::kimi_cli::mcp::get_mcp_servers(wt),
+        Some("devin") => crate::devin_cli::mcp::get_mcp_servers(wt),
         Some("antigravity") => crate::antigravity_cli::mcp::get_mcp_servers(wt),
+        Some("muse") => crate::muse_cli::mcp::get_mcp_servers(wt),
         Some("grok") => crate::grok_cli::mcp::get_mcp_servers(wt),
         _ => crate::claude_cli::mcp::get_mcp_servers(wt),
     };
@@ -9317,6 +9744,19 @@ pub async fn check_mcp_health(
         Some("codex") => check_mcp_health_codex(&app, worktree_path.as_deref()),
         Some("opencode") => check_mcp_health_opencode(&app, worktree_path.as_deref()),
         Some("cursor") => check_mcp_health_cursor(&app, worktree_path.as_deref()),
+        Some("devin") => Ok(McpHealthResult {
+            statuses: crate::devin_cli::mcp::get_mcp_servers(worktree_path.as_deref())
+                .into_iter()
+                .map(|server| {
+                    let status = if server.disabled {
+                        McpHealthStatus::Disabled
+                    } else {
+                        McpHealthStatus::Unknown
+                    };
+                    (server.name, status)
+                })
+                .collect(),
+        }),
         Some("kimi") => Ok(McpHealthResult {
             statuses: crate::kimi_cli::mcp::get_mcp_servers(worktree_path.as_deref())
                 .into_iter()
@@ -9324,6 +9764,7 @@ pub async fn check_mcp_health(
                 .collect(),
         }),
         Some("antigravity") => check_mcp_health_antigravity(&app, worktree_path.as_deref()),
+        Some("muse") => check_mcp_health_muse(worktree_path.as_deref()),
         Some("grok") => {
             let path = worktree_path.as_deref().map(std::path::Path::new);
             let statuses = crate::grok_cli::mcp::check_mcp_health(&app, path)?;
@@ -9338,6 +9779,24 @@ fn check_mcp_health_antigravity(
     worktree_path: Option<&str>,
 ) -> Result<McpHealthResult, String> {
     let statuses = crate::antigravity_cli::mcp::get_mcp_servers(worktree_path)
+        .into_iter()
+        .map(|server| {
+            (
+                server.name,
+                if server.disabled {
+                    McpHealthStatus::Disabled
+                } else {
+                    McpHealthStatus::Unknown
+                },
+            )
+        })
+        .collect();
+    Ok(McpHealthResult { statuses })
+}
+
+/// Muse has no MCP health command; report configured servers as unknown/disabled.
+fn check_mcp_health_muse(worktree_path: Option<&str>) -> Result<McpHealthResult, String> {
+    let statuses = crate::muse_cli::mcp::get_mcp_servers(worktree_path)
         .into_iter()
         .map(|server| {
             (
@@ -9528,6 +9987,9 @@ pub fn respond_codex_command_approval(
     rpc_id: u64,
     mut response: serde_json::Value,
 ) -> Result<(), String> {
+    if let Some(result) = super::devin_permissions::respond(&session_id, rpc_id, response.clone()) {
+        return result;
+    }
     if prepare_codex_command_approval_response(&mut response) {
         // Approve (yolo) / acceptForSession: auto-accept residual sandbox/command
         // prompts for the rest of this session without waiting for the next turn
@@ -10045,10 +10507,11 @@ fn queued_message_is_steerable_for_backend(msg: &serde_json::Value, backend: &st
         return false;
     }
 
-    // Codex, OpenCode, Pi, and Grok can all steer queued prompts. Attachment
-    // kinds (file @-mentions, skills, pasted images, pasted text files) become
-    // path refs in the steered text via build_queued_message_with_refs.
-    matches!(backend, "codex" | "opencode" | "pi" | "grok")
+    // Codex, OpenCode, Pi, Grok, and Claude (host-backed runs) can all steer
+    // queued prompts. Attachment kinds (file @-mentions, skills, pasted
+    // images, pasted text files) become path refs in the steered text via
+    // build_queued_message_with_refs.
+    matches!(backend, "codex" | "opencode" | "pi" | "grok" | "claude")
 }
 
 fn queued_message_supports_any_steering(msg: &serde_json::Value) -> bool {
@@ -10056,6 +10519,58 @@ fn queued_message_supports_any_steering(msg: &serde_json::Value) -> bool {
         || queued_message_is_steerable_for_backend(msg, "opencode")
         || queued_message_is_steerable_for_backend(msg, "pi")
         || queued_message_is_steerable_for_backend(msg, "grok")
+        || queued_message_is_steerable_for_backend(msg, "claude")
+}
+
+/// Inject a user message into a running Claude turn via the detached Claude
+/// host. Errors when the run is not host-backed or the turn already finished;
+/// callers fall back to the queue. The host writes `steered_user_message`
+/// and the tailer emits `chat:steered` when the CLI consumes the steer.
+pub async fn steer_claude_turn(
+    app: AppHandle,
+    worktree_id: String,
+    session_id: String,
+    message: String,
+) -> Result<(), String> {
+    steer_text_into_claude_turn(&app, &worktree_id, &session_id, &message).await
+}
+
+async fn steer_text_into_claude_turn(
+    app: &AppHandle,
+    _worktree_id: &str,
+    session_id: &str,
+    message: &str,
+) -> Result<(), String> {
+    #[cfg(not(unix))]
+    {
+        let _ = (app, session_id, message);
+        Err("Claude steering is only available on macOS/Linux".to_string())
+    }
+
+    #[cfg(unix)]
+    {
+        let metadata = load_metadata(app, session_id)?
+            .ok_or_else(|| format!("No metadata found for session: {session_id}"))?;
+        let run_id = metadata
+            .runs
+            .iter()
+            .rev()
+            .find(|r| r.status == RunStatus::Running && r.backend == Some(Backend::Claude))
+            .map(|r| r.run_id.clone())
+            .ok_or_else(|| format!("No running Claude run for session: {session_id}"))?;
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
+        let socket_path =
+            super::claude_host::claude_host_socket_path(&app_data, session_id, &run_id);
+        let message = message.to_string();
+        tokio::task::spawn_blocking(move || {
+            super::claude_host::send_claude_host_steer(&socket_path, &message)
+        })
+        .await
+        .map_err(|e| format!("Claude steer task failed: {e}"))?
+    }
 }
 
 /// Inject a user message into a running Pi RPC turn via the detached PI host.
@@ -10408,8 +10923,30 @@ pub(crate) fn trigger_opencode_queue_steer(
 /// Drain steerable queued messages into a running Pi RPC host. Pi's own
 /// steering queue delivers these at the next safe tool/turn boundary.
 async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id: &str) {
+    drain_queue_into_host_turn(app, worktree_id, session_id, Backend::Pi).await;
+}
+
+async fn drain_queue_into_claude_turn(app: &AppHandle, worktree_id: &str, session_id: &str) {
+    drain_queue_into_host_turn(app, worktree_id, session_id, Backend::Claude).await;
+}
+
+/// Drain steerable queued messages into a running detached-host turn (Pi RPC
+/// host or Claude host) when that backend's auto-steer preference is on.
+async fn drain_queue_into_host_turn(
+    app: &AppHandle,
+    worktree_id: &str,
+    session_id: &str,
+    backend: Backend,
+) {
+    let (backend_key, label) = match backend {
+        Backend::Claude => ("claude", "ClaudeSteer"),
+        _ => ("pi", "PiSteer"),
+    };
     let auto_steer = crate::load_preferences_sync(app)
-        .map(|p| p.pi_auto_steer_enabled)
+        .map(|p| match backend {
+            Backend::Claude => p.claude_auto_steer_enabled,
+            _ => p.pi_auto_steer_enabled,
+        })
         .unwrap_or(false);
     if !auto_steer {
         return;
@@ -10417,12 +10954,12 @@ async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id
 
     #[cfg(not(unix))]
     {
-        let _ = (app, worktree_id, session_id);
+        let _ = (app, worktree_id, session_id, backend_key, label);
     }
 
     #[cfg(unix)]
     loop {
-        let has_running_pi = load_metadata(app, session_id)
+        let has_running_run = load_metadata(app, session_id)
             .ok()
             .flatten()
             .and_then(|metadata| {
@@ -10430,17 +10967,17 @@ async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id
                     .runs
                     .iter()
                     .rev()
-                    .find(|r| r.status == RunStatus::Running && r.backend == Some(Backend::Pi))
+                    .find(|r| r.status == RunStatus::Running && r.backend == Some(backend.clone()))
                     .map(|r| r.run_id.clone())
             })
             .is_some();
-        if !has_running_pi {
+        if !has_running_run {
             return;
         }
 
         let popped = match with_existing_metadata_mut(app, session_id, |metadata| {
             match metadata.queued_messages.first() {
-                Some(front) if queued_message_is_steerable_for_backend(front, "pi") => {
+                Some(front) if queued_message_is_steerable_for_backend(front, backend_key) => {
                     let msg = metadata.queued_messages.remove(0);
                     (Some(msg), metadata.queued_messages.clone())
                 }
@@ -10458,7 +10995,7 @@ async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id
                 popped
             }
             Err(e) => {
-                log::warn!("[PiSteer] failed to read queue session={session_id}: {e}");
+                log::warn!("[{label}] failed to read queue session={session_id}: {e}");
                 return;
             }
         };
@@ -10467,7 +11004,7 @@ async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id
         let text = match build_queued_message_with_refs(&msg) {
             Ok(t) => t.trim().to_string(),
             Err(e) => {
-                log::warn!("[PiSteer] failed to build steerable message session={session_id}: {e}");
+                log::warn!("[{label}] failed to build steerable message session={session_id}: {e}");
                 continue;
             }
         };
@@ -10475,9 +11012,15 @@ async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id
             continue;
         }
 
-        log::info!("[PiSteer] steering queued message into running Pi session={session_id}");
-        if let Err(e) = steer_text_into_pi_turn(app, worktree_id, session_id, &text).await {
-            log::warn!("[PiSteer] steer failed, requeueing at front session={session_id}: {e}");
+        log::info!("[{label}] steering queued message into running turn session={session_id}");
+        let steered = match backend {
+            Backend::Claude => {
+                steer_text_into_claude_turn(app, worktree_id, session_id, &text).await
+            }
+            _ => steer_text_into_pi_turn(app, worktree_id, session_id, &text).await,
+        };
+        if let Err(e) = steered {
+            log::warn!("[{label}] steer failed, requeueing at front session={session_id}: {e}");
             let requeued = with_existing_metadata_mut(app, session_id, |metadata| {
                 metadata.queued_messages.insert(0, msg.clone());
                 metadata.queued_messages.clone()
@@ -10671,6 +11214,7 @@ mod tests {
             Backend::Grok,
             Backend::Kimi,
             Backend::Antigravity,
+            Backend::Muse,
         ] {
             assert!(validate_execution_policy("plan", &backend).is_ok());
             assert!(validate_execution_policy("yolo", &backend).is_ok());
@@ -10695,6 +11239,37 @@ mod tests {
             );
         }
         assert!(validate_execution_policy("build", &Backend::Cursor).is_err());
+    }
+
+    #[test]
+    fn new_sessions_start_in_an_implement_mode() {
+        assert_eq!(implement_execution_policy("yolo", &Backend::Claude), "yolo");
+        assert_eq!(
+            implement_execution_policy("build", &Backend::Claude),
+            "build"
+        );
+        assert_eq!(
+            implement_execution_policy("supervised", &Backend::Claude),
+            "supervised"
+        );
+        assert_eq!(
+            implement_execution_policy("plan", &Backend::Claude),
+            "build"
+        );
+        assert_eq!(implement_execution_policy("plan", &Backend::Cursor), "yolo");
+        assert_eq!(
+            implement_execution_policy("build", &Backend::Cursor),
+            "yolo"
+        );
+        assert_eq!(
+            implement_execution_policy("supervised", &Backend::Cursor),
+            "yolo"
+        );
+        assert_eq!(implement_execution_policy("unknown", &Backend::Pi), "build");
+        assert_eq!(
+            implement_execution_policy("unknown", &Backend::Cursor),
+            "yolo"
+        );
     }
 
     #[test]
@@ -11125,6 +11700,22 @@ mod tests {
     }
 
     #[test]
+    fn queued_message_steerable_for_backend_accepts_claude() {
+        let claude = serde_json::json!({
+            "id": "m1",
+            "message": "also run echo STEERED",
+            "backend": "claude",
+            "pendingImages": [],
+            "pendingFiles": [],
+            "pendingSkills": [],
+            "pendingTextFiles": [],
+        });
+        assert!(queued_message_is_steerable_for_backend(&claude, "claude"));
+        assert!(!queued_message_is_steerable_for_backend(&claude, "pi"));
+        assert!(queued_message_supports_any_steering(&claude));
+    }
+
+    #[test]
     fn queued_message_steerable_for_backend_accepts_grok_with_attachments() {
         let grok_plain = serde_json::json!({
             "id": "m1",
@@ -11272,6 +11863,21 @@ mod tests {
             has_usage,
             was_cancelled,
         ));
+    }
+
+    #[test]
+    fn devin_cancelled_turn_does_not_remove_replacement_input() {
+        let mut session = Session::new("Devin".into(), 0, Backend::Devin);
+        session.messages.push(ChatMessage {
+            id: "new-user".into(),
+            role: MessageRole::User,
+            ..Default::default()
+        });
+        assert!(!undo_cancelled_user_message(&mut session, "old-user"));
+        assert_eq!(session.messages[0].id, "new-user");
+        assert!(undo_cancelled_user_message(&mut session, "new-user"));
+        assert!(session.messages.is_empty());
+        assert!(!undo_cancelled_user_message(&mut session, "new-user"));
     }
 
     #[test]
@@ -11464,12 +12070,12 @@ mod tests {
 ## Jean Worktree Policy";
 
         let yolo_prompt = resolve_codex_global_system_prompt(Some(legacy_default), Some("yolo"));
-        assert!(yolo_prompt.contains("### 4. Self-Improvement Loop"));
+        assert!(yolo_prompt.contains("### 3. Self-Improvement Loop"));
         assert!(!yolo_prompt.contains("Plan Mode Default"));
         assert!(yolo_prompt.contains("## Not Plan Mode"));
 
         let plan_prompt = resolve_codex_global_system_prompt(Some(legacy_default), Some("plan"));
-        assert!(plan_prompt.contains("### 4. Self-Improvement Loop"));
+        assert!(plan_prompt.contains("### 3. Self-Improvement Loop"));
         assert!(plan_prompt.contains("## Plan Mode"));
         assert!(plan_prompt.contains("<proposed_plan>"));
     }

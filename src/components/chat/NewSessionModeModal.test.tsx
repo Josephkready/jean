@@ -16,6 +16,7 @@ let piInstalled: boolean
 let commandCodeInstalled: boolean
 let grokInstalled: boolean
 let kimiInstalled: boolean
+let devinInstalled: boolean
 let isMobile: boolean
 let defaultExecutionMode: 'plan' | 'build' | 'yolo'
 let defaultBackend: 'claude' | 'codex'
@@ -144,6 +145,26 @@ vi.mock('@/services/kimi-cli', () => ({
   }),
 }))
 
+vi.mock('@/services/devin-cli', () => ({
+  useDevinCliStatus: (options?: { serverId?: string }) => {
+    cliStatusTargets.set('devin', options?.serverId)
+    return {
+      data: {
+        installed: devinInstalled,
+        path: devinInstalled ? '/usr/local/bin/devin' : null,
+      },
+      isLoading: false,
+    }
+  },
+}))
+
+vi.mock('@/services/antigravity-cli', () => ({
+  useAntigravityCliStatus: () => ({
+    data: { installed: false, path: null },
+    isLoading: false,
+  }),
+}))
+
 describe('NewSessionModeModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -158,6 +179,7 @@ describe('NewSessionModeModal', () => {
     commandCodeInstalled = false
     grokInstalled = false
     kimiInstalled = false
+    devinInstalled = false
     isMobile = false
     defaultExecutionMode = 'plan'
     defaultBackend = 'claude'
@@ -330,6 +352,25 @@ describe('NewSessionModeModal', () => {
     expect(useChatStore.getState().activeSessionIds['worktree-1']).toBe(
       'session-default'
     )
+  })
+
+  it('marks Devin as beta in new-session backend choices', () => {
+    devinInstalled = true
+    useUIStore.getState().openNewSessionModeModal({
+      worktreeId: 'worktree-1',
+      worktreePath: '/tmp/worktree-1',
+      origin: 'chat',
+    })
+
+    render(<NewSessionModeModal />)
+
+    expect(screen.getByText('Devin')).toBeInTheDocument()
+    expect(screen.getByText('Beta')).toHaveClass('bg-warning/10')
+    expect(
+      screen.getByText('Open native Devin in a terminal session')
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Devin (Beta)')).toBeNull()
+    expect(screen.queryByText('Claude (Beta)')).toBeNull()
   })
 
   it('does not mark Command Code or Grok as beta in backend choices', () => {

@@ -1,4 +1,9 @@
-import { getActiveRemoteConnection } from './remote-connections'
+import {
+  getActiveConnectionId,
+  getActiveRemoteConnection,
+  getRemoteConnections,
+  LOCAL_CONNECTION_ID,
+} from './remote-connections'
 
 /**
  * Environment detection utilities.
@@ -37,6 +42,16 @@ export const setWebAccessServerName = (name?: string | null): void => {
 
 export const webAccessServerLabel = (): string =>
   _webAccessServerName ?? window.location.host
+
+/** Which Jean instance an update runs on, e.g. "Local" or "Remote: devbox".
+ * Without `serverId`, the update targets the active backend. */
+export const updateTargetLabel = (serverId?: string): string => {
+  if (!isNativeApp()) return `Remote: ${webAccessServerLabel()}`
+  const id = serverId ?? getActiveConnectionId()
+  if (id === LOCAL_CONNECTION_ID) return 'Local'
+  const remote = getRemoteConnections().find(connection => connection.id === id)
+  return `Remote: ${remote?.name ?? id}`
+}
 
 /**
  * Whether the connected Jean backend can open host apps (editor/finder/terminal).

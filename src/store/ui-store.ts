@@ -16,6 +16,7 @@ export interface InvestigationOverride {
   prompt?: string
   promptTemplate?: string
   issueContext?: IssueContext
+  /** true: select and open the session. false: run it in the background. */
   openSession?: boolean
 }
 
@@ -29,7 +30,9 @@ export type PreferencePane =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'antigravity'
+  | 'muse'
   | 'github'
   | 'coderabbit'
   | 'appearance'
@@ -60,6 +63,7 @@ export interface NewSessionModeTarget {
 export type CliUpdateModalType =
   | 'claude'
   | 'gh'
+  | 'glab'
   | 'codex'
   | 'opencode'
   | 'pi'
@@ -67,6 +71,7 @@ export type CliUpdateModalType =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | null
 
 export interface PendingCliUpdate {
@@ -88,7 +93,9 @@ export interface PendingServerUpdate {
 
 export type CliLoginModalType =
   | 'claude'
+  | 'cliproxyapi'
   | 'gh'
+  | 'glab'
   | 'codex'
   | 'opencode'
   | 'cursor'
@@ -96,7 +103,9 @@ export type CliLoginModalType =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'devin'
   | 'antigravity'
+  | 'muse'
   | 'coderabbit'
   | null
 
@@ -110,6 +119,8 @@ export interface McpLoginContext {
 export interface MinimizedCliUpdate {
   type: Exclude<CliLoginModalType, null>
   name: string
+  /** Jean instance the update runs on, e.g. "Local" or "Remote: devbox". */
+  target: string
   kind: 'reinstall' | 'terminal'
   progress: number | null
 }
@@ -120,11 +131,21 @@ export type RailSection = 'workspace' | 'agents'
 interface UIState {
   leftSidebarVisible: boolean
   railSection: RailSection
+  /** Last sidebar visibility of each rail section, restored on switch */
+  railSidebarVisible: Partial<Record<RailSection, boolean>>
   /** Agent open on the Agents page */
   selectedAgentId: string
+  /** When the user last left the Agents page (ms, 0 = never this session) */
+  agentsLeftAt: number
   /** Agents sidebar server filter: 'all' or a server ID */
   agentsServerFilter: string
+  /** Agent pages show every tab and tool activity (off: Chat and Schedules) */
+  agentsAdvanced: boolean
+  /** Per agent: timestamp (unix s) of the newest update reply the user saw */
+  agentUpdatesSeenAt: Record<string, number>
   leftSidebarSize: number // Width in pixels, persisted across sessions
+  /** Agents sidebar width in pixels; can shrink to an icon column */
+  agentsSidebarSize: number
   /** File browser (worktree explorer) visibility */
   fileBrowserVisible: boolean
   /** File browser width in pixels, persisted across sessions */
@@ -211,6 +232,8 @@ interface UIState {
   gitDiffModalOpen: boolean
   /** File paths selected for commit in GitDiffModal (uncommitted tab only) */
   gitDiffSelectedFiles: Set<string>
+  /** Git diff modal sidebar file list view mode (persisted across sessions) */
+  gitDiffViewMode: 'list' | 'tree'
   /** Whether a plan dialog is open (blocks canvas approve keybindings) */
   planDialogOpen: boolean
   /** Whether the context viewer dialog is open (blocks SessionChatModal ESC close) */
@@ -243,10 +266,15 @@ interface UIState {
   availableCliUpdates: PendingCliUpdate[]
   toggleLeftSidebar: () => void
   setLeftSidebarVisible: (visible: boolean) => void
-  setRailSection: (section: RailSection) => void
+  /** restoreSidebar: show the sidebar as the section last left it (desktop rail) */
+  setRailSection: (section: RailSection, restoreSidebar?: boolean) => void
   setSelectedAgentId: (agentId: string) => void
   setAgentsServerFilter: (serverId: string) => void
+  setAgentsAdvanced: (advanced: boolean) => void
+  markAgentUpdatesSeen: (agentId: string, timestamp: number) => void
+  setAgentUpdatesSeenAt: (seenAt: Record<string, number>) => void
   setLeftSidebarSize: (size: number) => void
+  setAgentsSidebarSize: (size: number) => void
   leftSidebarSwipe: {
     isDragging: boolean
     dragOffset: number
@@ -357,6 +385,7 @@ interface UIState {
   setGitDiffModalOpen: (open: boolean) => void
   toggleGitDiffSelectedFile: (filePath: string) => void
   clearGitDiffSelectedFiles: () => void
+  setGitDiffViewMode: (mode: 'list' | 'tree') => void
   setPlanDialogOpen: (open: boolean) => void
   setContextViewerOpen: (open: boolean) => void
   setFeatureTourOpen: (open: boolean) => void
@@ -415,9 +444,14 @@ export const useUIStore = create<UIState>()(
     (set, get) => ({
       leftSidebarVisible: false,
       railSection: 'workspace',
+      railSidebarVisible: {},
       selectedAgentId: 'jean',
+      agentsLeftAt: 0,
       agentsServerFilter: 'all',
+      agentsAdvanced: false,
+      agentUpdatesSeenAt: {},
       leftSidebarSize: 250, // Default width in pixels
+      agentsSidebarSize: 250,
       leftSidebarSwipe: {
         isDragging: false,
         dragOffset: 0,
@@ -477,6 +511,7 @@ export const useUIStore = create<UIState>()(
       newSessionModeTarget: null,
       gitDiffModalOpen: false,
       gitDiffSelectedFiles: new Set<string>(),
+      gitDiffViewMode: 'list',
       planDialogOpen: false,
       contextViewerOpen: false,
       featureTourOpen: false,
@@ -542,10 +577,26 @@ export const useUIStore = create<UIState>()(
           'setLeftSidebarVisible'
         ),
 
-      setRailSection: section =>
+      setRailSection: (section, restoreSidebar = false) =>
         set(
           state =>
-            state.railSection === section ? state : { railSection: section },
+            state.railSection === section
+              ? state
+              : {
+                  railSection: section,
+                  railSidebarVisible: {
+                    ...state.railSidebarVisible,
+                    [state.railSection]: state.leftSidebarVisible,
+                  },
+                  // A section never opened before shows its panel
+                  ...(restoreSidebar && {
+                    leftSidebarVisible:
+                      state.railSidebarVisible[section] ?? true,
+                  }),
+                  ...(state.railSection === 'agents' && {
+                    agentsLeftAt: Date.now(),
+                  }),
+                },
           undefined,
           'setRailSection'
         ),
@@ -558,6 +609,41 @@ export const useUIStore = create<UIState>()(
               : { selectedAgentId: agentId },
           undefined,
           'setSelectedAgentId'
+        ),
+
+      setAgentsAdvanced: advanced =>
+        set(
+          state =>
+            state.agentsAdvanced === advanced
+              ? state
+              : { agentsAdvanced: advanced },
+          undefined,
+          'setAgentsAdvanced'
+        ),
+
+      markAgentUpdatesSeen: (agentId, timestamp) =>
+        set(
+          state =>
+            (state.agentUpdatesSeenAt[agentId] ?? 0) >= timestamp
+              ? state
+              : {
+                  agentUpdatesSeenAt: {
+                    ...state.agentUpdatesSeenAt,
+                    [agentId]: timestamp,
+                  },
+                },
+          undefined,
+          'markAgentUpdatesSeen'
+        ),
+
+      setAgentUpdatesSeenAt: seenAt =>
+        set(
+          state =>
+            state.agentUpdatesSeenAt === seenAt
+              ? state
+              : { agentUpdatesSeenAt: seenAt },
+          undefined,
+          'setAgentUpdatesSeenAt'
         ),
 
       setAgentsServerFilter: serverId =>
@@ -583,6 +669,16 @@ export const useUIStore = create<UIState>()(
             state.leftSidebarSize === size ? state : { leftSidebarSize: size },
           undefined,
           'setLeftSidebarSize'
+        ),
+
+      setAgentsSidebarSize: size =>
+        set(
+          state =>
+            state.agentsSidebarSize === size
+              ? state
+              : { agentsSidebarSize: size },
+          undefined,
+          'setAgentsSidebarSize'
         ),
 
       setLeftSidebarSwipe: swipe =>
@@ -1496,6 +1592,16 @@ export const useUIStore = create<UIState>()(
           },
           undefined,
           'clearGitDiffSelectedFiles'
+        ),
+
+      setGitDiffViewMode: (mode: 'list' | 'tree') =>
+        set(
+          state => {
+            if (state.gitDiffViewMode === mode) return state
+            return { gitDiffViewMode: mode }
+          },
+          undefined,
+          'setGitDiffViewMode'
         ),
 
       setPlanDialogOpen: (open: boolean) =>

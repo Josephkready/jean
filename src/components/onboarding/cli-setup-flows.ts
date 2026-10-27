@@ -54,10 +54,25 @@ import {
   useAntigravityPathDetection,
 } from '@/services/antigravity-cli'
 import {
+  useMuseCliAuth,
+  useMuseCliSetup,
+  useMusePathDetection,
+} from '@/services/muse-cli'
+import {
+  useDevinCliAuth,
+  useDevinCliSetup,
+  useDevinPathDetection,
+} from '@/services/devin-cli'
+import {
   useGhCliAuth,
   useGhCliSetup,
   useGhPathDetection,
 } from '@/services/gh-cli'
+import {
+  useGlabCliAuth,
+  useGlabCliSetup,
+  useGlabPathDetection,
+} from '@/services/glab-cli'
 import { usePatchPreferences, usePreferences } from '@/services/preferences'
 import type { AppPreferences } from '@/types/preferences'
 
@@ -71,7 +86,9 @@ export type AIBackend =
   | 'grok'
   | 'kimi'
   | 'antigravity'
-export type CliType = AIBackend | 'gh'
+  | 'muse'
+  | 'devin'
+export type CliType = AIBackend | 'gh' | 'glab'
 
 export const AI_BACKENDS: AIBackend[] = [
   'claude',
@@ -83,6 +100,8 @@ export const AI_BACKENDS: AIBackend[] = [
   'grok',
   'kimi',
   'antigravity',
+  'muse',
+  'devin',
 ]
 
 export interface CliProgress {
@@ -124,7 +143,9 @@ export interface CliFlow {
 }
 
 export function cliLabel(cli: CliType): string {
-  return cli === 'gh' ? 'GitHub CLI' : getBackendLabel(cli)
+  if (cli === 'gh') return 'GitHub CLI'
+  if (cli === 'glab') return 'GitLab CLI'
+  return getBackendLabel(cli)
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +210,10 @@ const SOURCE_KEYS: Record<Exclude<CliType, 'cursor'>, SourceKey> = {
   grok: 'grok_cli_source',
   kimi: 'kimi_cli_source',
   antigravity: 'antigravity_cli_source',
+  muse: 'muse_cli_source',
+  devin: 'devin_cli_source',
   gh: 'gh_cli_source',
+  glab: 'glab_cli_source',
 }
 
 const GH_LOGIN_ARGS = ['auth', 'login']
@@ -211,7 +235,7 @@ function isAuthenticated(cli: CliType, auth: AuthQuery): boolean {
 }
 
 function loginArgsFor(cli: CliType, status: StatusLike | undefined) {
-  if (cli === 'gh') return GH_LOGIN_ARGS
+  if (cli === 'gh' || cli === 'glab') return GH_LOGIN_ARGS
   return loginArgsForBackend(cli, status?.supports_auth_command ?? true)
 }
 
@@ -338,7 +362,10 @@ export function useCliSetupFlows(): Record<CliType, CliFlow> {
   const grokSetup = useGrokCliSetup()
   const kimiSetup = useKimiCliSetup()
   const antigravitySetup = useAntigravityCliSetup()
+  const museSetup = useMuseCliSetup()
+  const devinSetup = useDevinCliSetup()
   const ghSetup = useGhCliSetup()
+  const glabSetup = useGlabCliSetup()
 
   const claudePath = useClaudePathDetection()
   const codexPath = useCodexPathDetection()
@@ -349,7 +376,10 @@ export function useCliSetupFlows(): Record<CliType, CliFlow> {
   const grokPath = useGrokPathDetection()
   const kimiPath = useKimiPathDetection()
   const antigravityPath = useAntigravityPathDetection()
+  const musePath = useMusePathDetection()
+  const devinPath = useDevinPathDetection()
   const ghPath = useGhPathDetection()
+  const glabPath = useGlabPathDetection()
 
   const claudeAuth = useClaudeCliAuth({
     enabled: !!claudeSetup.status?.installed,
@@ -370,7 +400,10 @@ export function useCliSetupFlows(): Record<CliType, CliFlow> {
   const antigravityAuth = useAntigravityCliAuth({
     enabled: !!antigravitySetup.status?.installed,
   })
+  const museAuth = useMuseCliAuth({ enabled: !!museSetup.status?.installed })
+  const devinAuth = useDevinCliAuth({ enabled: !!devinSetup.status?.installed })
   const ghAuth = useGhCliAuth({ enabled: !!ghSetup.status?.installed })
+  const glabAuth = useGlabCliAuth({ enabled: !!glabSetup.status?.installed })
 
   const m = (
     cli: Exclude<CliType, 'cursor'>,
@@ -399,6 +432,9 @@ export function useCliSetupFlows(): Record<CliType, CliFlow> {
       antigravityAuth,
       antigravityPath
     ),
+    muse: m('muse', museSetup, museAuth, musePath),
+    devin: m('devin', devinSetup, devinAuth, devinPath),
     gh: m('gh', ghSetup, ghAuth, ghPath),
+    glab: m('glab', glabSetup, glabAuth, glabPath),
   }
 }

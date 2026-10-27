@@ -5,8 +5,15 @@ import {
   RefreshCw,
   AlertCircle,
 } from '@/components/icons/reicon'
-import { isGhAuthError } from '@/services/github'
+import { githubItemKey, isGhAuthError } from '@/services/github'
+import {
+  isSameGitHubCreateTarget,
+  reusesPrimaryGitHubSource,
+} from '@/lib/remote-worktree-sources'
 import { GhAuthError } from '@/components/shared/GhAuthError'
+import { isGlabAuthError } from '@/services/glab-cli'
+import { GlabAuthError } from '@/components/shared/GlabAuthError'
+import { providerLabels } from '@/services/git-provider'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -22,6 +29,7 @@ import { SelectAllControl } from './ItemSelectCheckbox'
 import { useMultiSelect } from './hooks/useMultiSelect'
 import type { GitHubPullRequest } from '@/types/github'
 import type { GetContextLinkMatches } from './ContextLinkBadge'
+import type { GitProvider } from '@/types/provider'
 
 export interface GitHubPRsTabProps {
   searchQuery: string
@@ -42,15 +50,27 @@ export interface GitHubPRsTabProps {
   onStackPR: (pr: GitHubPullRequest, background?: boolean) => void
   onPreviewPR: (pr: GitHubPullRequest) => void
   creatingFromNumber: number | null
+  creatingFromRepo?: string | null
   stackingFromPR: number | null
+  stackingFromRepo?: string | null
+  showSource?: boolean
+  hasMultipleGitHubRemotes?: boolean
+  primaryGitHubRemote?: string | null
   isBulkInvestigating?: boolean
   searchInputRef: React.RefObject<HTMLInputElement | null>
-  onGhLogin: () => void
-  isGhInstalled: boolean
+  onLogin: () => void
+  isCliInstalled: boolean
+  provider?: GitProvider
+  /**
+   * Whether the git-host provider has been resolved. While false the provider
+   * still defaults to `github`, so we defer the auth-error branch to avoid a
+   * transient "Sign in to GitHub" flash on GitLab projects.
+   */
+  providerResolved?: boolean
   getContextMatches?: GetContextLinkMatches
 }
 
-const getPRKey = (pr: GitHubPullRequest) => pr.number
+const getPRKey = (pr: GitHubPullRequest) => githubItemKey(pr)
 
 export function GitHubPRsTab({
   searchQuery,
@@ -71,13 +91,22 @@ export function GitHubPRsTab({
   onStackPR,
   onPreviewPR,
   creatingFromNumber,
+  creatingFromRepo = null,
   stackingFromPR,
+  stackingFromRepo = null,
+  showSource = false,
+  hasMultipleGitHubRemotes = false,
+  primaryGitHubRemote = null,
   isBulkInvestigating = false,
   searchInputRef,
-  onGhLogin,
-  isGhInstalled,
+  onLogin,
+  isCliInstalled,
+  provider = 'github',
+  providerResolved = true,
   getContextMatches,
 }: GitHubPRsTabProps) {
+  const labels = providerLabels(provider)
+  const prPluralLower = `${labels.pullRequest.toLowerCase()}s`
   const multi = useMultiSelect(prs, getPRKey)
   const matchesByNumber = useMemo(
     () =>
@@ -145,7 +174,7 @@ export function GitHubPRsTab({
                 />
               </button>
             </TooltipTrigger>
-            <TooltipContent>Refresh pull requests</TooltipContent>
+            <TooltipContent>Refresh {prPluralLower}</TooltipContent>
           </Tooltip>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -158,7 +187,7 @@ export function GitHubPRsTab({
             htmlFor="include-closed-prs"
             className="text-xs text-muted-foreground cursor-pointer"
           >
-            Include closed/merged PRs
+            Include closed/merged {labels.pullRequestsShort}
           </label>
           {!isLoading && !error && prs.length > 0 && (
             <SelectAllControl
@@ -177,19 +206,30 @@ export function GitHubPRsTab({
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             <span className="ml-2 text-sm text-muted-foreground">
-              Loading pull requests...
+              Loading {prPluralLower}...
             </span>
           </div>
         )}
 
+        {error && !providerResolved && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        )}
+
         {error &&
-          (isGhAuthError(error) ? (
-            <GhAuthError onLogin={onGhLogin} isGhInstalled={isGhInstalled} />
+          providerResolved &&
+          ((provider === 'gitlab' ? isGlabAuthError(error) : isGhAuthError(error)) ? (
+            provider === 'gitlab' ? (
+              <GlabAuthError onLogin={onLogin} isGlabInstalled={isCliInstalled} />
+            ) : (
+              <GhAuthError onLogin={onLogin} isGhInstalled={isCliInstalled} />
+            )
           ) : (
             <div className="flex flex-col items-center justify-center py-8 px-4 text-center">
               <AlertCircle className="h-5 w-5 text-destructive mb-2" />
               <span className="text-sm text-muted-foreground">
-                {error.message || 'Failed to load pull requests'}
+                {error.message || `Failed to load ${prPluralLower}`}
               </span>
             </div>
           ))}
@@ -198,8 +238,8 @@ export function GitHubPRsTab({
           <div className="flex items-center justify-center py-8">
             <span className="text-sm text-muted-foreground">
               {searchQuery
-                ? 'No PRs match your search'
-                : 'No open pull requests found'}
+                ? `No ${labels.pullRequestsShort} match your search`
+                : `No open ${prPluralLower} found`}
             </span>
           </div>
         )}
@@ -208,37 +248,56 @@ export function GitHubPRsTab({
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             <span className="ml-2 text-sm text-muted-foreground">
-              Searching GitHub...
+              Searching {labels.name}...
             </span>
           </div>
         )}
 
         {!isLoading && !error && prs.length > 0 && (
           <div>
-            {prs.map((pr, index) => (
-              <PRItem
-                key={pr.number}
-                pr={pr}
-                index={index}
-                isSelected={index === selectedIndex}
-                isCreating={creatingFromNumber === pr.number}
-                contextMatches={matchesByNumber.get(pr.number)}
-                isStacking={stackingFromPR === pr.number}
-                isChecked={multi.isChecked(pr.number)}
-                onCheckedChange={checked => multi.toggle(pr.number, checked)}
-                onMouseEnter={() => setSelectedIndex(index)}
-                onClick={bg => onSelectPR(pr, bg)}
-                onInvestigate={bg => onInvestigatePR(pr, bg)}
-                onStack={bg => onStackPR(pr, bg)}
-                onPreview={() => onPreviewPR(pr)}
-                onLabelClick={handleLabelClick}
-              />
-            ))}
+            {prs.map((pr, index) => {
+              const key = githubItemKey(pr)
+              const showExisting = reusesPrimaryGitHubSource(
+                pr,
+                hasMultipleGitHubRemotes,
+                primaryGitHubRemote
+              )
+              return (
+                <PRItem
+                  key={key}
+                  pr={pr}
+                  index={index}
+                  isSelected={index === selectedIndex}
+                  isCreating={isSameGitHubCreateTarget(
+                    pr,
+                    creatingFromNumber,
+                    creatingFromRepo
+                  )}
+                  contextMatches={
+                    showExisting ? matchesByNumber.get(pr.number) : undefined
+                  }
+                  isStacking={isSameGitHubCreateTarget(
+                    pr,
+                    stackingFromPR,
+                    stackingFromRepo
+                  )}
+                  isChecked={multi.isChecked(key)}
+                  onCheckedChange={checked => multi.toggle(key, checked)}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                  onClick={bg => onSelectPR(pr, bg)}
+                  onInvestigate={bg => onInvestigatePR(pr, bg)}
+                  onStack={bg => onStackPR(pr, bg)}
+                  onPreview={() => onPreviewPR(pr)}
+                  onLabelClick={handleLabelClick}
+                  showSource={showSource}
+                />
+              )
+            })}
             {isSearching && (
               <div className="flex items-center justify-center py-2">
                 <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
                 <span className="ml-1.5 text-xs text-muted-foreground">
-                  Searching GitHub for more results...
+                  Searching {labels.name} for more results...
                 </span>
               </div>
             )}

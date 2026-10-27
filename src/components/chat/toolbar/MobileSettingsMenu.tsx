@@ -17,6 +17,7 @@ import {
   Github,
   GitMerge,
   GitPullRequest,
+  MessagesSquare,
   GitPullRequestArrow,
   Globe,
   Paperclip,
@@ -27,7 +28,6 @@ import {
   ShieldAlert,
   Sparkles,
   Star,
-  Terminal,
   Sentry,
 } from '@/components/icons/reicon'
 import { useQueryClient } from '@tanstack/react-query'
@@ -60,6 +60,7 @@ import type {
 import {
   groupServersByBackend,
   invalidateMcpServers,
+  isAutoLoadedMcpBackend,
   mcpKey,
 } from '@/services/mcp'
 import type {
@@ -67,6 +68,7 @@ import type {
   LoadedPullRequestContext,
   LoadedSecurityAlertContext,
   LoadedAdvisoryContext,
+  LoadedDiscussionContext,
   AttachedSavedContext,
 } from '@/types/github'
 import type { LoadedLinearIssueContext } from '@/types/linear'
@@ -82,6 +84,7 @@ import {
   GROK_EFFORT_LEVEL_OPTIONS,
   KIMI_EFFORT_LEVEL_OPTIONS,
   ANTIGRAVITY_EFFORT_LEVEL_OPTIONS,
+  MUSE_EFFORT_LEVEL_OPTIONS,
   PI_EFFORT_LEVEL_OPTIONS,
   THINKING_LEVEL_OPTIONS,
   withAdaptiveEffortOption,
@@ -100,10 +103,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { BackendLabel } from '@/components/ui/backend-label'
+import { BackendLabel, getBackendLabel } from '@/components/ui/backend-label'
 import { useChatStore } from '@/store/chat-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useTerminalStore } from '@/store/terminal-store'
+import { useWorktreeTerminalStatus } from '@/hooks/useWorktreeTerminalStatus'
+import { TerminalActivityIcon } from '@/components/chat/TerminalActivityIcon'
 import { useUIStore } from '@/store/ui-store'
 import {
   usePorts,
@@ -113,11 +118,24 @@ import {
   type PackageScript,
 } from '@/services/projects'
 import { useGitHubPRs } from '@/services/github'
+import { providerLabels, useProjectGitProvider } from '@/services/git-provider'
+import {
+  branchWebUrl,
+  hostedRepoWebUrl,
+  issueWebUrl,
+  pullRequestWebUrl,
+} from '@/lib/git-provider'
+import { GitLabIcon } from '@/components/icons/GitLabIcon'
 import { resolveStackedOnPr } from '@/components/chat/worktree-branch-badge'
 import { chatQueryKeys } from '@/services/chat'
 import { getResumeCommand } from '@/components/chat/session-card-utils'
 import type { ModelReasoningCapability } from '@/services/model-catalog'
-import { resolvePortUrl } from '@/components/browser/default-tab-url'
+import {
+  resolvePortHost,
+  resolvePortUrl,
+} from '@/components/browser/default-tab-url'
+import { usePreferences } from '@/services/preferences'
+import { LOCAL_SERVER_ID } from '@/types/server-resource'
 
 /** Stable defaults so omit/undefined doesn't allocate a new [] each render. */
 const EMPTY_CODEX_PROVIDERS: CodexProviderProfile[] = []
@@ -131,6 +149,7 @@ interface MobileSettingsMenuProps {
   selectedBackend: CliBackend
   selectedModel: string
   selectedProvider: string | null
+  hideModelPicker?: boolean
   backendModelLabel: ReactNode
   backendModelLabelText: string
   hasMultipleBackendModelChoices: boolean
@@ -155,6 +174,7 @@ interface MobileSettingsMenuProps {
 
   loadedIssueContexts: LoadedIssueContext[]
   loadedPRContexts: LoadedPullRequestContext[]
+  loadedDiscussionContexts: LoadedDiscussionContext[]
   loadedSecurityContexts: LoadedSecurityAlertContext[]
   loadedAdvisoryContexts: LoadedAdvisoryContext[]
   loadedLinearContexts: LoadedLinearIssueContext[]
@@ -163,6 +183,7 @@ interface MobileSettingsMenuProps {
 
   handleViewIssue: (ctx: LoadedIssueContext) => void
   handleViewPR: (ctx: LoadedPullRequestContext) => void
+  handleViewDiscussion: (ctx: LoadedDiscussionContext) => void
   handleViewSecurityAlert: (ctx: LoadedSecurityAlertContext) => void
   handleViewAdvisory: (ctx: LoadedAdvisoryContext) => void
   handleViewLinear: (ctx: LoadedLinearIssueContext) => void
@@ -193,6 +214,7 @@ export function MobileSettingsMenu({
   selectedBackend,
   selectedModel,
   selectedProvider,
+  hideModelPicker = false,
   backendModelLabel,
   backendModelLabelText,
   hasMultipleBackendModelChoices,
@@ -211,6 +233,7 @@ export function MobileSettingsMenu({
   openReasoningSheetSignal = 0,
   loadedIssueContexts,
   loadedPRContexts,
+  loadedDiscussionContexts,
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
@@ -218,6 +241,7 @@ export function MobileSettingsMenu({
   attachedSavedContexts,
   handleViewIssue,
   handleViewPR,
+  handleViewDiscussion,
   handleViewSecurityAlert,
   handleViewAdvisory,
   handleViewLinear,
@@ -243,6 +267,7 @@ export function MobileSettingsMenu({
   const isGrok = selectedBackend === 'grok'
   const isKimi = selectedBackend === 'kimi'
   const isAntigravity = selectedBackend === 'antigravity'
+  const isMuse = selectedBackend === 'muse'
   const singleRunScript =
     runScripts.length === 1 ? (runScripts[0] ?? null) : null
   const enabledMcpServersSet = useMemo(
@@ -270,30 +295,36 @@ export function MobileSettingsMenu({
         isPi ||
         isGrok ||
         isKimi ||
-        isAntigravity))
+        isAntigravity ||
+        isMuse))
   const effortLevelOptions =
     modelReasoning?.type === 'effort'
       ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
       : isAntigravity
         ? ANTIGRAVITY_EFFORT_LEVEL_OPTIONS
-        : isPi
-          ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
-          : isCodex
-            ? withAdaptiveEffortOption(
-                CODEX_EFFORT_LEVEL_OPTIONS,
-                selectedModel
-              )
-            : isKimi
+        : isMuse
+          ? MUSE_EFFORT_LEVEL_OPTIONS
+          : isPi
+            ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
+            : isCodex
               ? withAdaptiveEffortOption(
-                  KIMI_EFFORT_LEVEL_OPTIONS,
+                  CODEX_EFFORT_LEVEL_OPTIONS,
                   selectedModel
                 )
-              : isGrok
+              : isKimi
                 ? withAdaptiveEffortOption(
-                    GROK_EFFORT_LEVEL_OPTIONS,
+                    KIMI_EFFORT_LEVEL_OPTIONS,
                     selectedModel
                   )
-                : withAdaptiveEffortOption(EFFORT_LEVEL_OPTIONS, selectedModel)
+                : isGrok
+                  ? withAdaptiveEffortOption(
+                      GROK_EFFORT_LEVEL_OPTIONS,
+                      selectedModel
+                    )
+                  : withAdaptiveEffortOption(
+                      EFFORT_LEVEL_OPTIONS,
+                      selectedModel
+                    )
   const thinkingLevelOptions =
     modelReasoning?.type === 'thinking'
       ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
@@ -313,7 +344,9 @@ export function MobileSettingsMenu({
             : selectedEffortLevel
         : isGrok && selectedEffortLevel === 'ultracode'
           ? 'max'
-          : selectedEffortLevel
+          : isMuse && !effortOptionValues.has(selectedEffortLevel)
+            ? 'high' // Jean omits efforts Muse rejects, so Muse uses its default
+            : selectedEffortLevel
   const displayedEffortLabel =
     effortLevelOptions.find(o => o.value === displayedEffortLevel)?.label ??
     displayedEffortLevel
@@ -338,6 +371,7 @@ export function MobileSettingsMenu({
   const [mcpSheetOpen, setMcpSheetOpen] = useState(false)
   const [scriptsSheetOpen, setScriptsSheetOpen] = useState(false)
   const [resumeCommand, setResumeCommand] = useState<string | null>(null)
+  const { hasActiveTerminal } = useWorktreeTerminalStatus(worktreeId ?? '')
   // Keep radio/checkbox selections from dismissing the gear menu so users can
   // chain model/effort/provider/MCP changes without reopening (issue #574).
   const keepMenuOpenOnSelect = useCallback((event: Event) => {
@@ -353,11 +387,24 @@ export function MobileSettingsMenu({
     customCodexProviders.length > 0 && selectedBackend === 'codex'
   const showProviderMenu = showClaudeProviders || showCodexProviders
   const { data: worktree } = useWorktree(worktreeId ?? null)
+  const { data: gitProviderInfo } = useProjectGitProvider(worktree?.path)
+  const gitProvider = gitProviderInfo?.provider ?? 'github'
+  const forgeLabels = providerLabels(gitProvider)
+  const forgeHost =
+    gitProviderInfo?.host ??
+    (gitProvider === 'gitlab' ? 'gitlab.com' : 'github.com')
   const { data: projects } = useProjects()
   const project = worktree
     ? projects?.find(p => p.id === worktree.project_id)
     : null
   const { data: ports = [] } = usePorts(worktree?.path ?? null)
+  const ownerServerId = worktree?.serverId
+  const preferenceServerId =
+    ownerServerId && ownerServerId !== LOCAL_SERVER_ID
+      ? ownerServerId
+      : undefined
+  const { data: serverPreferences } = usePreferences(preferenceServerId)
+  const serverDefaultHost = serverPreferences?.browser_default_host
   const { data: openPRs } = useGitHubPRs(project?.path ?? null, 'open', {
     enabled: menuOpen && !!project?.path,
     ownerId: project?.id,
@@ -476,7 +523,7 @@ export function MobileSettingsMenu({
           .then(url => openExternal(url, win))
           .catch(() => {
             win?.close()
-            toast.error('Failed to open GitHub')
+            toast.error(`Failed to open ${forgeLabels.name}`)
           })
       }
       return
@@ -487,13 +534,14 @@ export function MobileSettingsMenu({
       .then(remotes => {
         if (!remotes || remotes.length <= 1) {
           const url = remotes?.[0]?.url
-          if (url) openExternal(`${url}/tree/${branch}`, win)
+          if (url) openExternal(branchWebUrl(url, branch, gitProvider), win)
           else win?.close()
         } else {
           win?.close()
           useUIStore.getState().openRemotePicker(targetPath, remoteName => {
             const remote = remotes.find(r => r.name === remoteName)
-            if (remote) openExternal(`${remote.url}/tree/${branch}`)
+            if (remote)
+              openExternal(branchWebUrl(remote.url, branch, gitProvider))
           })
         }
       })
@@ -501,7 +549,7 @@ export function MobileSettingsMenu({
         win?.close()
         toast.error('Failed to fetch remotes')
       })
-  }, [worktree?.branch, worktree?.path])
+  }, [forgeLabels.name, gitProvider, worktree?.branch, worktree?.path])
 
   const openPrByNumber = useCallback(
     (number: number) => {
@@ -512,13 +560,15 @@ export function MobileSettingsMenu({
         .then(remotes => {
           if (!remotes || remotes.length <= 1) {
             const url = remotes?.[0]?.url
-            if (url) openExternal(`${url}/pull/${number}`, win)
+            if (url)
+              openExternal(pullRequestWebUrl(url, number, gitProvider), win)
             else win?.close()
           } else {
             win?.close()
             useUIStore.getState().openRemotePicker(targetPath, remoteName => {
               const remote = remotes.find(r => r.name === remoteName)
-              if (remote) openExternal(`${remote.url}/pull/${number}`)
+              if (remote)
+                openExternal(pullRequestWebUrl(remote.url, number, gitProvider))
             })
           }
         })
@@ -527,13 +577,14 @@ export function MobileSettingsMenu({
           toast.error('Failed to fetch remotes')
         })
     },
-    [worktree?.path]
+    [gitProvider, worktree?.path]
   )
 
   const hasLinkedPr = !!(prUrl && prNumber) || !!stackedOnPR
   const hasContexts =
     loadedIssueContexts.length > 0 ||
     loadedPRContexts.length > 0 ||
+    loadedDiscussionContexts.length > 0 ||
     loadedSecurityContexts.length > 0 ||
     loadedAdvisoryContexts.length > 0 ||
     loadedLinearContexts.length > 0 ||
@@ -625,19 +676,21 @@ export function MobileSettingsMenu({
             </DropdownMenuSub>
           )}
 
-          <DropdownMenuItem onSelect={openBackendModelPicker}>
-            <Sparkles className="h-4 w-4" />
-            <span>Model</span>
-            <span
-              className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-1 truncate text-right text-xs text-muted-foreground"
-              title={backendModelLabelText}
-            >
-              {backendModelLabel}
-            </span>
-            {hasMultipleBackendModelChoices && (
-              <ChevronRight className="ml-2 h-4 w-4 shrink-0 text-foreground" />
-            )}
-          </DropdownMenuItem>
+          {!hideModelPicker && (
+            <DropdownMenuItem onSelect={openBackendModelPicker}>
+              <Sparkles className="h-4 w-4" />
+              <span>Model</span>
+              <span
+                className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-1 truncate text-right text-xs text-muted-foreground"
+                title={backendModelLabelText}
+              >
+                {backendModelLabel}
+              </span>
+              {hasMultipleBackendModelChoices && (
+                <ChevronRight className="ml-2 h-4 w-4 shrink-0 text-foreground" />
+              )}
+            </DropdownMenuItem>
+          )}
 
           {hideReasoningControl ? null : usesEffortControl && isMobile ? (
             <DropdownMenuItem onSelect={openEffortPicker}>
@@ -778,7 +831,7 @@ export function MobileSettingsMenu({
                             onCheckedChange={() => onToggleMcpServer(key)}
                             onSelect={keepMenuOpenOnSelect}
                             disabled={
-                              server.disabled || backend === 'antigravity'
+                              server.disabled || isAutoLoadedMcpBackend(backend)
                             }
                             className={
                               server.disabled ? 'opacity-50' : undefined
@@ -788,7 +841,7 @@ export function MobileSettingsMenu({
                             <span className="ml-auto pl-4 text-xs text-muted-foreground">
                               {server.disabled
                                 ? 'disabled'
-                                : backend === 'antigravity'
+                                : isAutoLoadedMcpBackend(backend)
                                   ? 'automatic'
                                   : server.scope}
                             </span>
@@ -863,8 +916,12 @@ export function MobileSettingsMenu({
           )}
           {worktreeId && (
             <DropdownMenuItem onSelect={handleToggleTerminal}>
-              <Terminal className="h-4 w-4" />
+              <TerminalActivityIcon
+                active={hasActiveTerminal}
+                className="h-4 w-4"
+              />
               Terminal
+              {hasActiveTerminal && <span className="sr-only"> active</span>}
             </DropdownMenuItem>
           )}
           {resumeCommand && (
@@ -887,14 +944,18 @@ export function MobileSettingsMenu({
                     handleOpenGitHub()
                   }}
                 >
-                  <Github className="h-4 w-4" />
-                  GitHub
+                  {gitProvider === 'gitlab' ? (
+                    <GitLabIcon className="h-4 w-4" />
+                  ) : (
+                    <Github className="h-4 w-4" />
+                  )}
+                  {forgeLabels.name}
                   <ExternalLink className="ml-auto h-3.5 w-3.5 shrink-0 opacity-60" />
                 </DropdownMenuItem>
               )}
               {ports.map(port => {
-                const host = port.host?.trim() || 'localhost'
-                const url = resolvePortUrl(port)
+                const host = resolvePortHost(port, serverDefaultHost)
+                const url = resolvePortUrl(port, serverDefaultHost)
                 const label = port.label?.trim()
                   ? `${port.label} (${host}:${port.port})`
                   : `${host}:${port.port}`
@@ -993,7 +1054,15 @@ export function MobileSettingsMenu({
                         onClick={e => {
                           e.stopPropagation()
                           openExternal(
-                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/issues/${ctx.number}`
+                            issueWebUrl(
+                              hostedRepoWebUrl(
+                                forgeHost,
+                                ctx.repoOwner,
+                                ctx.repoName
+                              ),
+                              ctx.number,
+                              gitProvider
+                            )
                           )
                         }}
                       >
@@ -1007,7 +1076,7 @@ export function MobileSettingsMenu({
                 <>
                   {loadedIssueContexts.length > 0 && <DropdownMenuSeparator />}
                   <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Pull Requests
+                    {forgeLabels.pullRequest}s
                   </DropdownMenuLabel>
                   {loadedPRContexts.map(ctx => (
                     <DropdownMenuItem
@@ -1028,7 +1097,51 @@ export function MobileSettingsMenu({
                         onClick={e => {
                           e.stopPropagation()
                           openExternal(
-                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/pull/${ctx.number}`
+                            pullRequestWebUrl(
+                              hostedRepoWebUrl(
+                                forgeHost,
+                                ctx.repoOwner,
+                                ctx.repoName
+                              ),
+                              ctx.number,
+                              gitProvider
+                            )
+                          )
+                        }}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                      </button>
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              )}
+              {loadedDiscussionContexts.length > 0 && (
+                <>
+                  {(loadedIssueContexts.length > 0 ||
+                    loadedPRContexts.length > 0) && <DropdownMenuSeparator />}
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    Discussions
+                  </DropdownMenuLabel>
+                  {loadedDiscussionContexts.map(ctx => (
+                    <DropdownMenuItem
+                      key={ctx.number}
+                      onClick={() => {
+                        setMenuOpen(false)
+                        handleViewDiscussion(ctx)
+                      }}
+                    >
+                      <MessagesSquare className="h-4 w-4 text-success" />
+                      <span className="truncate">
+                        #{ctx.number} {ctx.title}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Open external link"
+                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
+                        onClick={e => {
+                          e.stopPropagation()
+                          openExternal(
+                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/discussions/${ctx.number}`
                           )
                         }}
                       >
@@ -1041,7 +1154,10 @@ export function MobileSettingsMenu({
               {loadedSecurityContexts.length > 0 && (
                 <>
                   {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0) && <DropdownMenuSeparator />}
+                    loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0) && (
+                    <DropdownMenuSeparator />
+                  )}
                   <DropdownMenuLabel className="text-xs text-muted-foreground">
                     Security Alerts
                   </DropdownMenuLabel>
@@ -1078,6 +1194,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0) && (
                     <DropdownMenuSeparator />
                   )}
@@ -1117,6 +1234,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0) && (
                     <DropdownMenuSeparator />
@@ -1157,6 +1275,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
                     loadedLinearContexts.length > 0) && (
@@ -1198,6 +1317,7 @@ export function MobileSettingsMenu({
                 <>
                   {(loadedIssueContexts.length > 0 ||
                     loadedPRContexts.length > 0 ||
+                    loadedDiscussionContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
                     loadedLinearContexts.length > 0 ||
@@ -1400,7 +1520,9 @@ export function MobileSettingsMenu({
                       <button
                         key={key}
                         type="button"
-                        disabled={server.disabled || backend === 'antigravity'}
+                        disabled={
+                          server.disabled || isAutoLoadedMcpBackend(backend)
+                        }
                         aria-pressed={enabled}
                         className={cn(
                           'flex min-h-12 w-full items-center gap-3 rounded-lg px-3 text-left active:bg-accent disabled:opacity-50',
@@ -1412,11 +1534,13 @@ export function MobileSettingsMenu({
                           <span className="block truncate font-medium">
                             {server.name}
                           </span>
-                          {backend === 'antigravity' && !server.disabled && (
-                            <span className="block text-xs text-muted-foreground">
-                              Loaded automatically by Antigravity
-                            </span>
-                          )}
+                          {isAutoLoadedMcpBackend(backend) &&
+                            !server.disabled && (
+                              <span className="block text-xs text-muted-foreground">
+                                Loaded automatically by{' '}
+                                {getBackendLabel(backend)}
+                              </span>
+                            )}
                           <span className="block text-xs text-muted-foreground">
                             {server.disabled ? 'Disabled' : server.scope}
                           </span>

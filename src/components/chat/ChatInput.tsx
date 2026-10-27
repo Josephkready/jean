@@ -20,12 +20,14 @@ import type {
   ReadTextResponse,
   ExecutionMode,
 } from '@/types/chat'
-import type { CliBackend } from '@/types/preferences'
+import type { AppPreferences, CliBackend } from '@/types/preferences'
+import { preferencesQueryKeys, usePreferences } from '@/services/preferences'
 import {
   FileMentionPopover,
   type FileMentionPopoverHandle,
 } from './FileMentionPopover'
 import { queryClient } from '@/lib/query-client'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import { fileQueryKeys } from '@/services/files'
 import { logger } from '@/lib/logger'
 import { reportBulkInvestigateResults } from '@/components/worktree/bulkInvestigateUtils'
@@ -90,6 +92,8 @@ interface ChatInputProps {
   onSteerModifierChange?: (active: boolean) => void
   investigateIssuePrompt?: string | null
   investigatePRPrompt?: string | null
+  /** Single-line pill style for the simple agent chat */
+  pill?: boolean
 }
 
 export const ChatInput = memo(function ChatInput({
@@ -115,8 +119,10 @@ export const ChatInput = memo(function ChatInput({
   onSteerModifierChange,
   investigateIssuePrompt,
   investigatePRPrompt,
+  pill = false,
 }: ChatInputProps) {
   const isMobile = useIsMobile()
+  const { data: preferences } = usePreferences()
   const zenMode = useUIStore(state => state.zenMode)
   const resizeTextarea = useAutoResize(inputRef)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -323,6 +329,7 @@ export const ChatInput = memo(function ChatInput({
 
         // Remove files that are no longer mentioned
         for (const file of files) {
+          if (file.attached) continue
           const filename = getFilename(file.relativePath)
           if (!mentionedNames.has(filename)) {
             removePendingFile(activeSessionId, file.id)
@@ -527,7 +534,16 @@ export const ChatInput = memo(function ChatInput({
 
       const forceSteer =
         isSending &&
-        isSteerCapableBackend(selectedBackend) &&
+        isSteerCapableBackend(
+          selectedBackend,
+          queryClient.getQueryData<AppPreferences>(
+            preferencesQueryKeys.preferences(
+              activeWorktreeId
+                ? parseServerResourceKey(activeWorktreeId)?.serverId
+                : undefined
+            )
+          )
+        ) &&
         (e.metaKey || e.ctrlKey)
       onSteerModifierChange?.(forceSteer)
 
@@ -619,7 +635,7 @@ export const ChatInput = memo(function ChatInput({
       }
 
       // TAB toggles Claude/Codex backend when available.
-      // Keep Shift+Tab for global "cycle execution mode" keybinding.
+      // Shift+Tab toggles Plan mode while this composer is focused.
       if (
         e.key === 'Tab' &&
         !e.shiftKey &&
@@ -666,6 +682,7 @@ export const ChatInput = memo(function ChatInput({
     },
     [
       activeSessionId,
+      activeWorktreeId,
       fileMentionOpen,
       contextMentionOpen,
       slashPopoverOpen,
@@ -1065,6 +1082,10 @@ export const ChatInput = memo(function ChatInput({
         return item.issue ? `#${item.issue.number}` : item.label
       case 'pr':
         return item.pr ? `PR#${item.pr.number}` : item.label.replace(/\s+/g, '')
+      case 'discussion':
+        return item.discussion
+          ? `Discussion#${item.discussion.number}`
+          : item.label.replace(/\s+/g, '')
       case 'security':
         return item.securityAlert
           ? `Security#${item.securityAlert.number}`
@@ -1249,26 +1270,25 @@ export const ChatInput = memo(function ChatInput({
         return
       }
 
-      // One background session per item. Sequential, so concurrent
-      // create_session calls do not race on the worktree's session index.
+      // One background session per item, started in parallel. The backend
+      // serializes session index writes per worktree.
       const toastId = toast.loading(
         `Starting ${items.length} investigations in new sessions...`
       )
+      const results = await Promise.allSettled(
+        items.map(item => investigate([item], false))
+      )
       let succeeded = 0
-      for (const item of items) {
-        try {
-          await investigate([item], false)
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
           succeeded += 1
-        } catch (error) {
-          logger.error('Context investigation failed', { item: item.id, error })
+        } else {
+          logger.error('Context investigation failed', {
+            item: items[index]?.id,
+            error: result.reason,
+          })
         }
-      }
-      // Starting an investigation selects its session; stay where the user was
-      if (activeSessionId) {
-        useChatStore
-          .getState()
-          .setActiveSession(activeWorktreeId, activeSessionId)
-      }
+      })
       reportBulkInvestigateResults(
         toastId,
         succeeded,
@@ -1336,11 +1356,19 @@ export const ChatInput = memo(function ChatInput({
   // Handle command selection from / mention popover (executes immediately)
   const handleCommandSelect = useCallback(
     (command: ClaudeCommand) => {
-      // Built-in `/goal` is not a command-template. Insert "/goal "
-      // literal so the user types an objective; submit handling either
-      // intercepts it for Codex or passes it through to native backends.
-      if (command.path === '<built-in:goal>') {
-        const literal = '/goal '
+      // Built-in workflow commands are not command templates. Insert the
+      // slash literal so submit handling switches mode and starts the turn.
+      if (
+        command.path === '<built-in:goal>' ||
+        command.path === '<built-in:plan>' ||
+        command.path === '<built-in:build>'
+      ) {
+        const literal =
+          command.path === '<built-in:plan>'
+            ? '/plan '
+            : command.path === '<built-in:build>'
+              ? '/build '
+              : '/goal '
         if (inputRef.current) {
           inputRef.current.value = literal
           inputRef.current.setSelectionRange(literal.length, literal.length)
@@ -1402,14 +1430,17 @@ export const ChatInput = memo(function ChatInput({
       <Textarea
         ref={inputRef}
         data-chat-input
+        spellCheck={preferences?.spellcheck_enabled ?? true}
         placeholder={
-          isSending
-            ? executionMode === 'plan'
-              ? 'Plan: Type to queue next message...'
-              : 'Build: Type to queue next message...'
-            : executionMode === 'plan'
-              ? 'Planning: Plan a task, @ files or # issues...'
-              : 'Build: Ask, @ files or # issues...'
+          pill
+            ? 'Message...'
+            : isSending
+              ? executionMode === 'plan'
+                ? 'Plan: Type to queue next message...'
+                : 'Build: Type to queue next message...'
+              : executionMode === 'plan'
+                ? 'Planning: Plan a task, @ files or # issues...'
+                : 'Build: Ask, @ files or # issues...'
         }
         // PERFORMANCE: Uncontrolled input - no value prop
         // Value is managed via valueRef and direct DOM manipulation
@@ -1424,12 +1455,14 @@ export const ChatInput = memo(function ChatInput({
         disabled={false}
         className={cn(
           'min-h-[40px] w-full resize-none overflow-x-hidden overflow-y-auto border-0 dark:bg-transparent p-0 font-mono text-base placeholder:text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-sm',
-          zenMode ? 'h-12 max-h-12' : 'max-h-[30vh]'
+          zenMode ? 'h-12 max-h-12' : 'max-h-[30vh]',
+          pill &&
+            'min-h-8 py-1 font-sans text-base leading-6 placeholder:text-base md:text-sm md:placeholder:text-sm'
         )}
         rows={1}
         autoFocus={!isMobile}
       />
-      {showHint && !zenMode && (
+      {showHint && !zenMode && !pill && (
         <span className="absolute top-0 right-0 hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground opacity-40">
           <Kbd>{focusChatShortcut}</Kbd>
           <span>to focus</span>

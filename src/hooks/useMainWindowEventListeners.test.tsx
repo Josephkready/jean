@@ -3,7 +3,7 @@ import { renderHook } from '@testing-library/react'
 import { useChatStore } from '@/store/chat-store'
 import { useTerminalStore } from '@/store/terminal-store'
 import { useUIStore } from '@/store/ui-store'
-import { QueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   addTerminalTabForShortcut,
   allowsKeybindingRepeat,
@@ -12,16 +12,23 @@ import {
   blurFocusedTerminalForShortcut,
   closeActiveTerminalTabForShortcut,
   findKeybindingAction,
+  shouldLetEditableHandleShortcut,
   getTerminalShortcutWorktreeId,
   hasBlockingOpenOverlay,
   handleRunEnvironmentStarted,
+  isAgentsViewActive,
+  isChatComposerTarget,
   isPlainSessionTerminalFocused,
+  resolveShortcutWithBypass,
   shouldAllowKeybindingThroughOpenOverlay,
   shouldLetChatInputHandleAction,
   shouldLetPlanDialogHandleAction,
   switchActiveTerminalTabByIndexForShortcut,
+  toggleBrowserKeybinding,
+  useMainWindowEventListeners,
   useWindowKeyboardFocusRestore,
 } from './useMainWindowEventListeners'
+import { useBrowserStore } from '@/store/browser-store'
 import { chatQueryKeys } from '@/services/chat'
 import { projectsQueryKeys } from '@/services/projects'
 import { DEFAULT_KEYBINDINGS } from '@/types/keybindings'
@@ -30,6 +37,18 @@ import type {
   Session,
   WorktreeSessions,
 } from '@/types/chat'
+
+describe('isChatComposerTarget', () => {
+  it('matches the composer and ignores other fields', () => {
+    const composer = document.createElement('textarea')
+    composer.setAttribute('data-chat-input', '')
+    const other = document.createElement('textarea')
+
+    expect(isChatComposerTarget(composer)).toBe(true)
+    expect(isChatComposerTarget(other)).toBe(false)
+    expect(isChatComposerTarget(null)).toBe(false)
+  })
+})
 
 describe('shouldLetChatInputHandleAction', () => {
   it('lets Cmd/Ctrl+Enter reach the chat input when no plan dialog is open', () => {
@@ -99,6 +118,51 @@ describe('shouldLetChatInputHandleAction', () => {
     expect(
       shouldLetChatInputHandleAction('previous_session', document.body, false)
     ).toBe(false)
+  })
+})
+
+describe('resolveShortcutWithBypass', () => {
+  it('maps the modifier-decorated close shortcut to the close action and flags bypass', () => {
+    // Shift held → `mod+shift+w`, which is unbound; strip Shift → `mod+w`.
+    expect(
+      resolveShortcutWithBypass('mod+shift+w', DEFAULT_KEYBINDINGS, 'shift')
+    ).toEqual({
+      matchedAction: 'close_session_or_worktree',
+      bypassConfirm: true,
+    })
+  })
+
+  it('maps the plain close shortcut without a bypass flag', () => {
+    expect(
+      resolveShortcutWithBypass('mod+w', DEFAULT_KEYBINDINGS, 'shift')
+    ).toEqual({
+      matchedAction: 'close_session_or_worktree',
+      bypassConfirm: false,
+    })
+  })
+
+  it('does not strip-and-retry when the bypass modifier is off', () => {
+    expect(
+      resolveShortcutWithBypass('mod+shift+w', DEFAULT_KEYBINDINGS, 'none')
+    ).toEqual({ matchedAction: null, bypassConfirm: false })
+  })
+
+  it('rejects the retry when the stripped shortcut maps to a non-close action', () => {
+    // Alt held → `mod+alt+t` (unbound); strip Alt → `mod+t` = new_session.
+    // Narrow acceptance: only the close action may ride the stripped retry.
+    expect(
+      resolveShortcutWithBypass('mod+alt+t', DEFAULT_KEYBINDINGS, 'alt')
+    ).toEqual({ matchedAction: null, bypassConfirm: false })
+  })
+
+  it('prefers a direct user binding of the decorated shortcut over the bypass', () => {
+    const keybindings = {
+      ...DEFAULT_KEYBINDINGS,
+      new_worktree: 'mod+shift+w',
+    }
+    expect(
+      resolveShortcutWithBypass('mod+shift+w', keybindings, 'shift')
+    ).toEqual({ matchedAction: 'new_worktree', bypassConfirm: false })
   })
 })
 
@@ -881,6 +945,313 @@ describe('applyCacheInvalidationKeys', () => {
   })
 })
 
+describe('isAgentsViewActive', () => {
+  beforeEach(() => {
+    useUIStore.setState({ railSection: 'workspace' })
+  })
+
+  it('is active on the Agents section when Agents is on for a server', () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], { agents_enabled: true })
+    useUIStore.setState({ railSection: 'agents' })
+    expect(isAgentsViewActive(queryClient)).toBe(true)
+  })
+
+  it('counts Agents turned on for a remote server only', () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], { agents_enabled: false })
+    queryClient.setQueryData(['preferences', 'server', 'srv'], {
+      agents_enabled: true,
+    })
+    useUIStore.setState({ railSection: 'agents' })
+    expect(isAgentsViewActive(queryClient)).toBe(true)
+  })
+
+  it('is inactive in the workspace section', () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], { agents_enabled: true })
+    expect(isAgentsViewActive(queryClient)).toBe(false)
+  })
+
+  it('is inactive when Agents is off, since the projects view shows instead', () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], { agents_enabled: false })
+    useUIStore.setState({ railSection: 'agents' })
+    expect(isAgentsViewActive(queryClient)).toBe(false)
+  })
+})
+
+describe('close shortcut on the Agents page', () => {
+  function renderListeners(queryClient: QueryClient) {
+    return renderHook(() => useMainWindowEventListeners(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      ),
+    })
+  }
+
+  function pressCloseShortcut(): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'w',
+      code: 'KeyW',
+      metaKey: true,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.body.dispatchEvent(event)
+    return event
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    useUIStore.setState({
+      railSection: 'workspace',
+      sessionChatModalOpen: false,
+      commandPaletteOpen: false,
+      preferencesOpen: false,
+      magicModalOpen: false,
+    })
+  })
+
+  it('does nothing while an agent page is open', () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], { agents_enabled: true })
+    useUIStore.setState({ railSection: 'agents' })
+    const onClose = vi.fn()
+    window.addEventListener('close-session-or-worktree', onClose)
+    const { unmount } = renderListeners(queryClient)
+
+    const event = pressCloseShortcut()
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(true)
+    unmount()
+    window.removeEventListener('close-session-or-worktree', onClose)
+  })
+
+  it('still closes the session or worktree in the projects view', () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], { agents_enabled: true })
+    const onClose = vi.fn()
+    window.addEventListener('close-session-or-worktree', onClose)
+    const { unmount } = renderListeners(queryClient)
+
+    pressCloseShortcut()
+
+    expect(onClose).toHaveBeenCalledTimes(1)
+    unmount()
+    window.removeEventListener('close-session-or-worktree', onClose)
+  })
+})
+
+describe('sidebar section shortcuts', () => {
+  function press(digit: string) {
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: digit,
+        code: `Digit${digit}`,
+        metaKey: true,
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+    )
+  }
+
+  it('switches the section and shows the hidden sidebar', () => {
+    document.body.innerHTML = ''
+    useUIStore.setState({ railSection: 'workspace', leftSidebarVisible: false })
+    const queryClient = new QueryClient()
+    const { unmount } = renderHook(() => useMainWindowEventListeners(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      ),
+    })
+
+    press('2')
+    expect(useUIStore.getState().railSection).toBe('agents')
+    expect(useUIStore.getState().leftSidebarVisible).toBe(true)
+
+    press('1')
+    expect(useUIStore.getState().railSection).toBe('workspace')
+    unmount()
+  })
+})
+
+describe('text editing shortcuts in editable fields', () => {
+  function pressRedo(target: HTMLElement): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Z',
+      code: 'KeyZ',
+      metaKey: true,
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    target.dispatchEvent(event)
+    return event
+  }
+
+  function renderListeners() {
+    const queryClient = new QueryClient()
+    return renderHook(() => useMainWindowEventListeners(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      ),
+    })
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    useUIStore.setState({
+      railSection: 'workspace',
+      zenMode: false,
+      sessionChatModalOpen: false,
+      commandPaletteOpen: false,
+      preferencesOpen: false,
+      magicModalOpen: false,
+    })
+  })
+
+  it('leaves redo to a focused textarea instead of toggling zen mode', () => {
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+    const { unmount } = renderListeners()
+
+    const event = pressRedo(textarea)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(useUIStore.getState().zenMode).toBe(false)
+    unmount()
+  })
+
+  it('still toggles zen mode outside editable fields', () => {
+    const { unmount } = renderListeners()
+
+    const event = pressRedo(document.body)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(useUIStore.getState().zenMode).toBe(true)
+    unmount()
+  })
+
+  it('only claims undo/redo chords for editable targets', () => {
+    const input = document.createElement('input')
+    const div = document.createElement('div')
+    expect(shouldLetEditableHandleShortcut('mod+shift+z', input)).toBe(true)
+    expect(shouldLetEditableHandleShortcut('mod+z', input)).toBe(true)
+    expect(shouldLetEditableHandleShortcut('mod+y', input)).toBe(true)
+    expect(shouldLetEditableHandleShortcut('mod+shift+z', div)).toBe(false)
+    expect(shouldLetEditableHandleShortcut('mod+y', div)).toBe(false)
+    expect(shouldLetEditableHandleShortcut('mod+l', input)).toBe(false)
+  })
+
+  function pressFullAccess(
+    target: HTMLElement,
+    shiftAlt = false
+  ): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'y',
+      code: 'KeyY',
+      ctrlKey: true,
+      shiftKey: shiftAlt,
+      altKey: shiftAlt,
+      bubbles: true,
+      cancelable: true,
+    })
+    target.dispatchEvent(event)
+    return event
+  }
+
+  it('does not treat Ctrl+Y as Full access outside a text field', () => {
+    const onApprove = vi.fn()
+    window.addEventListener('approve-plan-yolo', onApprove)
+    const { unmount } = renderListeners()
+
+    const event = pressFullAccess(document.body)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(onApprove).not.toHaveBeenCalled()
+    unmount()
+    window.removeEventListener('approve-plan-yolo', onApprove)
+  })
+
+  it('leaves a custom Ctrl+Y binding to a focused text field', () => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], {
+      keybindings: {
+        ...DEFAULT_KEYBINDINGS,
+        approve_plan_yolo: 'mod+y',
+      },
+    })
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+    const onApprove = vi.fn()
+    window.addEventListener('approve-plan-yolo', onApprove)
+    const { unmount } = renderHook(() => useMainWindowEventListeners(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      ),
+    })
+
+    const outside = pressFullAccess(document.body)
+    expect(outside.defaultPrevented).toBe(true)
+    expect(onApprove).toHaveBeenCalledTimes(1)
+    onApprove.mockClear()
+
+    const event = pressFullAccess(textarea)
+    expect(event.defaultPrevented).toBe(false)
+    expect(onApprove).not.toHaveBeenCalled()
+    unmount()
+    window.removeEventListener('approve-plan-yolo', onApprove)
+  })
+
+  it('leaves Ctrl+Y to a focused text field instead of approving Full access', () => {
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+    const onApprove = vi.fn()
+    window.addEventListener('approve-plan-yolo', onApprove)
+    const { unmount } = renderListeners()
+
+    const event = pressFullAccess(textarea)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(onApprove).not.toHaveBeenCalled()
+    unmount()
+    window.removeEventListener('approve-plan-yolo', onApprove)
+  })
+
+  it('approves Full access from the shifted chord, including inside a text field', () => {
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+    const onApprove = vi.fn()
+    window.addEventListener('approve-plan-yolo', onApprove)
+    const { unmount } = renderListeners()
+
+    const event = pressFullAccess(textarea, true)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(onApprove).toHaveBeenCalledTimes(1)
+    unmount()
+    window.removeEventListener('approve-plan-yolo', onApprove)
+  })
+})
+
 describe('removed keybindings', () => {
   it('ignores obsolete shortcuts saved in preferences', () => {
     expect(
@@ -889,5 +1260,109 @@ describe('removed keybindings', () => {
         open_github_dashboard: 'mod+shift+d',
       })
     ).toBeNull()
+  })
+
+  it('never matches unbound actions', () => {
+    expect(DEFAULT_KEYBINDINGS.clear_session_context).toBe('')
+    expect(findKeybindingAction('mod+shift+k', DEFAULT_KEYBINDINGS)).toBeNull()
+    expect(findKeybindingAction('', DEFAULT_KEYBINDINGS)).toBeNull()
+  })
+})
+
+describe('toggleBrowserKeybinding', () => {
+  beforeEach(() => {
+    useChatStore.setState({ activeWorktreeId: null })
+    useUIStore.setState({
+      sessionChatModalOpen: false,
+      sessionChatModalWorktreeId: null,
+    })
+    useBrowserStore.setState({
+      sidePaneOpen: {},
+      modalOpen: {},
+      bottomPanelOpen: {},
+    })
+    useTerminalStore.setState({ modalTerminalOpen: {} })
+  })
+
+  it('does nothing when no worktree is active', () => {
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().sidePaneOpen).toEqual({})
+    expect(useBrowserStore.getState().modalOpen).toEqual({})
+    expect(useBrowserStore.getState().bottomPanelOpen).toEqual({})
+  })
+
+  it('cycles the main-window shortcut from the side pane to the bottom panel', () => {
+    useChatStore.setState({ activeWorktreeId: 'canvas-wt' })
+    useUIStore.setState({
+      sessionChatModalOpen: false,
+      sessionChatModalWorktreeId: 'ignored',
+    })
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().sidePaneOpen['canvas-wt']).toBe(true)
+    expect(useBrowserStore.getState().sidePaneOpen).not.toHaveProperty(
+      'ignored'
+    )
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().bottomPanelOpen['canvas-wt']).toBe(true)
+    expect(useBrowserStore.getState().sidePaneOpen['canvas-wt']).toBe(false)
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().bottomPanelOpen['canvas-wt']).toBe(false)
+  })
+
+  it('cycles the session shortcut from the modal drawer to the bottom panel', () => {
+    useChatStore.setState({ activeWorktreeId: 'active-wt' })
+    useUIStore.setState({
+      sessionChatModalOpen: true,
+      sessionChatModalWorktreeId: 'modal-wt',
+    })
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().modalOpen['modal-wt']).toBe(true)
+    expect(useBrowserStore.getState().modalOpen).not.toHaveProperty('active-wt')
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().bottomPanelOpen['modal-wt']).toBe(true)
+    expect(useBrowserStore.getState().modalOpen['modal-wt']).toBe(false)
+    expect(useBrowserStore.getState().sidePaneOpen['modal-wt']).toBe(false)
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().bottomPanelOpen['modal-wt']).toBe(false)
+  })
+
+  it('uses the active worktree when the session modal has no worktree id', () => {
+    useChatStore.setState({ activeWorktreeId: 'active-wt' })
+    useUIStore.setState({
+      sessionChatModalOpen: true,
+      sessionChatModalWorktreeId: null,
+    })
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().modalOpen['active-wt']).toBe(true)
+  })
+
+  it('closes the terminal modal when the shortcut opens the bottom panel', () => {
+    useChatStore.setState({ activeWorktreeId: 'canvas-wt' })
+    useBrowserStore.getState().setSidePaneOpen('canvas-wt', true)
+    useTerminalStore.setState({
+      modalTerminalOpen: { 'canvas-wt': true },
+    })
+
+    toggleBrowserKeybinding()
+
+    expect(useBrowserStore.getState().bottomPanelOpen['canvas-wt']).toBe(true)
+    expect(useTerminalStore.getState().modalTerminalOpen['canvas-wt']).toBe(
+      false
+    )
   })
 })
