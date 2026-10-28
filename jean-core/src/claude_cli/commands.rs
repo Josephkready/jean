@@ -924,16 +924,27 @@ fn load_account_claude_credentials(
 /// Login email of a Claude config dir (`None` = default `~/.claude` login,
 /// whose `.claude.json` lives in the home directory).
 fn read_claude_account_email(config_dir: Option<&std::path::Path>) -> Option<String> {
-    let path = match config_dir {
-        Some(dir) => dir.join(".claude.json"),
+    let content = match config_dir {
+        Some(dir) => std::fs::read_to_string(dir.join(".claude.json")).ok()?,
         None => {
-            if crate::platform::get_wsl_config().enabled {
-                return None;
+            let wsl = crate::platform::get_wsl_config();
+            if wsl.enabled {
+                let home = crate::platform::get_wsl_home_dir(&wsl.distro).ok()?;
+                let path = format!("{}/.claude.json", home.trim_end_matches('/'));
+                let output = crate::platform::wsl_aware_command("cat", None)
+                    .arg(path)
+                    .output()
+                    .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                String::from_utf8_lossy(&output.stdout).to_string()
+            } else {
+                std::fs::read_to_string(dirs::home_dir()?.join(".claude.json")).ok()?
             }
-            dirs::home_dir()?.join(".claude.json")
         }
     };
-    let value: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
     value
         .get("oauthAccount")?
         .get("emailAddress")?

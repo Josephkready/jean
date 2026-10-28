@@ -9399,6 +9399,10 @@ pub async fn resume_session(
         };
         let output_file = session_dir.join(format!("{run_id}.jsonl"));
 
+        log::info!(
+            "[ResumeClaude] resuming run session={session_id} run={run_id} pid={pid} profile={:?}",
+            run.custom_profile_name
+        );
         log::trace!(
             "Resuming run: {run_id}, PID: {pid}, output: {:?}",
             output_file
@@ -9473,6 +9477,12 @@ pub async fn resume_session(
                 }
             };
 
+            log::debug!(
+                "[ResumeClaude] finished run={run_id_clone} session={session_id_clone} cancelled={} error={} usage={:?}",
+                response.cancelled,
+                response.error_emitted,
+                response.usage
+            );
             let completed =
                 !response.cancelled && !response.error_emitted && !response.session_not_found;
             let has_payload = !response.content.is_empty()
@@ -9493,7 +9503,11 @@ pub async fn resume_session(
                 let assistant_message_id = uuid::Uuid::new_v4().to_string();
                 let resume_sid = Some(response.session_id.as_str()).filter(|id| !id.is_empty());
                 let finish = if completed {
-                    writer.complete(&assistant_message_id, resume_sid, response.usage.clone())
+                    writer.complete(
+                        &assistant_message_id,
+                        resume_sid.filter(|_| has_payload),
+                        response.usage.clone(),
+                    )
                 } else if response.error_emitted && !has_payload && !response.cancelled {
                     // Same as send: a provider rejection before output keeps the
                     // user request. User cancel still goes through cancel().

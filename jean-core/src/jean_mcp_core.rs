@@ -3054,17 +3054,12 @@ async fn get_usage_snapshots(app: &AppHandle, backend_filter: &str) -> Result<Va
         // Account profiles (custom Claude CLI profiles with CLAUDE_CONFIG_DIR).
         let account_names: Vec<String> = crate::load_preferences_sync(app)
             .map(|prefs| {
-                prefs
+                let profiles: Vec<(String, String)> = prefs
                     .custom_cli_profiles
                     .iter()
-                    .filter(|profile| {
-                        crate::chat::claude::account_config_dir_from_settings(
-                            &profile.settings_json,
-                        )
-                        .is_some()
-                    })
-                    .map(|profile| profile.name.clone())
-                    .collect()
+                    .map(|profile| (profile.name.clone(), profile.settings_json.clone()))
+                    .collect();
+                account_profile_names(&profiles)
             })
             .unwrap_or_default();
         if !account_names.is_empty() {
@@ -3113,6 +3108,18 @@ async fn get_usage_snapshots(app: &AppHandle, backend_filter: &str) -> Result<Va
     }
 
     Ok(Value::Object(result))
+}
+
+/// Names of custom Claude CLI profiles that are account profiles (set CLAUDE_CONFIG_DIR).
+/// API routing profiles without CLAUDE_CONFIG_DIR are excluded.
+fn account_profile_names(profiles: &[(String, String)]) -> Vec<String> {
+    profiles
+        .iter()
+        .filter(|(_, settings)| {
+            crate::chat::claude::account_config_dir_from_settings(settings).is_some()
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn require_value_str(value: &Value, key: &str) -> Result<String, ToolError> {
@@ -3294,6 +3301,30 @@ pub fn jsonrpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_profile_names_keeps_only_profiles_with_config_dir() {
+        let profiles = vec![
+            (
+                "work".to_string(),
+                r#"{"env":{"CLAUDE_CONFIG_DIR":"/home/u/.claude-work"}}"#.to_string(),
+            ),
+            (
+                "minimax".to_string(),
+                r#"{"env":{"ANTHROPIC_BASE_URL":"https://api.minimax.io/anthropic"}}"#.to_string(),
+            ),
+        ];
+        assert_eq!(account_profile_names(&profiles), vec!["work".to_string()]);
+    }
+
+    #[test]
+    fn account_profile_names_ignores_blank_config_dir() {
+        let profiles = vec![(
+            "blank".to_string(),
+            r#"{"env":{"CLAUDE_CONFIG_DIR":"  "}}"#.to_string(),
+        )];
+        assert!(account_profile_names(&profiles).is_empty());
+    }
 
     fn session_lookup_app() -> (tempfile::TempDir, AppHandle) {
         let temp = tempfile::tempdir().unwrap();
