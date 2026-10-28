@@ -145,7 +145,7 @@ export function DockBurgerButton({ className }: DockBurgerButtonProps = {}) {
           <>
             <DropdownMenuSeparator />
             {usageEntries.map(entry => (
-              <UsageMenuItem key={entry.id} entry={entry} />
+              <UsageMenuItem key={entry.key} entry={entry} />
             ))}
             <DropdownMenuItem
               onClick={() => useUIStore.getState().openPreferencesPane('usage')}

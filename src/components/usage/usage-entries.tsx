@@ -1,12 +1,16 @@
 import type React from 'react'
+import { useQueries } from '@tanstack/react-query'
 import { ClaudeIcon } from '@/components/icons/ClaudeIcon'
 import { CodexIcon } from '@/components/icons/CodexIcon'
 import { GrokIcon } from '@/components/icons/GrokIcon'
 import {
+  claudeUsageQueryOptions,
   useClaudeCliAuth,
   useClaudeCliStatus,
   useClaudeUsage,
 } from '@/services/claude-cli'
+import { usePreferences } from '@/services/preferences'
+import { getClaudeAccountNames } from '@/components/chat/toolbar/model-picker-rows'
 import {
   useCodexCliAuth,
   useCodexCliStatus,
@@ -41,6 +45,8 @@ interface UsageWindow {
 
 export interface UsageEntry {
   id: UsageBackendId
+  /** Unique per entry: the backend id, or `claude:<account>` for accounts. */
+  key: string
   label: string
   Icon: React.ComponentType<{ className?: string }>
   plan: string | null
@@ -62,6 +68,20 @@ export function useUsageEntries(fetchEnabled: boolean): UsageEntry[] {
     !!claudeStatus.data?.installed && !!claudeAuth.data?.authenticated
   const claudeUsage = useClaudeUsage({
     enabled: claudeAvailable && fetchEnabled,
+  })
+  // Account profiles have their own logins, so they only need the CLI.
+  const { data: preferences } = usePreferences()
+  const claudeAccounts = getClaudeAccountNames(
+    preferences?.custom_cli_profiles ?? []
+  )
+  const claudeAccountsAvailable = !!claudeStatus.data?.installed
+  const claudeAccountUsages = useQueries({
+    queries: claudeAccounts.map(account =>
+      claudeUsageQueryOptions({
+        account,
+        enabled: claudeAccountsAvailable && fetchEnabled,
+      })
+    ),
   })
 
   const codexStatus = useCodexCliStatus()
@@ -87,6 +107,7 @@ export function useUsageEntries(fetchEnabled: boolean): UsageEntry[] {
   const entries: (UsageEntry & { available: boolean })[] = [
     {
       id: 'claude',
+      key: 'claude',
       label: 'Claude',
       Icon: ClaudeIcon,
       plan: formatPlanName(
@@ -98,8 +119,23 @@ export function useUsageEntries(fetchEnabled: boolean): UsageEntry[] {
       weekly: claudeUsage.data?.weekly ?? null,
       available: claudeAvailable,
     },
+    ...claudeAccounts.map((account, index) => {
+      const usage = claudeAccountUsages[index]?.data
+      return {
+        id: 'claude' as const,
+        key: `claude:${account}`,
+        label: `Claude · ${account}`,
+        Icon: ClaudeIcon,
+        plan: formatPlanName(usage?.planType, usage?.planTier),
+        sessionLabel: 'Session',
+        session: usage?.session ?? null,
+        weekly: usage?.weekly ?? null,
+        available: claudeAccountsAvailable,
+      }
+    }),
     {
       id: 'codex',
+      key: 'codex',
       label: 'Codex',
       Icon: CodexIcon,
       plan: formatPlanName(codexUsage.data?.planType),
@@ -110,6 +146,7 @@ export function useUsageEntries(fetchEnabled: boolean): UsageEntry[] {
     },
     {
       id: 'grok',
+      key: 'grok',
       label: 'Grok',
       Icon: GrokIcon,
       plan: formatPlanName(grokUsage.data?.planType),

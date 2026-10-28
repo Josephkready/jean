@@ -9426,6 +9426,7 @@ pub async fn resume_session(
         let worktree_id_clone = worktree_id.clone();
         let run_id_clone = run_id.clone();
         let execution_mode = run.execution_mode.clone();
+        let custom_profile_name = run.custom_profile_name.clone();
 
         // tail_claude_output is a blocking poll loop (std::thread::sleep), so run
         // it on its own OS thread instead of starving an async runtime worker.
@@ -9451,6 +9452,7 @@ pub async fn resume_session(
                 &worktree_id_clone,
                 &output_file,
                 pid,
+                custom_profile_name.as_deref(),
             );
             // PID-scoped: never remove a newer run's registration.
             super::registry::unregister_process_if_owned(&session_id_clone, pid);

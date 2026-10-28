@@ -1,4 +1,5 @@
 import React, { useCallback } from 'react'
+import { useIsFetching, useQueryClient } from '@tanstack/react-query'
 import { Loader2, RefreshCw } from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
 import {
@@ -10,10 +11,13 @@ import { ClaudeIcon } from '@/components/icons/ClaudeIcon'
 import { CodexIcon } from '@/components/icons/CodexIcon'
 import { GrokIcon } from '@/components/icons/GrokIcon'
 import {
+  claudeCliQueryKeys,
   useClaudeCliAuth,
   useClaudeCliStatus,
   useClaudeUsage,
 } from '@/services/claude-cli'
+import { usePreferences } from '@/services/preferences'
+import { getClaudeAccountNames } from '@/components/chat/toolbar/model-picker-rows'
 import {
   useCodexCliAuth,
   useCodexCliStatus,
@@ -41,12 +45,15 @@ import { cn } from '@/lib/utils'
 /** One card per backend: icon, name, plan badge, then usage windows. */
 function UsageCard({
   title,
+  subtitle,
   Icon,
   plan,
   anchorId,
   children,
 }: {
   title: string
+  /** Muted text after the title, e.g. the account's login email. */
+  subtitle?: string | null
   Icon: React.ComponentType<{ className?: string }>
   plan?: string | null
   anchorId: string
@@ -55,9 +62,14 @@ function UsageCard({
   return (
     <section id={anchorId} className="space-y-3">
       <div className="flex items-center justify-between gap-2 px-1 sm:px-2">
-        <h3 className="flex items-center gap-2 text-sm font-medium text-foreground">
+        <h3 className="flex min-w-0 items-center gap-2 text-sm font-medium text-foreground">
           <Icon className="size-4 shrink-0" />
-          {title}
+          <span className="shrink-0">{title}</span>
+          {subtitle ? (
+            <span className="truncate text-xs font-normal text-muted-foreground">
+              {subtitle}
+            </span>
+          ) : null}
         </h3>
         {plan ? (
           <span className="truncate rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
@@ -162,7 +174,108 @@ function ErrorLine({
   )
 }
 
+/** Body of a Claude usage card: extra usage, then session/weekly windows. */
+function ClaudeUsageBody({
+  usage,
+  pendingAuth,
+  nowMs,
+}: {
+  usage: ReturnType<typeof useClaudeUsage>
+  pendingAuth: boolean
+  nowMs: number
+}) {
+  if (pendingAuth) {
+    return <LoadingLine label="Checking authentication…" />
+  }
+  if (usage.isLoading) {
+    return <LoadingLine label="Loading usage…" />
+  }
+  // Keep showing last-good data when only a background refetch failed.
+  if (usage.isError && !usage.data) {
+    return (
+      <ErrorLine
+        message={getQueryErrorMessage(
+          usage.error,
+          'Failed to load Claude usage.'
+        )}
+        onRetry={() => usage.refetch()}
+      />
+    )
+  }
+  if (!usage.data) {
+    return <InlineStatus>No usage data available.</InlineStatus>
+  }
+
+  const data = usage.data
+  const extra =
+    data.extraUsageSpent != null || data.extraUsageLimit != null
+      ? `Extra usage: ${data.extraUsageSpent ?? 0}${
+          data.extraUsageLimit != null ? ` / ${data.extraUsageLimit}` : ''
+        }`
+      : null
+
+  return (
+    <div className="space-y-2">
+      <MetaLine items={[extra]} />
+      <UsageWindows
+        nowMs={nowMs}
+        primary={[
+          {
+            key: 'session',
+            label: '5-hour session',
+            usage: data.session,
+            windowSeconds: 5 * HOUR_SECONDS,
+          },
+          {
+            key: 'weekly',
+            label: 'Weekly',
+            usage: data.weekly,
+            windowSeconds: WEEK_SECONDS,
+          },
+        ]}
+        secondary={[
+          {
+            key: 'sonnet-weekly',
+            label: 'Weekly · Sonnet',
+            usage: data.sonnetWeekly,
+            windowSeconds: WEEK_SECONDS,
+          },
+        ]}
+      />
+    </div>
+  )
+}
+
+/** Usage of one Claude account profile (its own `CLAUDE_CONFIG_DIR` login). */
+function ClaudeAccountUsageCard({
+  account,
+  enabled,
+  nowMs,
+}: {
+  account: string
+  enabled: boolean
+  nowMs: number
+}) {
+  const usage = useClaudeUsage({ account, enabled })
+  return (
+    <UsageCard
+      title={`Claude · ${account}`}
+      subtitle={usage.data?.email}
+      Icon={ClaudeIcon}
+      plan={formatPlanName(usage.data?.planType, usage.data?.planTier)}
+      anchorId={`pref-usage-section-claude-account-${account}`}
+    >
+      <ClaudeUsageBody usage={usage} pendingAuth={false} nowMs={nowMs} />
+    </UsageCard>
+  )
+}
+
 export const UsagePane: React.FC = () => {
+  const queryClient = useQueryClient()
+  const { data: preferences } = usePreferences()
+  const claudeAccounts = getClaudeAccountNames(
+    preferences?.custom_cli_profiles ?? []
+  )
   const claudeStatus = useClaudeCliStatus()
   const claudeAuth = useClaudeCliAuth({
     enabled: !!claudeStatus.data?.installed,
@@ -183,10 +296,6 @@ export const UsagePane: React.FC = () => {
     enabled: !!grokStatus.data?.installed && !!grokAuth.data?.authenticated,
   })
 
-  const claudeErrorMessage = getQueryErrorMessage(
-    claudeUsage.error,
-    'Failed to load Claude usage.'
-  )
   const codexErrorMessage = getQueryErrorMessage(
     codexUsage.error,
     'Failed to load Codex usage.'
@@ -195,8 +304,11 @@ export const UsagePane: React.FC = () => {
     grokUsage.error,
     'Failed to load Grok usage.'
   )
+  // Covers the default Claude login and every account profile.
+  const claudeUsageFetching =
+    useIsFetching({ queryKey: claudeCliQueryKeys.usage() }) > 0
   const isRefreshing =
-    claudeUsage.isFetching ||
+    claudeUsageFetching ||
     claudeAuth.isFetching ||
     codexUsage.isFetching ||
     codexAuth.isFetching ||
@@ -207,7 +319,8 @@ export const UsagePane: React.FC = () => {
     void Promise.all([
       claudeStatus.refetch(),
       claudeAuth.refetch(),
-      claudeUsage.refetch(),
+      // Default login and account profiles share the usage() key prefix.
+      queryClient.refetchQueries({ queryKey: claudeCliQueryKeys.usage() }),
       codexStatus.refetch(),
       codexAuth.refetch(),
       codexUsage.refetch(),
@@ -218,13 +331,13 @@ export const UsagePane: React.FC = () => {
   }, [
     claudeAuth,
     claudeStatus,
-    claudeUsage,
     codexAuth,
     codexStatus,
     codexUsage,
     grokAuth,
     grokStatus,
     grokUsage,
+    queryClient,
   ])
 
   const latestFetchedAt = Math.max(
@@ -247,9 +360,13 @@ export const UsagePane: React.FC = () => {
   const grokPendingAuth = !!grokStatus.data?.installed && grokAuth.isLoading
 
   const showClaude = claudeReady || claudePendingAuth
+  // Account profiles have their own logins, so they only need the CLI.
+  const showClaudeAccounts =
+    !!claudeStatus.data?.installed && claudeAccounts.length > 0
   const showCodex = codexReady || codexPendingAuth
   const showGrok = grokReady || grokPendingAuth
-  const hasAnyBackend = showClaude || showCodex || showGrok
+  const hasAnyBackend =
+    showClaude || showClaudeAccounts || showCodex || showGrok
 
   const statusLoading =
     claudeStatus.isLoading || codexStatus.isLoading || grokStatus.isLoading
@@ -261,66 +378,6 @@ export const UsagePane: React.FC = () => {
   )
   const codexPlan = formatPlanName(codexUsage.data?.planType)
   const grokPlan = formatPlanName(grokUsage.data?.planType)
-
-  const renderClaude = () => {
-    if (claudePendingAuth) {
-      return <LoadingLine label="Checking authentication…" />
-    }
-    if (claudeUsage.isLoading) {
-      return <LoadingLine label="Loading usage…" />
-    }
-    // Keep showing last-good data when only a background refetch failed.
-    if (claudeUsage.isError && !claudeUsage.data) {
-      return (
-        <ErrorLine
-          message={claudeErrorMessage}
-          onRetry={() => claudeUsage.refetch()}
-        />
-      )
-    }
-    if (!claudeUsage.data) {
-      return <InlineStatus>No usage data available.</InlineStatus>
-    }
-
-    const data = claudeUsage.data
-    const extra =
-      data.extraUsageSpent != null || data.extraUsageLimit != null
-        ? `Extra usage: ${data.extraUsageSpent ?? 0}${
-            data.extraUsageLimit != null ? ` / ${data.extraUsageLimit}` : ''
-          }`
-        : null
-
-    return (
-      <div className="space-y-2">
-        <MetaLine items={[extra]} />
-        <UsageWindows
-          nowMs={nowMs}
-          primary={[
-            {
-              key: 'session',
-              label: '5-hour session',
-              usage: data.session,
-              windowSeconds: 5 * HOUR_SECONDS,
-            },
-            {
-              key: 'weekly',
-              label: 'Weekly',
-              usage: data.weekly,
-              windowSeconds: WEEK_SECONDS,
-            },
-          ]}
-          secondary={[
-            {
-              key: 'sonnet-weekly',
-              label: 'Weekly · Sonnet',
-              usage: data.sonnetWeekly,
-              windowSeconds: WEEK_SECONDS,
-            },
-          ]}
-        />
-      </div>
-    )
-  }
 
   const renderCodex = () => {
     if (codexPendingAuth) {
@@ -521,13 +578,29 @@ export const UsagePane: React.FC = () => {
       {showClaude ? (
         <UsageCard
           title="Claude"
+          subtitle={claudeUsage.data?.email}
           Icon={ClaudeIcon}
           plan={claudePlan}
           anchorId="pref-usage-section-claude"
         >
-          {renderClaude()}
+          <ClaudeUsageBody
+            usage={claudeUsage}
+            pendingAuth={claudePendingAuth}
+            nowMs={nowMs}
+          />
         </UsageCard>
       ) : null}
+
+      {showClaudeAccounts
+        ? claudeAccounts.map(account => (
+            <ClaudeAccountUsageCard
+              key={account}
+              account={account}
+              enabled={!!claudeStatus.data?.installed}
+              nowMs={nowMs}
+            />
+          ))
+        : null}
 
       {showCodex ? (
         <UsageCard

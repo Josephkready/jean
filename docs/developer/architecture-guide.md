@@ -249,6 +249,15 @@ catalog, and one row sets the provider and the model together
 `backend:model`, or `claude@<account>:model` for account rows, and show in a
 Favorites tab across all backends.
 
+Usage follows the same accounts: `get_claude_usage` takes an optional
+`account` (profile name). An account reads only
+`<CLAUDE_CONFIG_DIR>/.credentials.json` (no keychain/WSL), and has its own usage
+cache file (`claude-account-<hash>.json`) and 429 cooldown. The login email
+comes from `.claude.json` (`oauthAccount.emailAddress`). Runs route
+`rate_limit_event`s to the account the run used. Settings → Usage and the
+quick menu show one card per account, and MCP `get_usage` returns them under
+`claude_accounts`.
+
 Settings → Providers still holds API routing profiles: custom Claude CLI
 profiles (`custom_cli_profiles`), custom Codex model providers
 (`custom_codex_providers`), and PI providers. Those are not subscription

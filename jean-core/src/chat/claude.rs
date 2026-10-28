@@ -418,6 +418,24 @@ pub fn apply_custom_profile_env(cmd: &mut std::process::Command, profile_name: O
     }
 }
 
+/// `CLAUDE_CONFIG_DIR` of a profile's settings JSON, when the profile is a
+/// Claude account profile (a separate login, not an API routing profile).
+pub(crate) fn account_config_dir_from_settings(settings: &str) -> Option<String> {
+    custom_profile_env_vars_from_settings(settings)
+        .ok()?
+        .into_iter()
+        .find(|(key, value)| key == "CLAUDE_CONFIG_DIR" && !value.trim().is_empty())
+        .map(|(_, value)| value)
+}
+
+/// `CLAUDE_CONFIG_DIR` of a saved custom profile, when it is an account profile.
+pub(crate) fn custom_profile_config_dir(profile_name: Option<&str>) -> Option<String> {
+    load_custom_profile_env_vars(profile_name)
+        .into_iter()
+        .find(|(key, value)| key == "CLAUDE_CONFIG_DIR" && !value.trim().is_empty())
+        .map(|(_, value)| value)
+}
+
 fn should_mirror_custom_profile_env_for_detached() -> bool {
     cfg!(windows) && !crate::platform::get_wsl_config().enabled
 }
@@ -1725,7 +1743,14 @@ pub fn execute_claude_detached(
     // Tail the output file for real-time updates
     // Use match to ensure unregister_process is always called, even on error
     super::increment_tailer_count();
-    let response = match tail_claude_output(app, session_id, worktree_id, output_file, pid) {
+    let response = match tail_claude_output(
+        app,
+        session_id,
+        worktree_id,
+        output_file,
+        pid,
+        custom_profile_name,
+    ) {
         Ok(resp) => {
             super::decrement_tailer_count();
             super::registry::unregister_process_if_owned(session_id, pid);
@@ -1832,6 +1857,7 @@ pub fn tail_claude_output(
     worktree_id: &str,
     output_file: &std::path::Path,
     pid: u32,
+    custom_profile_name: Option<&str>,
 ) -> Result<ClaudeResponse, String> {
     use super::detached::is_process_alive;
     use super::tail::{next_poll_interval, NdjsonTailer};
@@ -1893,6 +1919,11 @@ pub fn tail_claude_output(
     let mut armed_monitors: std::collections::HashMap<String, MonitorArm> =
         std::collections::HashMap::new();
     let mut saw_final_result = false;
+    // `rate_limit_event`s describe the login the run used: an account profile
+    // has its own usage cache, everything else updates the default one.
+    let usage_account = custom_profile_name
+        .filter(|name| custom_profile_config_dir(Some(name)).is_some())
+        .map(str::to_string);
     // Once a background task starts, a `result` no longer ends the run: the
     // CLI starts a new turn when the task finishes, and its first `result`
     // can even arrive after that turn. Wait for the process to exit instead.
@@ -2802,7 +2833,10 @@ pub fn tail_claude_output(
                 "rate_limit_event" => {
                     // Free usage data from the CLI — keeps the Usage UI fresh
                     // without hitting the rate-limited OAuth usage API.
-                    if crate::claude_cli::record_claude_rate_limit_event(&msg) {
+                    if crate::claude_cli::record_claude_rate_limit_event(
+                        &msg,
+                        usage_account.as_deref(),
+                    ) {
                         if let Err(e) = app.emit_all(
                             "cache:invalidate",
                             &serde_json::json!({ "keys": ["claude-usage"] }),
@@ -3299,7 +3333,7 @@ mod tests {
                 f.write_all(later.as_bytes()).unwrap();
             })
         });
-        let response = tail_claude_output(&app, &session_id, "wt-1", &output, pid).unwrap();
+        let response = tail_claude_output(&app, &session_id, "wt-1", &output, pid, None).unwrap();
         if let Some(writer) = writer {
             writer.join().unwrap();
         }
@@ -3826,6 +3860,23 @@ mod tests {
             old_help,
             "--system-prompt-snapshot"
         ));
+    }
+
+    #[test]
+    fn account_config_dir_from_settings_needs_a_non_empty_config_dir() {
+        assert_eq!(
+            account_config_dir_from_settings(r#"{"env":{"CLAUDE_CONFIG_DIR":"/a"}}"#).as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            account_config_dir_from_settings(r#"{"env":{"CLAUDE_CONFIG_DIR":"  "}}"#),
+            None
+        );
+        assert_eq!(
+            account_config_dir_from_settings(r#"{"env":{"ANTHROPIC_BASE_URL":"x"}}"#),
+            None
+        );
+        assert_eq!(account_config_dir_from_settings("not json"), None);
     }
 
     #[test]

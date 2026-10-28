@@ -5,7 +5,12 @@
  * the embedded Claude CLI binary.
  */
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  queryOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import {
   invoke,
   invokeForOptionalServer,
@@ -35,6 +40,8 @@ export const claudeCliQueryKeys = {
   status: () => [...claudeCliQueryKeys.all, 'status'] as const,
   auth: () => [...claudeCliQueryKeys.all, 'auth'] as const,
   usage: () => [...claudeCliQueryKeys.all, 'usage'] as const,
+  accountUsage: (account: string) =>
+    [...claudeCliQueryKeys.usage(), account] as const,
   versions: () => [...claudeCliQueryKeys.all, 'versions'] as const,
 }
 
@@ -183,22 +190,40 @@ export function useClaudeCliAuth(options?: { enabled?: boolean }) {
 }
 
 /**
- * Hook to fetch current Claude usage.
+ * Query options for Claude usage of the default login, or of an account
+ * profile (a custom Claude CLI profile that sets `CLAUDE_CONFIG_DIR`).
+ * Account keys sit under `usage()`, so invalidating it refreshes every account.
  */
-export function useClaudeUsage(options?: { enabled?: boolean }) {
-  return useQuery({
-    queryKey: claudeCliQueryKeys.usage(),
+export function claudeUsageQueryOptions(options?: {
+  enabled?: boolean
+  account?: string
+}) {
+  const account = options?.account
+  return queryOptions({
+    queryKey: account
+      ? claudeCliQueryKeys.accountUsage(account)
+      : claudeCliQueryKeys.usage(),
     queryFn: async (): Promise<ClaudeUsageSnapshot> => {
       if (!isTauri()) {
         throw new Error('Claude usage is only available in Tauri context')
       }
-      return invoke<ClaudeUsageSnapshot>('get_claude_usage')
+      return account
+        ? invoke<ClaudeUsageSnapshot>('get_claude_usage', { account })
+        : invoke<ClaudeUsageSnapshot>('get_claude_usage')
     },
     enabled: options?.enabled ?? true,
     staleTime: query => getUsageStaleTime(query.state.data),
     gcTime: 1000 * 60 * 10,
     refetchInterval: query => getUsageRefetchInterval(query.state.data),
   })
+}
+
+/** Hook to fetch current Claude usage (see `claudeUsageQueryOptions`). */
+export function useClaudeUsage(options?: {
+  enabled?: boolean
+  account?: string
+}) {
+  return useQuery(claudeUsageQueryOptions(options))
 }
 
 /**

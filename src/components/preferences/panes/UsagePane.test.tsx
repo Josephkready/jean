@@ -13,12 +13,19 @@ const mocks = vi.hoisted(() => ({
   useGrokCliStatus: vi.fn(),
   useGrokCliAuth: vi.fn(),
   useGrokUsage: vi.fn(),
+  usePreferences: vi.fn(),
 }))
 
 vi.mock('@/services/claude-cli', () => ({
+  claudeCliQueryKeys: { usage: () => ['claude-cli', 'usage'] },
   useClaudeCliStatus: () => mocks.useClaudeCliStatus(),
   useClaudeCliAuth: () => mocks.useClaudeCliAuth(),
-  useClaudeUsage: () => mocks.useClaudeUsage(),
+  useClaudeUsage: (options?: { account?: string }) =>
+    mocks.useClaudeUsage(options),
+}))
+
+vi.mock('@/services/preferences', () => ({
+  usePreferences: () => mocks.usePreferences(),
 }))
 
 vi.mock('@/services/codex-cli', () => ({
@@ -68,6 +75,7 @@ describe('UsagePane', () => {
       idleQuery({ authenticated: true, error: null, timedOut: false })
     )
     mocks.useGrokUsage.mockReturnValue(idleQuery())
+    mocks.usePreferences.mockReturnValue({ data: { custom_cli_profiles: [] } })
   })
 
   it('renders Claude plan summary and usage windows', () => {
@@ -278,5 +286,54 @@ describe('UsagePane', () => {
 
     expect(screen.getByText('5-hour session')).toBeInTheDocument()
     expect(screen.queryByText(/rate-limiting requests/)).not.toBeInTheDocument()
+  })
+
+  it('shows one Claude card per account profile with its email', () => {
+    mocks.usePreferences.mockReturnValue({
+      data: {
+        custom_cli_profiles: [
+          {
+            name: 'work',
+            settings_json:
+              '{"env":{"CLAUDE_CONFIG_DIR":"/home/u/.claude-work"}}',
+          },
+          {
+            name: 'OpenRouter',
+            settings_json: '{"env":{"ANTHROPIC_BASE_URL":"https://x"}}',
+          },
+        ],
+      },
+    })
+    mocks.useClaudeUsage.mockImplementation((options?: { account?: string }) =>
+      idleQuery({
+        planType: 'max',
+        planTier: null,
+        session: { usedPercent: options?.account ? 91 : 12, resetsAt: null },
+        weekly: null,
+        sonnetWeekly: null,
+        extraUsageSpent: null,
+        extraUsageLimit: null,
+        fetchedAt: Math.floor(Date.now() / 1000),
+        email: options?.account ? 'work@example.com' : 'me@example.com',
+      })
+    )
+
+    render(<UsagePane />)
+
+    expect(mocks.useClaudeUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ account: 'work' })
+    )
+    const accountCard = document.getElementById(
+      'pref-usage-section-claude-account-work'
+    )
+    expect(accountCard).not.toBeNull()
+    expect(accountCard).toHaveTextContent('Claude · work')
+    expect(accountCard).toHaveTextContent('work@example.com')
+    expect(accountCard).toHaveTextContent('91%')
+    expect(
+      document.getElementById('pref-usage-section-claude')
+    ).toHaveTextContent('me@example.com')
+    // API routing profiles are not accounts.
+    expect(screen.queryByText(/Claude · OpenRouter/)).not.toBeInTheDocument()
   })
 })
