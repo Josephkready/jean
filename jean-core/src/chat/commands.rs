@@ -9450,6 +9450,7 @@ pub async fn resume_session(
             };
 
             // Tail the output file — Claude backend only (Codex handled above)
+            let tail_started = std::time::Instant::now();
             let tail_result = super::claude::tail_claude_output(
                 &app_clone,
                 &session_id_clone,
@@ -9478,10 +9479,11 @@ pub async fn resume_session(
             };
 
             log::debug!(
-                "[ResumeClaude] finished run={run_id_clone} session={session_id_clone} cancelled={} error={} usage={:?}",
+                "[ResumeClaude] finished run={run_id_clone} session={session_id_clone} cancelled={} error={} usage={:?} elapsed_ms={}",
                 response.cancelled,
                 response.error_emitted,
-                response.usage
+                response.usage,
+                tail_started.elapsed().as_millis()
             );
             let completed =
                 !response.cancelled && !response.error_emitted && !response.session_not_found;

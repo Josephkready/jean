@@ -3065,15 +3065,9 @@ async fn get_usage_snapshots(app: &AppHandle, backend_filter: &str) -> Result<Va
         if !account_names.is_empty() {
             let mut accounts = serde_json::Map::new();
             for name in account_names {
-                match dispatch_command(app, "get_claude_usage", json!({ "account": name })).await {
-                    Ok(usage) => {
-                        accounts.insert(name, usage);
-                    }
-                    Err(err) => {
-                        errors.insert(format!("claude:{name}"), Value::String(err));
-                        accounts.insert(name, Value::Null);
-                    }
-                }
+                let outcome =
+                    dispatch_command(app, "get_claude_usage", json!({ "account": name })).await;
+                record_account_usage(&mut accounts, &mut errors, name, outcome);
             }
             result.insert("claude_accounts".to_string(), Value::Object(accounts));
         }
@@ -3108,6 +3102,25 @@ async fn get_usage_snapshots(app: &AppHandle, backend_filter: &str) -> Result<Va
     }
 
     Ok(Value::Object(result))
+}
+
+/// Record one account's usage result: success under `accounts[name]`, failure as
+/// `accounts[name] = null` plus `errors["claude:<name>"]`.
+fn record_account_usage(
+    accounts: &mut serde_json::Map<String, Value>,
+    errors: &mut serde_json::Map<String, Value>,
+    name: String,
+    outcome: Result<Value, String>,
+) {
+    match outcome {
+        Ok(usage) => {
+            accounts.insert(name, usage);
+        }
+        Err(err) => {
+            errors.insert(format!("claude:{name}"), Value::String(err));
+            accounts.insert(name, Value::Null);
+        }
+    }
 }
 
 /// Names of custom Claude CLI profiles that are account profiles (set CLAUDE_CONFIG_DIR).
@@ -3315,6 +3328,28 @@ mod tests {
             ),
         ];
         assert_eq!(account_profile_names(&profiles), vec!["work".to_string()]);
+    }
+
+    #[test]
+    fn record_account_usage_failure_sets_null_and_error_key() {
+        let mut accounts = serde_json::Map::new();
+        let mut errors = serde_json::Map::new();
+        record_account_usage(
+            &mut accounts,
+            &mut errors,
+            "work".to_string(),
+            Err("boom".to_string()),
+        );
+        record_account_usage(
+            &mut accounts,
+            &mut errors,
+            "ok".to_string(),
+            Ok(json!({"x": 1})),
+        );
+        assert_eq!(accounts["work"], Value::Null);
+        assert_eq!(accounts["ok"], json!({"x": 1}));
+        assert_eq!(errors["claude:work"], Value::String("boom".to_string()));
+        assert!(!errors.contains_key("claude:ok"));
     }
 
     #[test]
