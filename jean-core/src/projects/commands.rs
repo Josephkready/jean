@@ -121,6 +121,34 @@ const FAVICON_CANDIDATES: &[&str] = &[
     "assets/logo.svg",
     "assets/logo.png",
     ".idea/icon.svg",
+    // Static sites, Python web apps, and frontend subdirectories.
+    // Keep these after existing candidates to preserve icon selection.
+    "static/favicon.svg",
+    "static/favicon.ico",
+    "static/favicon.png",
+    "static/icon.svg",
+    "static/icon.png",
+    "static/apple-touch-icon.png",
+    "static/icons/favicon.ico",
+    "static/icons/icon.svg",
+    "static/icons/icon-192.png",
+    "web/public/favicon.svg",
+    "web/public/favicon.ico",
+    "web/public/favicon.png",
+    "web/public/apple-touch-icon.png",
+    "web/favicon.svg",
+    "web/favicon.ico",
+    "web/icon.svg",
+    "web/apple-touch-icon.png",
+    "web/icons/icon.svg",
+    "web/icons/icon-192.png",
+    "frontend/public/favicon.svg",
+    "frontend/public/favicon.ico",
+    "frontend/public/favicon.png",
+    "ui/public/favicon.svg",
+    "ui/public/favicon.ico",
+    "ui/public/favicon.png",
+    "src-tauri/icons/icon.png",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16111,6 +16139,46 @@ mod tests {
         assert_eq!(
             detect_project_default_avatar_path(&dir.path().display().to_string()),
             Some(icon.display().to_string())
+        );
+    }
+
+    // Regression: projects with static/ or nested frontend assets had no icon.
+    #[test]
+    fn test_detect_project_default_avatar_path_nested_assets() {
+        for relative in [
+            "static/favicon.svg",
+            "static/icon.svg",
+            "static/icons/icon-192.png",
+            "web/public/favicon.ico",
+            "web/icon.svg",
+            "web/icons/icon.svg",
+            "frontend/public/favicon.png",
+            "ui/public/favicon.svg",
+            "src-tauri/icons/icon.png",
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let icon = dir.path().join(relative);
+            std::fs::create_dir_all(icon.parent().expect("icon parent")).expect("create assets");
+            std::fs::write(&icon, "image").expect("write icon");
+            assert_eq!(
+                detect_project_default_avatar_path(&dir.path().display().to_string()),
+                Some(icon.display().to_string()),
+                "missed {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_detect_project_default_avatar_path_preserves_existing_candidate_priority() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for relative in ["public/favicon.svg", "static/favicon.svg"] {
+            let icon = dir.path().join(relative);
+            std::fs::create_dir_all(icon.parent().expect("icon parent")).expect("create assets");
+            std::fs::write(icon, "<svg />").expect("write icon");
+        }
+        assert_eq!(
+            detect_project_default_avatar_path(&dir.path().display().to_string()),
+            Some(dir.path().join("public/favicon.svg").display().to_string())
         );
     }
 
