@@ -131,6 +131,11 @@ pub async fn dispatch_command(
     args: Value,
 ) -> Result<Value, String> {
     match command {
+        "get_web_push_key"
+        | "has_web_push_subscription"
+        | "subscribe_web_push"
+        | "unsubscribe_web_push"
+        | "test_web_push" => Box::pin(super::push::dispatch(app.clone(), command, args)).await,
         // =====================================================================
         // Preferences & UI State
         // =====================================================================
