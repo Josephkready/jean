@@ -97,6 +97,20 @@ describe('per-device push opt-in (issue #27)', () => {
     expect(d.local()).toBeNull()
   })
 
+  it('preserves a reused browser subscription after failed registration (issue #27)', async () => {
+    const d = device()
+    await enablePush(d.registration, 'AQID')
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('Disconnected'))
+    await expect(enablePush(d.registration, 'AQID')).rejects.toThrow(
+      'Disconnected'
+    )
+    expect(d.local()).toBe(d.sub)
+    vi.mocked(invoke).mockResolvedValueOnce(false)
+    expect(await registeredPushSubscription(d.registration)).toBeNull()
+    vi.mocked(invoke).mockResolvedValueOnce(true)
+    expect(await registeredPushSubscription(d.registration)).toBe(d.sub)
+  })
+
   it('keeps the local subscription when persisting opt-out fails, so it can be retried', async () => {
     const d = device()
     await enablePush(d.registration, 'AQID')

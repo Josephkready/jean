@@ -1,6 +1,7 @@
 //! Per-device Web Push. Delivery is server-owned and works without a connected UI.
 use crate::runtime::AppHandle;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use futures_util::StreamExt;
 use p256::{pkcs8::EncodePrivateKey, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,6 +18,12 @@ struct Store {
     private_key: Option<String>,
     subscriptions: Vec<SubscriptionInfo>,
 }
+
+static PUSH_PERMITS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(8));
+
+static PUSH_EVENT_PERMITS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(8));
 
 pub struct PushState {
     path: PathBuf,
@@ -58,6 +65,11 @@ impl PushState {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Cannot replace push temporary file: {error}")),
+        }
         let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
         file.write_all(&bytes)
             .and_then(|_| file.sync_all())
@@ -78,9 +90,12 @@ impl PushState {
             self.save(&next)?;
             *store = next;
         }
+        let pem = store
+            .private_key
+            .as_ref()
+            .ok_or("Notification signing key is unavailable")?;
         let key =
-            VapidSignatureBuilder::from_pem_no_sub(store.private_key.as_ref().unwrap().as_bytes())
-                .map_err(|e| e.to_string())?;
+            VapidSignatureBuilder::from_pem_no_sub(pem.as_bytes()).map_err(|e| e.to_string())?;
         Ok(URL_SAFE_NO_PAD.encode(key.get_public_key()))
     }
 
@@ -163,7 +178,6 @@ fn validate_subscription(subscription: &SubscriptionInfo) -> Result<(), String> 
     // Only browser push services: never send authenticated requests to arbitrary/LAN URLs.
     let allowed = host == "fcm.googleapis.com"
         || host == "updates.push.services.mozilla.com"
-        || host == "web.push.apple.com"
         || host.ends_with(".push.apple.com")
         || host.ends_with(".notify.windows.com");
     if !allowed
@@ -229,6 +243,29 @@ fn notification_for_event(event: &str, payload: &Value) -> Option<Value> {
     )
 }
 
+async fn deliver_all<T, F, Fut>(items: Vec<T>, send: F)
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    futures_util::stream::iter(items)
+        .for_each_concurrent(8, send)
+        .await;
+}
+
+fn is_duplicate(recent: &Mutex<HashMap<String, Instant>>, key: String, now: Instant) -> bool {
+    let mut recent = recent.lock().unwrap_or_else(|error| {
+        log::error!("Web Push dedup lock poisoned: {error}");
+        error.into_inner()
+    });
+    recent.retain(|_, time| now.duration_since(*time) < Duration::from_secs(10));
+    if recent.contains_key(&key) {
+        return true;
+    }
+    recent.insert(key, now);
+    false
+}
+
 pub fn initialize(app: &AppHandle) -> Result<(), String> {
     let state = PushState::load(app.path().app_data_dir()?.join("web-push.json"))?;
     app.manage(state);
@@ -251,12 +288,14 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
             let Some(state) = context.try_state::<PushState>() else {
                 return;
             };
-            if state
-                .store
-                .lock()
-                .map(|s| s.subscriptions.is_empty())
-                .unwrap_or(true)
-            {
+            let empty = match state.store.lock() {
+                Ok(store) => store.subscriptions.is_empty(),
+                Err(error) => {
+                    log::error!("Web Push store lock poisoned: {error}");
+                    error.into_inner().subscriptions.is_empty()
+                }
+            };
+            if empty {
                 return;
             }
             let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
@@ -272,30 +311,46 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
                 notification["title"],
                 payload.get("run_id").unwrap_or(&Value::Null)
             );
-            if let Ok(mut recent) = state.recent.lock() {
-                recent.retain(|_, time| time.elapsed() < Duration::from_secs(10));
-                if recent.contains_key(&key) {
-                    return;
-                }
-                recent.insert(key, Instant::now());
+            if is_duplicate(&state.recent, key, Instant::now()) {
+                log::debug!("Suppressed duplicate Web Push event: {name}");
+                return;
             }
+            let subscriptions = match state.store.lock() {
+                Ok(store) => store.subscriptions.clone(),
+                Err(error) => {
+                    log::error!("Web Push store lock poisoned: {error}");
+                    error.into_inner().subscriptions.clone()
+                }
+            };
+            // Bound event jobs before spawning, including jobs waiting for send slots.
+            let Ok(event_permit) = PUSH_EVENT_PERMITS.try_acquire() else {
+                log::warn!("Web Push event capacity reached; dropping notification event");
+                return;
+            };
             let context = context.clone();
             crate::async_runtime::spawn(async move {
+                let _event_permit = event_permit;
                 let state = context.state::<PushState>();
-                let subscriptions = state
-                    .store
-                    .lock()
-                    .map(|s| s.subscriptions.clone())
-                    .unwrap_or_default();
-                for subscription in subscriptions {
-                    match state.send(&subscription, &notification).await {
-                        Ok(false) => {
-                            let _ = state.remove(&subscription.endpoint);
+                deliver_all(subscriptions, |subscription| {
+                    let state = &state;
+                    let notification = &notification;
+                    async move {
+                        let _permit = PUSH_PERMITS.acquire().await;
+                        match state.send(&subscription, notification).await {
+                            Ok(false) => match state.remove(&subscription.endpoint) {
+                                Ok(()) => log::info!(
+                                    "Removed expired Web Push subscription (HTTP 404/410)"
+                                ),
+                                Err(error) => log::warn!(
+                                    "Failed to remove expired Web Push subscription: {error}"
+                                ),
+                            },
+                            Ok(true) => log::debug!("Web Push delivery succeeded"),
+                            Err(error) => log::warn!("Web Push delivery failed: {error}"),
                         }
-                        Err(error) => log::warn!("Web Push delivery failed: {error}"),
-                        _ => {}
                     }
-                }
+                })
+                .await;
             });
         });
     }
@@ -357,6 +412,7 @@ pub async fn dispatch(app: AppHandle, command: &str, args: Value) -> Result<Valu
             let live = state.send(&subscription, &json!({"title":"Jean notifications enabled", "body":"This device can receive Jean notifications.", "tag":"jean-test", "url":"/"})).await?;
             if !live {
                 state.remove(endpoint)?;
+                log::info!("Removed expired Web Push subscription after test (HTTP 404/410)");
                 return Err("Subscription expired. Enable notifications again.".into());
             }
             Ok(Value::Null)
@@ -380,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_and_device_opt_in_survive_restart_issue_27() {
+    fn identity_and_device_opt_in_survive_restart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("push.json");
         let state = PushState::load(path.clone()).unwrap();
@@ -409,6 +465,53 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[tokio::test]
+    async fn admitted_event_attempts_every_device_beyond_concurrency_limit() {
+        let delivered = Mutex::new(Vec::new());
+        deliver_all((0..100).collect(), |device| {
+            let delivered = &delivered;
+            async move {
+                tokio::task::yield_now().await;
+                delivered.lock().unwrap().push(device);
+            }
+        })
+        .await;
+        let mut actual = delivered.into_inner().unwrap();
+        actual.sort();
+        assert_eq!(actual, (0..100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn duplicate_events_expire_and_distinct_events_are_delivered() {
+        let recent = Mutex::new(HashMap::new());
+        let now = Instant::now();
+        assert!(!is_duplicate(&recent, "run-one".into(), now));
+        assert!(is_duplicate(&recent, "run-one".into(), now));
+        assert!(!is_duplicate(&recent, "run-two".into(), now));
+        assert!(!is_duplicate(
+            &recent,
+            "run-one".into(),
+            now + Duration::from_secs(10)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_stale_world_readable_temporary_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("push.json");
+        let temporary = path.with_extension("tmp");
+        std::fs::write(&temporary, "stale").unwrap();
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o666)).unwrap();
+        PushState::load(path.clone()).unwrap().public_key().unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!temporary.exists());
     }
 
     #[test]

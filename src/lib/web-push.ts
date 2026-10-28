@@ -65,24 +65,41 @@ export async function enablePush(
     const expected = decodePushKey(publicKey)
     if (
       !previousKey ||
+      previousKey.byteLength !== expected.length ||
       new Uint8Array(previousKey).some(
         (byte, index) => byte !== expected[index]
-      ) ||
-      previousKey.byteLength !== expected.length
+      )
     ) {
       await subscription.unsubscribe()
       subscription = null
     }
   }
-  subscription ??= await registration.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: decodePushKey(publicKey),
-  })
+  let created = false
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: decodePushKey(publicKey),
+    })
+    created = true
+  }
   try {
     await invoke('subscribe_web_push', { subscription: subscription.toJSON() })
   } catch (error) {
-    // Do not show an enabled device when server registration failed.
-    await subscription.unsubscribe().catch(() => false)
+    // Roll back only a subscription created by this attempt; keep a reused one.
+    if (created) {
+      try {
+        if (!(await subscription.unsubscribe())) {
+          console.warn(
+            'Browser push rollback failed after server registration failure'
+          )
+        }
+      } catch (rollbackError) {
+        console.warn(
+          'Browser push rollback failed after server registration failure',
+          rollbackError
+        )
+      }
+    }
     throw error
   }
   return subscription
@@ -95,7 +112,7 @@ export async function disablePush(
   await invoke('unsubscribe_web_push', { endpoint: subscription.endpoint })
   if (!(await subscription.unsubscribe())) {
     throw new Error(
-      'Server notifications are off. The browser could not remove its subscription; try again.'
+      'Notifications are off on the server, but this browser kept its local subscription. Try again to finish disabling.'
     )
   }
 }
