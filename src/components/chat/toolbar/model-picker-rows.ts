@@ -27,7 +27,9 @@ export function modelKey(
   model: string,
   account?: string | null
 ): string {
-  return account ? `${backend}@${account}:${model}` : `${backend}:${model}`
+  return account
+    ? `${backend}@${encodeURIComponent(account)}:${model}`
+    : `${backend}:${model}`
 }
 
 export function parseModelKey(
@@ -38,7 +40,11 @@ export function parseModelKey(
   if (!match) return null
   const [, backend, account, model] = match
   if (!backend || !model) return null
-  return { backend: backend as CliBackend, model, account: account ?? null }
+  return {
+    backend: backend as CliBackend,
+    model,
+    account: account ? decodeURIComponent(account) : null,
+  }
 }
 
 /**
@@ -54,8 +60,16 @@ export function isClaudeAccountProfile(profile: CustomCliProfile): boolean {
   }
 }
 
+/**
+ * Account names are used inside favorite keys (`backend@account:model`), and
+ * parseModelKey splits on ':', so an account name containing ':' cannot round-trip.
+ * Such profiles are not offered as account rows.
+ */
 export function getClaudeAccountNames(profiles: CustomCliProfile[]): string[] {
-  return profiles.filter(isClaudeAccountProfile).map(profile => profile.name)
+  return profiles
+    .filter(isClaudeAccountProfile)
+    .map(profile => profile.name)
+    .filter(name => !name.includes(':'))
 }
 
 export function getClaudeCatalogOptions(

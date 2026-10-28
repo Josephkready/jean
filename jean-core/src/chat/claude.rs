@@ -742,7 +742,7 @@ fn build_claude_args(
     }
 
     // Add linked project directories for read access
-    let linked_project_paths: Vec<String> = crate::projects::storage::load_projects_data(app)
+    let linked_project_paths: Vec<String> = load_projects_data(app)
         .ok()
         .and_then(|data| {
             let worktree = data.find_worktree(worktree_id)?;
@@ -1527,12 +1527,6 @@ fn permission_prompt_args(
     (vec!["--permission-prompt-tool".to_string(), tool], env_vars)
 }
 
-/// Execute Claude CLI in detached mode.
-///
-/// Spawns Claude CLI as a fully detached process that survives Jean quitting.
-/// The process reads from an input file and writes to an output file.
-/// Jean tails the output file for real-time updates.
-#[allow(clippy::too_many_arguments)]
 /// Whether a new Claude run should use the steerable detached host.
 /// Unix only (WSL/Windows keep the `cat |` pipeline), opt-in via
 /// `claude_auto_steer_enabled`, and only for CLIs that support
@@ -1547,6 +1541,12 @@ fn use_claude_host(app: &tauri::AppHandle, cli_path: &std::path::Path) -> bool {
     enabled && claude_cli_supports_flag(cli_path, super::claude_host::REPLAY_USER_MESSAGES_FLAG)
 }
 
+/// Execute Claude CLI in detached mode.
+///
+/// Spawns Claude CLI as a fully detached process that survives Jean quitting.
+/// The process reads from an input file and writes to an output file.
+/// Jean tails the output file for real-time updates.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_claude_detached(
     app: &tauri::AppHandle,
     session_id: &str,
@@ -1617,11 +1617,30 @@ pub fn execute_claude_detached(
     );
 
     // Log the full Claude CLI command for debugging
+    // Redact inline JSON values (e.g. --mcp-config) so server env tokens and headers stay out of logs.
+    let redacted_args: Vec<String> = args
+        .iter()
+        .scan(false, |redact_next, arg| {
+            let out = if *redact_next {
+                "<redacted>".to_string()
+            } else {
+                arg.clone()
+            };
+            *redact_next = arg == "--mcp-config" || arg == "--settings";
+            Some(out)
+        })
+        .collect();
     log::debug!(
         "Claude CLI command: {} {}",
         cli_path.display(),
-        args.join(" ")
+        redacted_args.join(" ")
     );
+    if let Some((_, config_dir)) = env_vars.iter().find(|(k, _)| k == "CLAUDE_CONFIG_DIR") {
+        log::debug!(
+            "Claude CLI account: profile={:?} config_dir={config_dir}",
+            custom_profile_name
+        );
+    }
     if !env_vars.is_empty() {
         // Log env var keys only (not values, which may contain secrets)
         let env_keys: Vec<&str> = env_vars.iter().map(|(k, _)| k.as_str()).collect();
@@ -2572,7 +2591,7 @@ pub fn tail_claude_output(
                     if let Some(usage_obj) = msg.get("usage") {
                         add_result_usage(&mut usage, usage_obj);
                         if let Some(u) = usage.as_ref() {
-                            log::trace!(
+                            log::debug!(
                                 "Token usage: input={}, output={}, cache_read={}, cache_create={}",
                                 u.input_tokens,
                                 u.output_tokens,
@@ -3076,7 +3095,7 @@ pub fn tail_claude_output(
         );
     }
 
-    log::trace!(
+    log::debug!(
         "Tailing complete: {} chars, {} tool calls, cancelled: {cancelled}",
         full_content.len(),
         tool_calls.len()
@@ -4031,6 +4050,55 @@ mod tests {
         assert!(!args.contains(&"--mcp-config".to_string()));
         assert!(!args.contains(&"--strict-mcp-config".to_string()));
         assert!(args.contains(&"mcp__claude_ai_Gmail".to_string()));
+    }
+
+    /// Live test: needs the real `claude` CLI on PATH and a logged-in account
+    /// dir. Run on demand with:
+    /// JEAN_LIVE_CLAUDE_ACCOUNT_DIR=~/.claude-accounts/<name> cargo test --lib live_claude_config_dir_selects_account -- --ignored
+    #[test]
+    #[ignore = "live: needs claude CLI and JEAN_LIVE_CLAUDE_ACCOUNT_DIR"]
+    fn live_claude_config_dir_selects_account() {
+        let Ok(account_dir) = std::env::var("JEAN_LIVE_CLAUDE_ACCOUNT_DIR") else {
+            eprintln!("JEAN_LIVE_CLAUDE_ACCOUNT_DIR not set; skipping live test");
+            return;
+        };
+        let account_dir = std::path::PathBuf::from(account_dir);
+
+        // Same filter the production spawn path applies to the process env.
+        let profile_env = vec![(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            account_dir.to_string_lossy().to_string(),
+        )];
+        let process_env = custom_profile_process_env(profile_env, false);
+        assert_eq!(process_env.len(), 1);
+
+        let output = std::process::Command::new("claude")
+            .args(["auth", "status"])
+            .envs(process_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .output()
+            .expect("failed to run claude CLI");
+        assert!(
+            output.status.success(),
+            "claude auth status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // The account's own .claude.json names the expected login email.
+        let account_json = std::fs::read_to_string(account_dir.join(".claude.json"))
+            .or_else(|_| std::fs::read_to_string(account_dir.join(".claude").join(".claude.json")))
+            .expect("account dir has no .claude.json");
+        let account: serde_json::Value =
+            serde_json::from_str(&account_json).expect("invalid .claude.json");
+        let email = account
+            .get("oauthAccount")
+            .and_then(|o| o.get("emailAddress"))
+            .and_then(|e| e.as_str())
+            .expect("no oauthAccount.emailAddress in account dir");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(email),
+            "claude auth status did not report account {email}: {stdout}"
+        );
     }
 
     #[test]

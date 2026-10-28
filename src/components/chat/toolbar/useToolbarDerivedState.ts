@@ -266,49 +266,83 @@ export function useToolbarDerivedState({
     ]
   }, [selectedProvider, customCliProfiles, modelCatalog])
 
-  const codexModelOptions = sortModelOptionsByRawModel(
-    getCatalogModelOptions(modelCatalog, 'codex')
+  const codexModelOptions = useMemo(
+    () =>
+      sortModelOptionsByRawModel(getCatalogModelOptions(modelCatalog, 'codex')),
+    [modelCatalog]
   )
-  const resolvedOpencodeModelOptions = sortModelOptionsByRawModel(
-    mergeCatalogOptions(
-      modelCatalog,
-      'opencode',
-      opencodeModelOptions ?? OPENCODE_MODEL_OPTIONS
-    )
+  const resolvedOpencodeModelOptions = useMemo(
+    () =>
+      sortModelOptionsByRawModel(
+        mergeCatalogOptions(
+          modelCatalog,
+          'opencode',
+          opencodeModelOptions ?? OPENCODE_MODEL_OPTIONS
+        )
+      ),
+    [modelCatalog, opencodeModelOptions]
   )
-  const resolvedCursorModelOptions = sortModelOptionsByRawModel(
-    mergeCatalogOptions(
-      modelCatalog,
-      'cursor',
-      cursorModelOptions ?? CURSOR_MODEL_OPTIONS
-    )
+  const resolvedCursorModelOptions = useMemo(
+    () =>
+      sortModelOptionsByRawModel(
+        mergeCatalogOptions(
+          modelCatalog,
+          'cursor',
+          cursorModelOptions ?? CURSOR_MODEL_OPTIONS
+        )
+      ),
+    [modelCatalog, cursorModelOptions]
   )
-  const resolvedPiModelOptions = sortModelOptionsByRawModel(
-    mergeCatalogOptions(modelCatalog, 'pi', piModelOptions ?? PI_MODEL_OPTIONS)
+  const resolvedPiModelOptions = useMemo(
+    () =>
+      sortModelOptionsByRawModel(
+        mergeCatalogOptions(
+          modelCatalog,
+          'pi',
+          piModelOptions ?? PI_MODEL_OPTIONS
+        )
+      ),
+    [modelCatalog, piModelOptions]
   )
-  const resolvedCommandCodeModelOptions = mergeCatalogOptions(
-    modelCatalog,
-    'commandcode',
-    commandcodeModelOptions ?? COMMANDCODE_MODEL_OPTIONS
+  const resolvedCommandCodeModelOptions = useMemo(
+    () =>
+      mergeCatalogOptions(
+        modelCatalog,
+        'commandcode',
+        commandcodeModelOptions ?? COMMANDCODE_MODEL_OPTIONS
+      ),
+    [modelCatalog, commandcodeModelOptions]
   )
-  const resolvedGrokModelOptions = mergeCatalogOptions(
-    modelCatalog,
-    'grok',
-    grokModelOptions ?? GROK_MODEL_OPTIONS
-  ).map(option => ({
-    ...option,
-    label: formatGrokModelOptionLabel(option.value, option.label),
-  }))
-  const resolvedKimiModelOptions = mergeCatalogOptions(
-    modelCatalog,
-    'kimi',
-    kimiModelOptions ?? KIMI_MODEL_OPTIONS
+  const resolvedGrokModelOptions = useMemo(
+    () =>
+      mergeCatalogOptions(
+        modelCatalog,
+        'grok',
+        grokModelOptions ?? GROK_MODEL_OPTIONS
+      ).map(option => ({
+        ...option,
+        label: formatGrokModelOptionLabel(option.value, option.label),
+      })),
+    [modelCatalog, grokModelOptions]
+  )
+  const resolvedKimiModelOptions = useMemo(
+    () =>
+      mergeCatalogOptions(
+        modelCatalog,
+        'kimi',
+        kimiModelOptions ?? KIMI_MODEL_OPTIONS
+      ),
+    [modelCatalog, kimiModelOptions]
   )
   const resolvedMuseModelOptions = museModelOptions ?? MUSE_MODEL_OPTIONS
-  const resolvedDevinModelOptions = mergeCatalogOptions(
-    modelCatalog,
-    'devin',
-    devinModelOptions ?? DEVIN_MODEL_OPTIONS
+  const resolvedDevinModelOptions = useMemo(
+    () =>
+      mergeCatalogOptions(
+        modelCatalog,
+        'devin',
+        devinModelOptions ?? DEVIN_MODEL_OPTIONS
+      ),
+    [modelCatalog, devinModelOptions]
   )
 
   const backendModelSections = useMemo(

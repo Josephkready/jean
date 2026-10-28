@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildClaudeAccountRows,
   buildFavoriteRows,
+  getClaudeAccountNames,
   isClaudeAccountProfile,
   modelKey,
   parseModelKey,
@@ -13,6 +14,7 @@ describe('model keys', () => {
       ['codex', 'gpt-5.5', null],
       ['claude', 'claude-opus-4-8[1m]', 'Work'],
       ['opencode', 'ollama/qwen3:32b', null],
+      ['claude', 'opus', 'Work Team'],
     ] as const) {
       expect(parseModelKey(modelKey(backend, model, account))).toEqual({
         backend,
@@ -22,6 +24,15 @@ describe('model keys', () => {
     }
     expect(modelKey('claude', 'opus', null)).toBe('claude:opus')
     expect(parseModelKey('no-colon')).toBeNull()
+  })
+
+  it('round-trips account names containing ":" and "@"', () => {
+    const account = 'a:b@c'
+    expect(parseModelKey(modelKey('claude', 'opus:x', account))).toEqual({
+      backend: 'claude',
+      model: 'opus:x',
+      account,
+    })
   })
 })
 
@@ -38,6 +49,23 @@ describe('isClaudeAccountProfile', () => {
       isClaudeAccountProfile(profile('{"env":{"ANTHROPIC_BASE_URL":"x"}}'))
     ).toBe(false)
     expect(isClaudeAccountProfile(profile('not json'))).toBe(false)
+  })
+})
+
+describe('getClaudeAccountNames', () => {
+  it('drops account names containing colons so favorite keys stay parseable', () => {
+    const profile = (name: string) => ({
+      name,
+      settings_json: '{"env":{"CLAUDE_CONFIG_DIR":"/a"}}',
+    })
+    expect(getClaudeAccountNames([profile('Work'), profile('a:b')])).toEqual([
+      'Work',
+    ])
+    expect(parseModelKey(modelKey('claude', 'opus', 'Work Team'))).toEqual({
+      backend: 'claude',
+      model: 'opus',
+      account: 'Work Team',
+    })
   })
 })
 

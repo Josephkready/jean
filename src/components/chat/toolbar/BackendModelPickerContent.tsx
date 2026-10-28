@@ -135,10 +135,6 @@ export function BackendModelPickerContent({
   const fastShortcutLabel =
     fastModifier === 'Ctrl' ? 'Ctrl F' : `${fastModifier}F`
 
-  // Sessions with messages can now switch backends because the backend gets a
-  // hidden Jean-local handoff prompt on provider changes.
-  const isLocked = false
-
   const { data: prefs } = usePreferences()
   const { data: modelCatalog } = useModelCatalog()
   const refreshModelCatalog = useRefreshModelCatalog()
@@ -150,7 +146,8 @@ export function BackendModelPickerContent({
   )
   const favoriteSet = useMemo(() => new Set(favoriteModels), [favoriteModels])
   const favKey = useCallback(
-    (backend: CliBackend, model: string) => modelKey(backend, model),
+    (backend: CliBackend, model: string, account?: string | null) =>
+      modelKey(backend, model, account),
     []
   )
   const handleToggleFavorite = useCallback(
@@ -170,13 +167,18 @@ export function BackendModelPickerContent({
   )
   const fastSet = useMemo(() => new Set(fastModels), [fastModels])
   const isFastRemembered = useCallback(
-    (backend: CliBackend, baseModel: string) =>
-      fastSet.has(favKey(backend, baseModel)),
+    (backend: CliBackend, baseModel: string, account?: string | null) =>
+      fastSet.has(favKey(backend, baseModel, account)),
     [fastSet, favKey]
   )
   const setFastRemembered = useCallback(
-    (backend: CliBackend, baseModel: string, on: boolean) => {
-      const key = favKey(backend, baseModel)
+    (
+      backend: CliBackend,
+      baseModel: string,
+      on: boolean,
+      account?: string | null
+    ) => {
+      const key = favKey(backend, baseModel, account)
       if (on === fastSet.has(key)) return
       const next = on ? [...fastModels, key] : fastModels.filter(k => k !== key)
       patchPreferences.mutate({ fast_mode_models: next })
@@ -397,13 +399,7 @@ export function BackendModelPickerContent({
 
   // Open on Favorites when there are any, else on the session's backend.
   const pickOpenTab = useEffectEvent(() => {
-    setActiveTab(
-      isLocked
-        ? selectedBackend
-        : showFavoritesTab
-          ? FAVORITES_TAB
-          : fallbackBackend
-    )
+    setActiveTab(showFavoritesTab ? FAVORITES_TAB : fallbackBackend)
   })
   useEffect(() => {
     if (open) pickOpenTab()
@@ -560,7 +556,7 @@ export function BackendModelPickerContent({
         info.supportsFast &&
         !info.isFast &&
         info.fastModel &&
-        isFastRemembered(backend, info.baseModel)
+        isFastRemembered(backend, info.baseModel, row.account)
           ? info.fastModel
           : model
       applyModel(row, resolved)
@@ -570,17 +566,13 @@ export function BackendModelPickerContent({
     [applyModel, isFastRemembered, modelCatalog, onAfterSelect, onRequestClose]
   )
 
-  const handleTabClick = useCallback(
-    (tab: PickerTab) => {
-      if (isLocked && tab !== selectedBackend) return
-      setActiveTab(tab)
-      setSearch('')
-      window.requestAnimationFrame(() => {
-        searchInputRef.current?.focus()
-      })
-    },
-    [isLocked, selectedBackend]
-  )
+  const handleTabClick = useCallback((tab: PickerTab) => {
+    setActiveTab(tab)
+    setSearch('')
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus()
+    })
+  }, [])
 
   const handleRefreshModels = useCallback(async () => {
     const toastId = toast.loading('Refreshing model list...')
@@ -608,7 +600,12 @@ export function BackendModelPickerContent({
     )
     if (!fastInfo.supportsFast || !fastInfo.fastModel) return false
 
-    setFastRemembered(backend, fastInfo.baseModel, true)
+    setFastRemembered(
+      backend,
+      fastInfo.baseModel,
+      true,
+      highlightedOption.account
+    )
     applyModel(highlightedOption, fastInfo.fastModel)
     onRequestClose()
     onAfterSelect?.(backend, fastInfo.fastModel)
@@ -685,8 +682,6 @@ export function BackendModelPickerContent({
       backends={sidebarBackends}
       showFavorites={showFavoritesTab}
       activeTab={activeTab}
-      selectedBackend={selectedBackend}
-      isLocked={isLocked}
       onSelect={handleTabClick}
     />
   ) : null
@@ -865,7 +860,8 @@ export function BackendModelPickerContent({
                                 setFastRemembered(
                                   rowBackend,
                                   fastInfo.baseModel,
-                                  !isSelectedFast
+                                  !isSelectedFast,
+                                  option.account
                                 )
                                 applyModel(option, next)
                               }}
@@ -955,16 +951,12 @@ function SidebarBackends({
   backends,
   showFavorites,
   activeTab,
-  selectedBackend,
-  isLocked,
   onSelect,
 }: {
   orientation: 'vertical' | 'horizontal'
   backends: CliBackend[]
   showFavorites: boolean
   activeTab: PickerTab
-  selectedBackend: CliBackend
-  isLocked: boolean
   onSelect: (tab: PickerTab) => void
 }) {
   const isVertical = orientation === 'vertical'
@@ -989,16 +981,13 @@ function SidebarBackends({
               role="tab"
               aria-selected={isFavoritesActive}
               aria-label="Favorites"
-              disabled={isLocked}
               onClick={() => onSelect(FAVORITES_TAB)}
               className={cn(
                 'flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors',
                 'hover:bg-background hover:text-foreground',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                 isFavoritesActive &&
-                  'bg-background text-foreground shadow-sm ring-1 ring-border',
-                isLocked &&
-                  'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground'
+                  'bg-background text-foreground shadow-sm ring-1 ring-border'
               )}
             >
               <Star
@@ -1017,7 +1006,6 @@ function SidebarBackends({
       {backends.map((backend, index) => {
         const Icon = getBackendIcon(backend)
         const isActive = backend === activeTab
-        const isDisabled = isLocked && backend !== selectedBackend
         const label = getBackendPlainLabel(backend)
         const showHint = showHints && index < 9
 
@@ -1029,7 +1017,6 @@ function SidebarBackends({
                 role="tab"
                 aria-selected={isActive}
                 aria-label={label}
-                disabled={isDisabled}
                 onClick={() => onSelect(backend)}
                 className={cn(
                   'group relative flex w-9 shrink-0 flex-col items-center justify-center rounded-md text-muted-foreground transition-colors',
@@ -1037,9 +1024,7 @@ function SidebarBackends({
                   'hover:bg-background hover:text-foreground',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                   isActive &&
-                    'bg-background text-foreground shadow-sm ring-1 ring-border',
-                  isDisabled &&
-                    'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground'
+                    'bg-background text-foreground shadow-sm ring-1 ring-border'
                 )}
               >
                 <Icon className="h-4 w-4" />
@@ -1066,7 +1051,7 @@ function SidebarBackends({
               </button>
             </TooltipTrigger>
             <TooltipContent side={isVertical ? 'right' : 'bottom'}>
-              {isDisabled ? `${label} (locked)` : label}
+              {label}
             </TooltipContent>
           </Tooltip>
         )
