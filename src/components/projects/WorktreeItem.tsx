@@ -3,6 +3,7 @@ import type { MouseEvent } from 'react'
 import { StatusIndicator } from '@/components/ui/status-indicator'
 import type { IndicatorStatus } from '@/components/ui/status-indicator'
 import { ArrowDownUp, ChevronDown } from '@/components/icons/reicon'
+import { MiddleTruncate } from '@/components/ui/middle-truncate'
 import { cn } from '@/lib/utils'
 import { isBaseSession, type Worktree } from '@/types/projects'
 import { useProjectsStore } from '@/store/projects-store'
@@ -880,7 +881,7 @@ export const WorktreeItem = memo(function WorktreeItem({
                 isBase && 'font-medium'
               )}
             >
-              <span className="truncate">{worktree.name}</span>
+              <MiddleTruncate text={worktree.name} />
               {/* Chevron for expand/collapse sessions */}
               <button
                 type="button"
@@ -910,7 +911,7 @@ export const WorktreeItem = memo(function WorktreeItem({
                 <button
                   type="button"
                   onClick={handleSync}
-                  className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[11px] font-medium text-violet-600 dark:text-violet-400 transition-colors hover:bg-violet-500/20"
+                  className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 >
                   <span className="flex items-center gap-0.5">
                     <ArrowDownUp className="h-3 w-3" />

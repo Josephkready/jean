@@ -57,18 +57,23 @@ When you finish a turn that involved tool calls, edits, or multi-step work, end 
 
 Tested against local dev env: Yes/No
 
+[`### Possible regressions` table — include ONLY when the rules below say to.]
+
 [Optional `### How to test` subsection — include ONLY when the rules below say to.]
 
 Rules:
 - Heading must be the literal string `## Recap` on its own line.
 - Place it as the LAST block of the message, after any prose.
 - The recap is the user-facing deliverable — it must be self-contained. Include the actual answer/result inline. Do NOT write things like \"I looked it up\" or \"see above\" — restate the answer.
+- Keep links in the recap. When the recap names an issue, PR, commit, security advisory, Linear issue, Sentry issue, URL, or other external resource that has a known link, write it as a Markdown link (for example `[GHSA-xxxx-xxxx-xxxx](https://github.com/owner/repo/security/advisories/GHSA-xxxx-xxxx-xxxx)` or `[#123](https://github.com/owner/repo/pull/123)`). If the same item is a link earlier in the message, it must also be a link in the recap. Do not invent URLs.
 - If the turn found issues, gaps, risks, or recommended fixes, list them in the recap as a Markdown table (for example: | # | Finding | Location | Impact | Recommended fix |), not as bullets or prose.
 - Add a `### How to test` subsection ONLY when the turn produced code, config, or behavior changes the user can verify. Make it actionable and specific (commands to run, UI flows to click through, files to inspect); if it makes sense, always include a smoke test that explains how the user can manually verify the main behavior. OMIT the subsection entirely on read-only turns — questions, explanations, research, planning, code review without edits, or any turn where there is nothing meaningful to test. Do NOT include placeholder content like \"N/A\", \"Nothing to test\", \"No tests needed\", or an empty bullet list. If in doubt, leave it out.
 - When the turn produced code, config, or behavior changes, include the line `Tested against local dev env: Yes` or `Tested against local dev env: No` (pick one, based on whether you actually verified the change in a running local dev environment). Omit this line on read-only turns.
+- When the turn produced code, config, or behavior changes, add a `### Possible regressions` subsection with a Markdown table of every existing behavior the change could break: | # | Area | What could break | Likelihood (Low/Medium/High) | Verified not broken |. In `Verified not broken`, name how you proved this item does not break (test name, typecheck, callers read, local dev env run), or write `Not verified`. Look beyond the diff: callers, shared types, persistence, other backends, web access, and mobile. If you found none, write the single line `No possible regressions found` and the reason, not an empty table. Omit this subsection on read-only turns.
 - In plan mode, when a plan is ready, you MUST still call the native plan tool (Claude ExitPlanMode, Codex `<proposed_plan>` / plan item, Cursor/OpenCode equivalent) to present it. The recap does NOT replace the plan tool — never end a plan-mode turn with only a `## Recap` block in place of the plan tool call.
 - Skip the recap entirely if the turn was a single one-line answer with no tool calls.
 - If the turn ends with a question for the user, put the question at the end of the recap, in this format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options. Jean shows the options as buttons below the recap. Do not also ask the question outside the recap.
+- If you took screenshots or made images the user should see (for example browser screenshots of a UI change), show them in the recap in a fenced code block with the language `screenshots`, one absolute image file path or image URL per line, in the order to view them. Jean shows this block as an image gallery. Do not also list the same images as links or markdown images.
 - Do NOT repeat tool inputs, file diffs, or raw command output verbatim. Summarize.";
 
 /// Injected when the parallel-execution magic prompt is cleared. Omitting the
@@ -125,9 +130,22 @@ mod tests {
     }
 
     #[test]
+    fn recap_shows_screenshots_as_gallery_block() {
+        assert!(RECAP_INSTRUCTION.contains("fenced code block with the language `screenshots`"));
+    }
+
+    #[test]
     fn recap_requests_local_dev_env_tested_line() {
         assert!(RECAP_INSTRUCTION.contains("Tested against local dev env: Yes"));
         assert!(RECAP_INSTRUCTION.contains("Tested against local dev env: No"));
+    }
+
+    #[test]
+    fn recap_requests_possible_regressions_table() {
+        assert!(RECAP_INSTRUCTION.contains("### Possible regressions"));
+        assert!(RECAP_INSTRUCTION.contains("| # | Area | What could break |"));
+        assert!(RECAP_INSTRUCTION.contains("Verified not broken"));
+        assert!(RECAP_INSTRUCTION.contains("No possible regressions found"));
     }
 
     #[test]

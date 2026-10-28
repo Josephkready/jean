@@ -175,7 +175,6 @@ describe('SessionChatModal removal behavior', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
     expect(source).toContain('state => state.zenMode')
-    expect(source).toContain('data-testid="toggle-zen-mode"')
     expect(source).not.toContain('{!(zenMode && isMobile) && (')
     expect(source).toContain('{!zenMode && showSessionTabs && (')
     expect(source).toMatch(/sessionsForTabBar\(\s*sessions,/)
@@ -210,14 +209,16 @@ describe('SessionChatModal removal behavior', () => {
     )
   })
 
-  it('keeps only the zen control in the mobile header', () => {
+  it('shows a default-backend new session button instead of zen in the mobile header', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
     expect(source).toContain('useClearSessionHistory')
     expect(source).toContain('handleClearContext')
-    expect(source).toContain('data-testid="toggle-zen-mode"')
-    expect(source).toContain('<Minimize className="size-2.5" />')
-    expect(source).toContain('<Maximize className="size-2.5" />')
+    expect(source).not.toContain('data-testid="toggle-zen-mode"')
+    expect(source).toContain('data-testid="mobile-new-session"')
+    expect(source).toMatch(
+      /handleCreateDefaultSession = useCallback\(\(\) => \{[\s\S]*?intent: 'default'/
+    )
     expect(source).not.toContain('aria-label="Clear context"')
     expect(source).not.toContain('data-testid="clear-session-context"')
     expect(source).toMatch(
@@ -228,9 +229,6 @@ describe('SessionChatModal removal behavior', () => {
   it('uses the muted icon color without moving the mobile header actions', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
-    expect(source).toContain(
-      'h-7 px-2 text-xs text-muted-foreground hover:text-foreground'
-    )
     expect(source).toContain(
       "isMobile &&\n                            'text-muted-foreground hover:text-foreground'"
     )

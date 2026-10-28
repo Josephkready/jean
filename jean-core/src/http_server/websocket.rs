@@ -265,10 +265,13 @@ pub async fn handle_ws_connection(
     // Also send an app-level heartbeat text frame. Browser JS does not expose
     // protocol ping/pong frames to `WebSocket.onmessage`, so the frontend
     // liveness watchdog needs a normal message during otherwise-idle terminal
-    // sessions. Without this, web access reloads every ~50s of no app events.
-    const PING_INTERVAL: Duration = Duration::from_secs(20);
+    // sessions. The heartbeat carries its interval so the client can drop a
+    // silent socket (for example after a Wi-Fi to cellular switch) within a
+    // few missed beats, while still tolerating older servers.
+    const PING_INTERVAL: Duration = Duration::from_secs(5);
     const PONG_TIMEOUT: Duration = Duration::from_secs(45);
-    const APP_HEARTBEAT_JSON: &str = r#"{"type":"heartbeat"}"#;
+    let interval_ms = PING_INTERVAL.as_millis();
+    let app_heartbeat_json = format!(r#"{{"type":"heartbeat","interval_ms":{interval_ms}}}"#);
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // skip immediate fire
     let mut last_inbound = Instant::now();
@@ -286,7 +289,7 @@ pub async fn handle_ws_connection(
                     break;
                 }
                 if ws_tx
-                    .send(Message::Text(APP_HEARTBEAT_JSON.into()))
+                    .send(Message::Text(app_heartbeat_json.as_str().into()))
                     .await
                     .is_err()
                 {

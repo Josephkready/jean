@@ -627,8 +627,6 @@ export const ChatToolbar = memo(function ChatToolbar({
               />
             )}
 
-            <div className="block @xl:hidden h-4 w-px shrink-0 bg-border/50" />
-
             <ExecutionModeDropdown
               backend={selectedBackend}
               sessionId={activeSessionId}
@@ -705,8 +703,6 @@ export const ChatToolbar = memo(function ChatToolbar({
               handleViewSentry={handleViewSentry}
               handleViewSavedContext={handleViewSavedContext}
             />
-
-            <div className="h-4 w-px shrink-0 bg-border/50" />
           </div>
 
           <div className="shrink-0 py-1">

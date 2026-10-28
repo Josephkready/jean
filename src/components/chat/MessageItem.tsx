@@ -995,6 +995,7 @@ export const MessageItem = memo(function MessageItem({
 
       {inlineQuestion && onSendAnswer && !skipToolCalls && (
         <InlineQuestionOptions
+          question={inlineQuestion.question}
           options={inlineQuestion.options}
           disabled={isSending}
           onSend={onSendAnswer}

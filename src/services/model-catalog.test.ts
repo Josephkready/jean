@@ -249,7 +249,7 @@ describe('model catalog', () => {
   })
 
   it('uses the documented effort levels for bundled GPT 6 Sol', () => {
-    for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
+    for (const model of ['gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra']) {
       const reasoning = getCatalogModelReasoning(null, 'codex', model)
 
       expect(reasoning?.default).toBe('medium')
@@ -267,6 +267,7 @@ describe('model catalog', () => {
   it('exposes fast mode for bundled GPT 6 models', () => {
     for (const model of [
       'gpt-6.1-sol',
+      'gpt-6.1-terra',
       'gpt-6-astra',
       'gpt-6-sol',
       'gpt-6-luna',

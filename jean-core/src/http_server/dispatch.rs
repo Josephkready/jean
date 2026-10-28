@@ -2725,7 +2725,8 @@ pub async fn dispatch_command(
             to_value(result)
         }
         "get_claude_usage" => {
-            let result = crate::claude_cli::get_claude_usage().await?;
+            let account: Option<String> = from_field_opt(&args, "account")?;
+            let result = crate::claude_cli::get_claude_usage(account).await?;
             to_value(result)
         }
         "get_available_cli_versions" => {

@@ -9399,6 +9399,10 @@ pub async fn resume_session(
         };
         let output_file = session_dir.join(format!("{run_id}.jsonl"));
 
+        log::info!(
+            "[ResumeClaude] resuming run session={session_id} run={run_id} pid={pid} profile={:?}",
+            run.custom_profile_name
+        );
         log::trace!(
             "Resuming run: {run_id}, PID: {pid}, output: {:?}",
             output_file
@@ -9426,6 +9430,7 @@ pub async fn resume_session(
         let worktree_id_clone = worktree_id.clone();
         let run_id_clone = run_id.clone();
         let execution_mode = run.execution_mode.clone();
+        let custom_profile_name = run.custom_profile_name.clone();
 
         // tail_claude_output is a blocking poll loop (std::thread::sleep), so run
         // it on its own OS thread instead of starving an async runtime worker.
@@ -9445,12 +9450,14 @@ pub async fn resume_session(
             };
 
             // Tail the output file — Claude backend only (Codex handled above)
+            let tail_started = std::time::Instant::now();
             let tail_result = super::claude::tail_claude_output(
                 &app_clone,
                 &session_id_clone,
                 &worktree_id_clone,
                 &output_file,
                 pid,
+                custom_profile_name.as_deref(),
             );
             // PID-scoped: never remove a newer run's registration.
             super::registry::unregister_process_if_owned(&session_id_clone, pid);
@@ -9471,6 +9478,13 @@ pub async fn resume_session(
                 }
             };
 
+            log::debug!(
+                "[ResumeClaude] finished run={run_id_clone} session={session_id_clone} cancelled={} error={} usage={:?} elapsed_ms={}",
+                response.cancelled,
+                response.error_emitted,
+                response.usage,
+                tail_started.elapsed().as_millis()
+            );
             let completed =
                 !response.cancelled && !response.error_emitted && !response.session_not_found;
             let has_payload = !response.content.is_empty()
@@ -9491,7 +9505,11 @@ pub async fn resume_session(
                 let assistant_message_id = uuid::Uuid::new_v4().to_string();
                 let resume_sid = Some(response.session_id.as_str()).filter(|id| !id.is_empty());
                 let finish = if completed {
-                    writer.complete(&assistant_message_id, resume_sid, response.usage.clone())
+                    writer.complete(
+                        &assistant_message_id,
+                        resume_sid.filter(|_| has_payload),
+                        response.usage.clone(),
+                    )
                 } else if response.error_emitted && !has_payload && !response.cancelled {
                     // Same as send: a provider rejection before output keeps the
                     // user request. User cancel still goes through cancel().

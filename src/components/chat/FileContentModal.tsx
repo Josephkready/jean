@@ -330,6 +330,12 @@ export function FileContentModal({
     <Dialog open={!!filePath} onOpenChange={handleOpenChange}>
       <DialogContent
         onInteractOutside={e => e.preventDefault()}
+        // Focus the dialog itself, not the first button: focusing the
+        // copy-path button opens its tooltip, which swallows the first ESC.
+        onOpenAutoFocus={e => {
+          e.preventDefault()
+          ;(e.currentTarget as HTMLElement | null)?.focus()
+        }}
         // Keep unsaved edits: ESC only closes when there is nothing to lose
         onEscapeKeyDown={e => {
           if (hasChanges) e.preventDefault()

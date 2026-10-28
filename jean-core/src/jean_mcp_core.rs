@@ -336,7 +336,7 @@ fn tool_registry_session() -> Value {
         {"name":"set_session_model","description":"Persist the selected model (and optionally backend) on a Jean session without sending a message. Prefer this when switching models for later turns; pass model on send_chat_message for a one-shot override only. When backend is omitted, Jean infers it from the model id when possible (e.g. grok/*, gpt-*, cursor/*). Returns sessionId, model, backend.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"model":{"type":"string","description":"Model id as used in Jean (e.g. claude-sonnet-4-6[1m], gpt-5.6-sol, grok/grok-4.6)."},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity","muse"],"description":"Optional backend override. Inferred from model when omitted."}},"required":["sessionId","model"],"additionalProperties":false}},
         {"name":"set_session_settings","description":"Persist session settings used by later messages. Omitted fields stay unchanged. fastMode adds or removes the supported fast model variant.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity","muse"]},"provider":{"type":"string","description":"Provider/custom profile name."},"model":{"type":"string"},"fastMode":{"type":"boolean"},"effortLevel":{"type":"string","enum":["off","adaptive","minimal","low","medium","high","xhigh","max","ultracode"]},"thinkingLevel":{"type":"string","enum":["off","adaptive","think","megathink","ultrathink"]},"executionMode":{"type":"string","enum":EXECUTION_MODES,"description":"supervised = Supervised; build = Auto-accept edits; auto = Auto; yolo = Full access. plan is the legacy planning mode. Check get_session_capabilities for backend support."}},"required":["sessionId"],"additionalProperties":false}},
         {"name":"get_session_capabilities","description":"Describe the session controls supported by a backend, including effort, thinking, execution, and fast-mode behavior.","inputSchema":{"type":"object","properties":{"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity","muse"]}},"required":["backend"],"additionalProperties":false}},
-        {"name":"get_usage","description":"Fetch subscription/usage snapshots for Claude, Codex, and/or Grok (same data as Jean Settings → Usage). Use to decide whether to switch models when a plan is near limits. Optional backend filters to one provider; omit or pass \"all\" for every available snapshot. Per-backend failures are reported in errors without failing the whole call.","inputSchema":{"type":"object","properties":{"backend":{"type":"string","enum":["claude","codex","grok","all"],"default":"all","description":"Which provider usage to fetch. Default all."}},"additionalProperties":false}},
+        {"name":"get_usage","description":"Fetch subscription/usage snapshots for Claude, Codex, and/or Grok (same data as Jean Settings → Usage). Use to decide whether to switch models when a plan is near limits. Optional backend filters to one provider; omit or pass \"all\" for every available snapshot. Claude account profiles (custom profiles with CLAUDE_CONFIG_DIR) are returned under claude_accounts, keyed by profile name. Per-backend failures are reported in errors without failing the whole call.","inputSchema":{"type":"object","properties":{"backend":{"type":"string","enum":["claude","codex","grok","all"],"default":"all","description":"Which provider usage to fetch. Default all."}},"additionalProperties":false}},
         {"name":"get_worktree_changes","description":"Get a bounded summary of a worktree's git changes: porcelain status, ahead/behind counts, diff stats, and changed files. Does not return full diffs.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"maxFiles":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"get_worktree_diff","description":"Get a bounded unified git diff for a worktree. diffType is uncommitted (HEAD vs working tree) or branch (origin/base...HEAD). Optional path limits to one pathspec; maxBytes is capped.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"diffType":{"type":"string","enum":["uncommitted","branch"],"default":"uncommitted"},"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1,"maximum":200000,"default":60000}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
@@ -3050,6 +3050,29 @@ async fn get_usage_snapshots(app: &AppHandle, backend_filter: &str) -> Result<Va
         }
     }
 
+    if want_all || backend_filter == "claude" {
+        // Account profiles (custom Claude CLI profiles with CLAUDE_CONFIG_DIR).
+        let account_names: Vec<String> = crate::load_preferences_sync(app)
+            .map(|prefs| {
+                let profiles: Vec<(String, String)> = prefs
+                    .custom_cli_profiles
+                    .iter()
+                    .map(|profile| (profile.name.clone(), profile.settings_json.clone()))
+                    .collect();
+                account_profile_names(&profiles)
+            })
+            .unwrap_or_default();
+        if !account_names.is_empty() {
+            let mut accounts = serde_json::Map::new();
+            for name in account_names {
+                let outcome =
+                    dispatch_command(app, "get_claude_usage", json!({ "account": name })).await;
+                record_account_usage(&mut accounts, &mut errors, name, outcome);
+            }
+            result.insert("claude_accounts".to_string(), Value::Object(accounts));
+        }
+    }
+
     if want_all || backend_filter == "codex" {
         match dispatch_command(app, "get_codex_usage", json!({})).await {
             Ok(usage) => {
@@ -3079,6 +3102,37 @@ async fn get_usage_snapshots(app: &AppHandle, backend_filter: &str) -> Result<Va
     }
 
     Ok(Value::Object(result))
+}
+
+/// Record one account's usage result: success under `accounts[name]`, failure as
+/// `accounts[name] = null` plus `errors["claude:<name>"]`.
+fn record_account_usage(
+    accounts: &mut serde_json::Map<String, Value>,
+    errors: &mut serde_json::Map<String, Value>,
+    name: String,
+    outcome: Result<Value, String>,
+) {
+    match outcome {
+        Ok(usage) => {
+            accounts.insert(name, usage);
+        }
+        Err(err) => {
+            errors.insert(format!("claude:{name}"), Value::String(err));
+            accounts.insert(name, Value::Null);
+        }
+    }
+}
+
+/// Names of custom Claude CLI profiles that are account profiles (set CLAUDE_CONFIG_DIR).
+/// API routing profiles without CLAUDE_CONFIG_DIR are excluded.
+fn account_profile_names(profiles: &[(String, String)]) -> Vec<String> {
+    profiles
+        .iter()
+        .filter(|(_, settings)| {
+            crate::chat::claude::account_config_dir_from_settings(settings).is_some()
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn require_value_str(value: &Value, key: &str) -> Result<String, ToolError> {
@@ -3260,6 +3314,52 @@ pub fn jsonrpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_profile_names_keeps_only_profiles_with_config_dir() {
+        let profiles = vec![
+            (
+                "work".to_string(),
+                r#"{"env":{"CLAUDE_CONFIG_DIR":"/home/u/.claude-work"}}"#.to_string(),
+            ),
+            (
+                "minimax".to_string(),
+                r#"{"env":{"ANTHROPIC_BASE_URL":"https://api.minimax.io/anthropic"}}"#.to_string(),
+            ),
+        ];
+        assert_eq!(account_profile_names(&profiles), vec!["work".to_string()]);
+    }
+
+    #[test]
+    fn record_account_usage_failure_sets_null_and_error_key() {
+        let mut accounts = serde_json::Map::new();
+        let mut errors = serde_json::Map::new();
+        record_account_usage(
+            &mut accounts,
+            &mut errors,
+            "work".to_string(),
+            Err("boom".to_string()),
+        );
+        record_account_usage(
+            &mut accounts,
+            &mut errors,
+            "ok".to_string(),
+            Ok(json!({"x": 1})),
+        );
+        assert_eq!(accounts["work"], Value::Null);
+        assert_eq!(accounts["ok"], json!({"x": 1}));
+        assert_eq!(errors["claude:work"], Value::String("boom".to_string()));
+        assert!(!errors.contains_key("claude:ok"));
+    }
+
+    #[test]
+    fn account_profile_names_ignores_blank_config_dir() {
+        let profiles = vec![(
+            "blank".to_string(),
+            r#"{"env":{"CLAUDE_CONFIG_DIR":"  "}}"#.to_string(),
+        )];
+        assert!(account_profile_names(&profiles).is_empty());
+    }
 
     fn session_lookup_app() -> (tempfile::TempDir, AppHandle) {
         let temp = tempfile::tempdir().unwrap();

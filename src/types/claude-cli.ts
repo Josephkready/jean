@@ -67,4 +67,6 @@ export interface ClaudeUsageSnapshot {
   extraUsageSpent: number | null
   extraUsageLimit: number | null
   fetchedAt: number
+  /** Login email of the account (from its `.claude.json`) */
+  email?: string | null
 }

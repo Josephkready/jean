@@ -1880,6 +1880,8 @@ export const effortLevelOptions: {
 export type CodexModel =
   | 'gpt-6.1-sol'
   | 'gpt-6.1-sol-fast'
+  | 'gpt-6.1-terra'
+  | 'gpt-6.1-terra-fast'
   | 'gpt-6-astra'
   | 'gpt-6-astra-fast'
   | 'gpt-6-sol'
@@ -1909,6 +1911,7 @@ export type CodexModel =
 // separate UI toggle, not as standalone dropdown entries.
 export const CODEX_FAST_MODEL_MAP = {
   'gpt-6.1-sol': 'gpt-6.1-sol-fast',
+  'gpt-6.1-terra': 'gpt-6.1-terra-fast',
   'gpt-6-astra': 'gpt-6-astra-fast',
   'gpt-6-sol': 'gpt-6-sol-fast',
   'gpt-6-luna': 'gpt-6-luna-fast',
@@ -1958,6 +1961,7 @@ export function getCodexFastInfo(model: string): CodexFastInfo {
 
 export const codexModelOptions: { value: CodexModel; label: string }[] = [
   { value: 'gpt-6.1-sol', label: 'GPT 6.1 Sol' },
+  { value: 'gpt-6.1-terra', label: 'GPT 6.1 Terra' },
   { value: 'gpt-6-astra', label: 'GPT 6 Astra' },
   { value: 'gpt-6-sol', label: 'GPT 6 Sol' },
   { value: 'gpt-6-luna', label: 'GPT 6 Luna' },
@@ -1981,6 +1985,8 @@ export const codexDefaultModelOptions: {
 }[] = [
   { value: 'gpt-6.1-sol', label: 'GPT 6.1 Sol' },
   { value: 'gpt-6.1-sol-fast', label: 'GPT 6.1 Sol Fast' },
+  { value: 'gpt-6.1-terra', label: 'GPT 6.1 Terra' },
+  { value: 'gpt-6.1-terra-fast', label: 'GPT 6.1 Terra Fast' },
   { value: 'gpt-6-astra', label: 'GPT 6 Astra' },
   { value: 'gpt-6-sol', label: 'GPT 6 Sol' },
   { value: 'gpt-6-luna', label: 'GPT 6 Luna' },
@@ -2003,6 +2009,7 @@ export const codexDefaultModelOptions: {
     option =>
       ![
         'gpt-6.1-sol',
+        'gpt-6.1-terra',
         'gpt-6-astra',
         'gpt-6-sol',
         'gpt-6-luna',
