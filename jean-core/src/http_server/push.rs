@@ -331,6 +331,8 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
             crate::async_runtime::spawn(async move {
                 let _event_permit = event_permit;
                 let state = context.state::<PushState>();
+                let started = Instant::now();
+                let attempted = subscriptions.len();
                 deliver_all(subscriptions, |subscription| {
                     let state = &state;
                     let notification = &notification;
@@ -338,9 +340,10 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
                         let _permit = PUSH_PERMITS.acquire().await;
                         match state.send(&subscription, notification).await {
                             Ok(false) => match state.remove(&subscription.endpoint) {
-                                Ok(()) => log::info!(
-                                    "Removed expired Web Push subscription (HTTP 404/410)"
-                                ),
+                                Ok(()) => {
+                                    let remaining = state.store.lock().unwrap_or_else(|error| error.into_inner()).subscriptions.len();
+                                    log::info!("Removed expired Web Push subscription (HTTP 404/410); {remaining} remaining");
+                                },
                                 Err(error) => log::warn!(
                                     "Failed to remove expired Web Push subscription: {error}"
                                 ),
@@ -351,6 +354,7 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
                     }
                 })
                 .await;
+                log::debug!("Web Push dispatch finished for {name}: {attempted} subscription(s) attempted in {} ms", started.elapsed().as_millis());
             });
         });
     }
@@ -411,8 +415,19 @@ pub async fn dispatch(app: AppHandle, command: &str, args: Value) -> Result<Valu
                 .ok_or("This device is not subscribed")?;
             let live = state.send(&subscription, &json!({"title":"Jean notifications enabled", "body":"This device can receive Jean notifications.", "tag":"jean-test", "url":"/"})).await?;
             if !live {
-                state.remove(endpoint)?;
-                log::info!("Removed expired Web Push subscription after test (HTTP 404/410)");
+                if let Err(error) = state.remove(endpoint) {
+                    log::warn!(
+                        "Failed to remove expired Web Push subscription after test: {error}"
+                    );
+                    return Err(error);
+                }
+                let remaining = state
+                    .store
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .subscriptions
+                    .len();
+                log::info!("Removed expired Web Push subscription after test (HTTP 404/410); {remaining} remaining");
                 return Err("Subscription expired. Enable notifications again.".into());
             }
             Ok(Value::Null)
