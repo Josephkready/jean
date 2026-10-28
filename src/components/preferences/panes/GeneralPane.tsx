@@ -1,3 +1,4 @@
+import { WebPushSettings } from '../WebPushSettings'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { useSettingsTargetServerId } from '@/lib/settings-target'
 import React, {
@@ -4832,6 +4833,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   />
                 </InlineField>
               )}
+
+              {!isNativeApp() && <WebPushSettings />}
 
               <InlineField
                 label="Web access sounds"

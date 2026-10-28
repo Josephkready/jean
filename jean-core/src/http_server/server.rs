@@ -1165,6 +1165,7 @@ fn static_mime_from_extension(path: &std::path::Path) -> &'static str {
         Some("html") => "text/html; charset=utf-8",
         Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
+        Some("webmanifest") => "application/manifest+json",
         Some("json" | "map") => "application/json; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
