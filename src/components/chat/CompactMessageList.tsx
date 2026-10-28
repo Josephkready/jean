@@ -58,7 +58,10 @@ import { getAssistantDurationMs } from './time-utils'
 import { AgentApprovalInline } from '@/components/agents/AgentActivity'
 import { AgentMessageLinkRow } from '@/components/agents/AgentMessageLink'
 import { AgentQuestionCard } from '@/components/agents/AgentQuestionCard'
-import { parseInlineNumberedQuestion } from './inline-question-utils'
+import {
+  parseInlineNumberedQuestion,
+  type InlineQuestion,
+} from './inline-question-utils'
 import { InlineQuestionOptions } from './InlineQuestionOptions'
 import {
   assistantReplyItems,
@@ -147,7 +150,7 @@ type RenderItem =
       key: string
       latestText: string | null
       /** Numbered question that the latest text asks ("reply with a number") */
-      inlineQuestion: { title?: string; options: string[] } | null
+      inlineQuestion: InlineQuestion | null
     }
   | { kind: 'question'; message: ChatMessage; globalIndex: number }
   | {
@@ -860,8 +863,7 @@ export const CompactMessageList = memo(
           const text = findLatestAssistantText(buffer)
           // A `## Recap` section replaces the whole turn in the compact view
           const shown = text && (extractRecapSection(text) ?? text)
-          // Options of a numbered question show as buttons below the text.
-          // The question line stays in the text when the recap has it.
+          // A numbered question shows as a question block below the text
           const asked = shown ? parseInlineNumberedQuestion(shown) : null
           const askedBefore =
             !asked && text && text !== shown
@@ -872,12 +874,7 @@ export const CompactMessageList = memo(
             messages: buffer,
             key: compactKey,
             latestText: asked?.rest ?? shown,
-            inlineQuestion: asked
-              ? { options: asked.options }
-              : askedBefore && {
-                  title: askedBefore.question,
-                  options: askedBefore.options,
-                },
+            inlineQuestion: asked ?? askedBefore,
           })
           buffer = []
         }
@@ -1403,7 +1400,7 @@ export const CompactMessageList = memo(
                     )}
                     {showLatestText && inlineQuestion && onSendAnswer && (
                       <InlineQuestionOptions
-                        title={inlineQuestion.title}
+                        question={inlineQuestion.question}
                         options={inlineQuestion.options}
                         disabled={isSending}
                         onSend={onSendAnswer}

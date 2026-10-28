@@ -727,6 +727,8 @@ describe('transport bootstrap', () => {
     transport.connectTransport()
     await flushAsync()
     const ws = getWs(0)
+    // Server unreachable over HTTP too, so only the check timeout applies.
+    vi.mocked(fetch).mockRejectedValue(new Error('offline'))
 
     window.dispatchEvent(new Event('pageshow'))
     expect(
@@ -736,6 +738,86 @@ describe('transport bootstrap', () => {
     await flushAsync()
 
     expect(ws.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a silent socket after three announced heartbeat intervals', async () => {
+    vi.useFakeTimers()
+    const transport = await loadTransportModule()
+    transport.connectTransport()
+    await flushAsync()
+    const ws = getWs(0)
+
+    ws.receive({ type: 'heartbeat', interval_ms: 5_000 })
+    vi.advanceTimersByTime(14_000)
+    expect(ws.close).not.toHaveBeenCalled()
+
+    ws.receive({ type: 'heartbeat', interval_ms: 5_000 })
+    vi.advanceTimersByTime(14_000)
+    expect(ws.close).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(6_000)
+    expect(ws.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('checks the socket when the network type changes', async () => {
+    const connection = Object.assign(new EventTarget(), { type: 'wifi' })
+    Object.defineProperty(navigator, 'connection', {
+      configurable: true,
+      value: connection,
+    })
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    })
+    try {
+      const transport = await loadTransportModule()
+      transport.connectTransport()
+      await flushAsync()
+      const ws = getWs(0)
+
+      // Bandwidth estimate change on the same network: no check.
+      connection.dispatchEvent(new Event('change'))
+      expect(ws.send).not.toHaveBeenCalled()
+
+      connection.type = 'cellular'
+      connection.dispatchEvent(new Event('change'))
+      expect(ws.send).toHaveBeenCalledTimes(1)
+      const request = JSON.parse(ws.send.mock.calls[0]?.[0] ?? '')
+      expect(request.command).toBe('get_server_platform')
+    } finally {
+      Reflect.deleteProperty(navigator, 'connection')
+    }
+  })
+
+  it('replaces a silent socket on wake once the server answers over HTTP', async () => {
+    vi.useFakeTimers()
+    const transport = await loadTransportModule()
+    transport.connectTransport()
+    await flushAsync()
+    const ws = getWs(0)
+
+    window.dispatchEvent(new Event('pageshow'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(fetch).toHaveBeenLastCalledWith(expect.stringMatching(/\/healthz$/))
+    expect(ws.close).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(500)
+    expect(ws.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a socket that delivers a frame during the wake check', async () => {
+    vi.useFakeTimers()
+    const transport = await loadTransportModule()
+    transport.connectTransport()
+    await flushAsync()
+    const ws = getWs(0)
+
+    window.dispatchEvent(new Event('pageshow'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    ws.receive({ type: 'heartbeat', interval_ms: 5_000 })
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(ws.close).not.toHaveBeenCalled()
   })
 
   it('recovers on wake when an established socket closed without a reload', async () => {

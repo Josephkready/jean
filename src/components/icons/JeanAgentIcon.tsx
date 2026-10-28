@@ -1,15 +1,17 @@
 import type { SVGProps } from 'react'
 
-/** Face colors for agent icons: [head, shadow]. `jean` is the crowned boss. */
-// [head, shadow, bubble]: bubble is a strong shade that keeps white text readable
+/**
+ * Agent colors: [head, shadow, bubble]. `jean` is the crowned boss.
+ * Bubble is a vivid shade that fills the user's prompt bubbles (white text).
+ */
 export const AGENT_ICON_COLORS = {
-  jean: ['#FFD21F', '#8A6500', '#B87A00'],
-  yellow: ['#FFD21F', '#8A6500', '#B87A00'],
-  blue: ['#4DA6FF', '#1A4F99', '#1D6FD8'],
-  green: ['#3DDC84', '#16733F', '#15934B'],
-  pink: ['#FF6EB4', '#99285E', '#D42A7E'],
-  purple: ['#A57BFF', '#4B2A99', '#7C3AED'],
-  orange: ['#FF9A3D', '#994400', '#CC5200'],
+  jean: ['#FFD21F', '#8A6500', '#EB9500'],
+  yellow: ['#FFD21F', '#8A6500', '#EB9500'],
+  blue: ['#4DA6FF', '#1A4F99', '#2B7FFF'],
+  green: ['#3DDC84', '#16733F', '#00B248'],
+  pink: ['#FF6EB4', '#99285E', '#F6339A'],
+  purple: ['#A57BFF', '#4B2A99', '#8E51FF'],
+  orange: ['#FF9A3D', '#994400', '#FF6A00'],
 } as const
 
 export type AgentIconKey = keyof typeof AGENT_ICON_COLORS

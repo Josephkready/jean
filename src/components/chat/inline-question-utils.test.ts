@@ -35,8 +35,6 @@ describe('parseInlineNumberedQuestion', () => {
         '',
         'Excalidraw has Select and Hand tools.',
         '',
-        'Which mode do you want?',
-        '',
         '- Waiting for your choice.',
       ].join('\n'),
     })
@@ -56,7 +54,7 @@ describe('parseInlineNumberedQuestion', () => {
     ).toEqual({
       question: 'Which one?',
       options: ['A', 'B'],
-      rest: 'Which one?',
+      rest: '',
     })
   })
 

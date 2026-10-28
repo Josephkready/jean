@@ -351,7 +351,7 @@ export function ProjectTreeItem({
                   <button
                     type="button"
                     onClick={handleBaseSync}
-                    className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[11px] font-medium text-violet-600 dark:text-violet-400 transition-colors hover:bg-violet-500/20"
+                    className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                   >
                     <span className="flex items-center gap-0.5">
                       <ArrowDownUp className="h-3 w-3" />

@@ -513,6 +513,51 @@ describe('Markdown', () => {
     }
   )
 
+  it('renders a screenshots block as a gallery with a +N tile and lightbox', async () => {
+    mockReadImage.mockReset()
+    mockReadImage.mockImplementation(
+      async (_server: unknown, _cmd: string, { path }: { path: string }) => ({
+        mimeType: 'image/png',
+        data: btoa(path),
+      })
+    )
+    const paths = ['/tmp/a.png', '/tmp/b.png', '/tmp/c.png', '/tmp/d.png']
+    const content = `Done.\n\n\`\`\`screenshots\n${paths.join('\n')}\n- https://x.dev/e.png\n\`\`\``
+    const { rerender } = render(
+      <Markdown sessionId="remote-1:session-1" streaming>
+        {content}
+      </Markdown>
+    )
+    // Streaming keeps the raw block until the message completes
+    expect(screen.getByRole('button', { name: 'Copy code' })).toBeTruthy()
+
+    rerender(<Markdown sessionId="remote-1:session-1">{content}</Markdown>)
+    expect(screen.getByRole('button', { name: 'Open a.png' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open b.png' })).toBeTruthy()
+    const more = screen.getByRole('button', {
+      name: 'Open screenshots (2 more)',
+    })
+    expect(more).toHaveTextContent('+2')
+    expect(mockReadImage).toHaveBeenCalledWith('remote-1', 'read_file_base64', {
+      path: '/tmp/c.png',
+    })
+    expect(mockReadImage).not.toHaveBeenCalledWith(
+      'remote-1',
+      'read_file_base64',
+      { path: '/tmp/d.png' }
+    )
+
+    fireEvent.click(more)
+    expect(await screen.findByText('3 / 5 · c.png')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Next screenshot' }))
+    expect(screen.getByText('4 / 5 · d.png')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Next screenshot' }))
+    const last = await screen.findByAltText('e.png')
+    expect(last.getAttribute('src')).toBe('https://x.dev/e.png')
+    fireEvent.click(screen.getByRole('button', { name: 'Next screenshot' }))
+    expect(screen.getByText('1 / 5 · a.png')).toBeTruthy()
+  })
+
   it('does not display the previous server image after switching sessions', async () => {
     mockReadImage.mockReset()
     let completeFirst!: (result: { mimeType: string; data: string }) => void

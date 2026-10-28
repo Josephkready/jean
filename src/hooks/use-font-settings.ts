@@ -71,12 +71,12 @@ function applyFontSettings(
 ) {
   const validUiSize = validateFontSize(uiFontSize)
   const validChatSize = validateFontSize(chatFontSize)
-  const uiFontFamily = (uiFont ?? 'inter') as UIFont
+  const uiFontFamily = (uiFont ?? 'geist') as UIFont
   const chatFontFamily = (chatFont ?? 'jetbrains-mono') as ChatFont
   const validWeight = validateFontWeight(fontWeight)
   const weights = fontWeightLadder[validWeight]
 
-  const validUiFont = uiFontFamilyMap[uiFontFamily] ? uiFontFamily : 'inter'
+  const validUiFont = uiFontFamilyMap[uiFontFamily] ? uiFontFamily : 'geist'
   const validChatFont = chatFontFamilyMap[chatFontFamily]
     ? chatFontFamily
     : 'jetbrains-mono'

@@ -371,7 +371,9 @@ function TemplatePicker({
               data-testid={`agent-template-${template.id}`}
               className={cn(
                 'flex w-full items-start gap-3 rounded-lg px-2 py-2 text-left',
-                pressed ? 'bg-primary/10 ring-1 ring-primary' : 'hover:bg-muted'
+                pressed
+                  ? 'bg-primary/10 ring-1 ring-inset ring-primary'
+                  : 'hover:bg-muted'
               )}
               onClick={() => onSelect(template.id)}
             >
@@ -407,14 +409,9 @@ function TemplatePicker({
               ))}
             </ul>
           )}
-          <Textarea
-            readOnly
-            value={selected.rolePrompt}
-            rows={6}
-            aria-label="Role prompt preview"
-          />
           <p className="text-xs text-muted-foreground">
-            Run settings stay on the defaults. Edit the agent after install.
+            Run settings stay on the defaults. To see or edit the role prompt,
+            open the agent and turn on Advanced.
           </p>
         </div>
       )}

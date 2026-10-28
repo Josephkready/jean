@@ -494,7 +494,7 @@ export const AppearancePane: React.FC = () => {
         <div className="space-y-4">
           <InlineField label="UI font" description="Font for interface text">
             <Select
-              value={preferences?.ui_font ?? 'inter'}
+              value={preferences?.ui_font ?? 'geist'}
               onValueChange={value =>
                 handleFontChange('ui_font', value as UIFont)
               }

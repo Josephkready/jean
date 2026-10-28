@@ -513,13 +513,16 @@ export function useActiveTodosAndAgents({
     const settled: SubAgent[] = []
     for (const message of history) {
       const toolCalls = message.tool_calls ?? []
-      for (const toolCall of toolCalls) toolIds.add(toolCall.id)
+      // A `running-` snapshot is the in-flight turn (e.g. reopened session),
+      // so its agents are still live and the stream may update them.
+      const inFlight = isSending && message.id.startsWith('running-')
+      if (!inFlight) for (const toolCall of toolCalls) toolIds.add(toolCall.id)
       settled.push(
-        ...agentsFromToolCalls(toolCalls, false, message.cancelled === true)
+        ...agentsFromToolCalls(toolCalls, inFlight, message.cancelled === true)
       )
     }
     return { agents: mergeSubagents(settled, []), toolIds }
-  }, [activeSessionId, lastAssistantMessage, messages])
+  }, [activeSessionId, isSending, lastAssistantMessage, messages])
 
   // Get active agents from Codex collab tool calls and Claude Task/Agent calls.
   // Only tool calls that are not already in a persisted turn can be in progress.
