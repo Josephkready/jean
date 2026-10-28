@@ -22,6 +22,8 @@ interface MobileBackendModelPickerSheetProps {
   customCliProfiles: CustomCliProfile[]
   onModelChange: (model: string) => void
   onBackendModelChange: (backend: CliBackend, model: string) => void
+  /** Set Claude account (null = default login) and model in one step. */
+  onClaudeAccountSelect?: (account: string | null, model: string) => void
   /** Fired after a model is selected (picker already closed). */
   onAfterModelSelect?: (backend: CliBackend, model: string) => void
 }
@@ -38,6 +40,7 @@ export function MobileBackendModelPickerSheet({
   customCliProfiles,
   onModelChange,
   onBackendModelChange,
+  onClaudeAccountSelect,
   onAfterModelSelect,
 }: MobileBackendModelPickerSheetProps) {
   const isMobile = useIsMobile()
@@ -73,6 +76,7 @@ export function MobileBackendModelPickerSheet({
           providerLocked={providerLocked}
           onModelChange={onModelChange}
           onBackendModelChange={onBackendModelChange}
+          onClaudeAccountSelect={onClaudeAccountSelect}
           onRequestClose={() => onOpenChange(false)}
           onAfterSelect={onAfterModelSelect}
           className="min-h-0"

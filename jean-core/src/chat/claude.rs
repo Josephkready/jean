@@ -422,6 +422,22 @@ fn should_mirror_custom_profile_env_for_detached() -> bool {
     cfg!(windows) && !crate::platform::get_wsl_config().enabled
 }
 
+/// Profile env that must be on the Claude process itself. The CLI reads
+/// `CLAUDE_CONFIG_DIR` (which account and credentials to use) before it
+/// applies `--settings`, so a profile can only switch accounts this way.
+fn custom_profile_process_env(
+    profile_env: Vec<(String, String)>,
+    mirror_all: bool,
+) -> Vec<(String, String)> {
+    if mirror_all {
+        return profile_env;
+    }
+    profile_env
+        .into_iter()
+        .filter(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+        .collect()
+}
+
 /// Strip a `-fast` suffix from the model string.
 /// Returns `(actual_model, is_fast)`.
 /// E.g. `"opus-fast"` → `("opus", true)`, `"opus"` → `("opus", false)`.
@@ -787,9 +803,10 @@ fn build_claude_args(
         args.push("ExitPlanMode".to_string());
     }
 
-    if should_mirror_custom_profile_env_for_detached() {
-        env_vars.extend(load_custom_profile_env_vars(custom_profile_name));
-    }
+    env_vars.extend(custom_profile_process_env(
+        load_custom_profile_env_vars(custom_profile_name),
+        should_mirror_custom_profile_env_for_detached(),
+    ));
 
     // Runtime settings merged with the custom profile into ONE --settings value
     // (the CLI option is single-valued; a second --settings replaces the first).
@@ -3790,6 +3807,29 @@ mod tests {
             old_help,
             "--system-prompt-snapshot"
         ));
+    }
+
+    #[test]
+    fn custom_profile_process_env_keeps_only_config_dir_unless_mirroring() {
+        let profile_env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), "https://x".to_string()),
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/home/u/.claude-work".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            custom_profile_process_env(profile_env.clone(), false),
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/home/u/.claude-work".to_string()
+            )]
+        );
+        assert_eq!(
+            custom_profile_process_env(profile_env.clone(), true),
+            profile_env
+        );
     }
 
     #[test]

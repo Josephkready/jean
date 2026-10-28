@@ -21,6 +21,10 @@ import {
 } from '@/components/chat/toolbar/toolbar-utils'
 import { sortModelOptionsByRawModel } from '@/lib/model-utils'
 import {
+  getClaudeCatalogOptions,
+  isClaudeAccountProfile,
+} from '@/components/chat/toolbar/model-picker-rows'
+import {
   getCatalogModelFastInfo,
   getCatalogModelOptions,
   getCatalogModelReasoning,
@@ -225,14 +229,17 @@ export function useToolbarDerivedState({
   }, [availableMcpServers, enabledMcpServers])
 
   const claudeModelOptions = useMemo(() => {
-    if (!selectedProvider || selectedProvider === '__anthropic__') {
-      return getCatalogModelOptions(modelCatalog, 'claude').map(option => ({
-        ...option,
-        label: option.label.replace(/^Claude\s+/, ''),
-      }))
+    const profile = customCliProfiles.find(p => p.name === selectedProvider)
+    // Default login and account profiles (own CLAUDE_CONFIG_DIR) use the real
+    // Anthropic model catalog; API routing profiles map to aliases below.
+    if (
+      !selectedProvider ||
+      selectedProvider === '__anthropic__' ||
+      (profile && isClaudeAccountProfile(profile))
+    ) {
+      return getClaudeCatalogOptions(modelCatalog)
     }
 
-    const profile = customCliProfiles.find(p => p.name === selectedProvider)
     let opusModel: string | undefined
     let sonnetModel: string | undefined
     let haikuModel: string | undefined

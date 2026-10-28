@@ -39,6 +39,10 @@ import { useToolbarDerivedState } from '@/components/chat/toolbar/useToolbarDeri
 import { useToolbarDropdownShortcuts } from '@/components/chat/toolbar/useToolbarDropdownShortcuts'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { isNativeApp } from '@/lib/environment'
+import {
+  DEFAULT_ACCOUNT_LABEL,
+  getClaudeAccountNames,
+} from '@/components/chat/toolbar/model-picker-rows'
 
 interface DesktopBackendModelPickerProps {
   disabled?: boolean
@@ -53,6 +57,8 @@ interface DesktopBackendModelPickerProps {
   onProviderChange?: (provider: string) => void
   onModelChange: (model: string) => void
   onBackendModelChange: (backend: CliBackend, model: string) => void
+  /** Set Claude account (null = default login) and model in one step. */
+  onClaudeAccountSelect?: (account: string | null, model: string) => void
   /** Extra first option in every backend list, e.g. "Default model" */
   defaultModelOption?: { value: string; label: string }
   /** Replaces the backend · model text in the trigger */
@@ -76,6 +82,7 @@ export function DesktopBackendModelPicker({
   onProviderChange,
   onModelChange,
   onBackendModelChange,
+  onClaudeAccountSelect,
   defaultModelOption,
   triggerLabel,
   keyboardShortcuts = true,
@@ -217,6 +224,24 @@ export function DesktopBackendModelPicker({
 
   // useToolbarDerivedState resolves Antigravity labels from the static option
   // list only — prefer the CLI-reported label for the trigger when available.
+  // With account profiles, show which Claude login the session uses.
+  const selectedAccountLabel = useMemo(() => {
+    if (!onClaudeAccountSelect || selectedBackend !== 'claude') return null
+    const accountNames = getClaudeAccountNames(customCliProfiles)
+    if (accountNames.length === 0) return null
+    if (selectedProvider && accountNames.includes(selectedProvider)) {
+      return selectedProvider
+    }
+    return !selectedProvider || selectedProvider === '__anthropic__'
+      ? DEFAULT_ACCOUNT_LABEL
+      : null
+  }, [
+    customCliProfiles,
+    onClaudeAccountSelect,
+    selectedBackend,
+    selectedProvider,
+  ])
+
   const selectedModelLabel = useMemo(() => {
     if (defaultModelOption && selectedModel === defaultModelOption.value)
       return defaultModelOption.label
@@ -277,6 +302,9 @@ export function DesktopBackendModelPicker({
                     className="shrink-0"
                     badgeClassName="text-[9px] leading-3"
                   />
+                  {selectedAccountLabel && (
+                    <span className="truncate">· {selectedAccountLabel}</span>
+                  )}
                   <span className="truncate">· {selectedModelLabel}</span>
                   {onProviderChange && selectedBackend === 'claude' && (
                     <span className="truncate text-muted-foreground">
@@ -334,6 +362,7 @@ export function DesktopBackendModelPicker({
           onProviderChange={onProviderChange}
           onModelChange={onModelChange}
           onBackendModelChange={onBackendModelChange}
+          onClaudeAccountSelect={onClaudeAccountSelect}
           onRequestClose={() => handleOpenChange(false)}
           defaultModelOption={defaultModelOption}
         />

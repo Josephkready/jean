@@ -577,7 +577,7 @@ describe('BackendModelPickerContent', () => {
       />
     )
 
-    const fastRowActions = screen.getByTestId('model-actions-codex-gpt-5.5')
+    const fastRowActions = screen.getByTestId('model-actions-codex:gpt-5.5')
     const fastToggle = screen.getByRole('switch', {
       name: /enable fast mode for gpt 5\.5/i,
     })
@@ -592,7 +592,7 @@ describe('BackendModelPickerContent', () => {
         Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
 
-    const nonFastRowActions = screen.getByTestId('model-actions-codex-gpt-5.3')
+    const nonFastRowActions = screen.getByTestId('model-actions-codex:gpt-5.3')
     const nonFastFavoriteToggle = screen.getByRole('switch', {
       name: /^favorite gpt 5\.3$/i,
     })
@@ -650,7 +650,8 @@ describe('BackendModelPickerContent', () => {
     expect(onModelChange).toHaveBeenCalledWith('gpt-5.5')
   })
 
-  it('floats favourited models to the top of the list', () => {
+  it('floats favourited models to the top of the list', async () => {
+    const user = userEvent.setup()
     mockFavoriteModels = ['claude:claude-opus-4-6[1m]']
 
     render(
@@ -667,6 +668,8 @@ describe('BackendModelPickerContent', () => {
       />
     )
 
+    // The picker opens on Favorites; the Claude tab floats favourites first.
+    await user.click(screen.getByRole('tab', { name: 'Claude' }))
     const labels = screen
       .getAllByRole('option')
       .map(opt => opt.textContent ?? '')
@@ -693,7 +696,7 @@ describe('BackendModelPickerContent', () => {
     )
 
     const fableActions = screen.getByTestId(
-      'model-actions-claude-claude-fable-5'
+      'model-actions-claude:claude-fable-5'
     )
     expect(
       within(fableActions).queryByRole('switch', { name: /fast mode/i })
@@ -985,5 +988,106 @@ describe('BackendModelPickerContent', () => {
     expect(screen.getByRole('tab', { name: 'Claude' })).not.toBeDisabled()
     expect(screen.getByRole('tab', { name: 'Codex' })).not.toBeDisabled()
     expect(screen.getByRole('tab', { name: 'OpenCode' })).not.toBeDisabled()
+  })
+
+  it('opens on a Favorites tab with favorites from every backend', async () => {
+    const user = userEvent.setup()
+    const onModelChange = vi.fn()
+    const onBackendModelChange = vi.fn()
+    mockFavoriteModels = ['codex:gpt-5.5', 'claude:claude-fable-5']
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="claude"
+        selectedModel="claude-opus-4-8[1m]"
+        selectedProvider={null}
+        installedBackends={['claude', 'codex']}
+        customCliProfiles={[]}
+        onModelChange={onModelChange}
+        onBackendModelChange={onBackendModelChange}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('tab', { name: 'Favorites' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    const labels = screen
+      .getAllByRole('option')
+      .map(opt => opt.textContent ?? '')
+    expect(labels).toHaveLength(2)
+    expect(labels[0]).toContain('gpt-5.5')
+    expect(labels[1]).toContain('claude-fable-5')
+
+    // One click switches backend and model.
+    const [firstFavorite] = screen.getAllByRole('option')
+    if (!firstFavorite) throw new Error('missing favorite row')
+    await user.click(firstFavorite)
+    expect(onBackendModelChange).toHaveBeenCalledWith('codex', 'gpt-5.5')
+    expect(onModelChange).not.toHaveBeenCalled()
+  })
+
+  it('shows one row per Claude account and selects account plus model', async () => {
+    const user = userEvent.setup()
+    const onClaudeAccountSelect = vi.fn()
+    const onModelChange = vi.fn()
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="claude"
+        selectedModel="claude-fable-5"
+        selectedProvider="Work"
+        installedBackends={['claude']}
+        customCliProfiles={[
+          {
+            name: 'Work',
+            settings_json:
+              '{"env":{"CLAUDE_CONFIG_DIR":"/home/u/.claude-work"}}',
+          },
+          {
+            name: 'OpenRouter',
+            settings_json: '{"env":{"ANTHROPIC_BASE_URL":"https://x"}}',
+          },
+        ]}
+        onModelChange={onModelChange}
+        onBackendModelChange={vi.fn()}
+        onClaudeAccountSelect={onClaudeAccountSelect}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    const rowFor = (key: string) => {
+      const row = screen
+        .getByTestId(`model-actions-${key}`)
+        .closest<HTMLElement>('[role="option"]')
+      if (!row) throw new Error(`missing row ${key}`)
+      return row
+    }
+    const defaultRow = rowFor('claude:claude-fable-5')
+    const workRow = rowFor('claude@Work:claude-fable-5')
+    expect(defaultRow).toHaveTextContent('Default · Fable 5')
+    expect(workRow).toHaveTextContent('Work · Fable 5')
+    expect(
+      screen.queryByRole('option', { name: /^OpenRouter ·/ })
+    ).not.toBeInTheDocument()
+    // Only the session's account is checked, not the same model on Default.
+    expect(defaultRow.querySelector('.opacity-100')).toBeNull()
+    expect(workRow.querySelector('.opacity-100')).not.toBeNull()
+
+    await user.click(
+      within(workRow).getByRole('switch', {
+        name: /^favorite work · fable 5$/i,
+      })
+    )
+    expect(patchPreferencesMutate).toHaveBeenCalledWith({
+      favorite_models: ['claude@Work:claude-fable-5'],
+    })
+
+    await user.click(defaultRow)
+    expect(onClaudeAccountSelect).toHaveBeenCalledWith(null, 'claude-fable-5')
+    expect(onModelChange).not.toHaveBeenCalled()
   })
 })
