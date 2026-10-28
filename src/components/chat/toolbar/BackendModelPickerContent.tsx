@@ -60,8 +60,25 @@ import {
   getProviderDisplayName,
 } from '@/components/chat/toolbar/toolbar-utils'
 import { useToolbarDerivedState } from '@/components/chat/toolbar/useToolbarDerivedState'
+import {
+  buildClaudeAccountRows,
+  buildFavoriteRows,
+  getClaudeAccountNames,
+  getClaudeCatalogOptions,
+  modelKey,
+  type PickerRow,
+} from '@/components/chat/toolbar/model-picker-rows'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { getModifierSymbol } from '@/lib/platform'
+
+const FAVORITES_TAB = 'favorites'
+type PickerTab = CliBackend | typeof FAVORITES_TAB
+
+/** Whether an account row (`null` = default login) matches the session provider. */
+function isSameAccount(account: string | null, provider: string | null) {
+  if (account === null) return !provider || provider === '__anthropic__'
+  return account === provider
+}
 
 interface BackendModelPickerContentProps {
   open: boolean
@@ -75,6 +92,11 @@ interface BackendModelPickerContentProps {
   onProviderChange?: (provider: string) => void
   onModelChange: (model: string) => void
   onBackendModelChange: (backend: CliBackend, model: string) => void
+  /**
+   * Set the Claude account (`null` = default login) and model together. When
+   * given, account profiles (own CLAUDE_CONFIG_DIR) get their own rows.
+   */
+  onClaudeAccountSelect?: (account: string | null, model: string) => void
   onRequestClose: () => void
   /** Called after a model is applied and the picker has been asked to close. */
   onAfterSelect?: (backend: CliBackend, model: string) => void
@@ -96,6 +118,7 @@ export function BackendModelPickerContent({
   onProviderChange,
   onModelChange,
   onBackendModelChange,
+  onClaudeAccountSelect,
   onRequestClose,
   onAfterSelect,
   defaultModelOption,
@@ -104,18 +127,13 @@ export function BackendModelPickerContent({
   commandListClassName,
 }: BackendModelPickerContentProps) {
   const [search, setSearch] = useState('')
-  const [activeBackend, setActiveBackend] =
-    useState<CliBackend>(selectedBackend)
+  const [activeTab, setActiveTab] = useState<PickerTab>(selectedBackend)
   const [highlightedValue, setHighlightedValue] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
   const isMobile = useIsMobile()
   const fastModifier = getModifierSymbol()
   const fastShortcutLabel =
     fastModifier === 'Ctrl' ? 'Ctrl F' : `${fastModifier}F`
-
-  // Sessions with messages can now switch backends because the backend gets a
-  // hidden Jean-local handoff prompt on provider changes.
-  const isLocked = false
 
   const { data: prefs } = usePreferences()
   const { data: modelCatalog } = useModelCatalog()
@@ -128,18 +146,19 @@ export function BackendModelPickerContent({
   )
   const favoriteSet = useMemo(() => new Set(favoriteModels), [favoriteModels])
   const favKey = useCallback(
-    (backend: CliBackend, model: string) => `${backend}:${model}`,
+    (backend: CliBackend, model: string, account?: string | null) =>
+      modelKey(backend, model, account),
     []
   )
   const handleToggleFavorite = useCallback(
-    (backend: CliBackend, model: string) => {
-      const key = favKey(backend, model)
+    (row: PickerRow) => {
+      const key = modelKey(row.backend, row.value, row.account)
       const next = favoriteSet.has(key)
         ? favoriteModels.filter(k => k !== key)
         : [...favoriteModels, key]
       patchPreferences.mutate({ favorite_models: next })
     },
-    [favKey, favoriteSet, favoriteModels, patchPreferences]
+    [favoriteSet, favoriteModels, patchPreferences]
   )
 
   const fastModels = useMemo(
@@ -148,13 +167,18 @@ export function BackendModelPickerContent({
   )
   const fastSet = useMemo(() => new Set(fastModels), [fastModels])
   const isFastRemembered = useCallback(
-    (backend: CliBackend, baseModel: string) =>
-      fastSet.has(favKey(backend, baseModel)),
+    (backend: CliBackend, baseModel: string, account?: string | null) =>
+      fastSet.has(favKey(backend, baseModel, account)),
     [fastSet, favKey]
   )
   const setFastRemembered = useCallback(
-    (backend: CliBackend, baseModel: string, on: boolean) => {
-      const key = favKey(backend, baseModel)
+    (
+      backend: CliBackend,
+      baseModel: string,
+      on: boolean,
+      account?: string | null
+    ) => {
+      const key = favKey(backend, baseModel, account)
       if (on === fastSet.has(key)) return
       const next = on ? [...fastModels, key] : fastModels.filter(k => k !== key)
       patchPreferences.mutate({ fast_mode_models: next })
@@ -327,7 +351,39 @@ export function BackendModelPickerContent({
     [backendModelSections, installedBackendsSet]
   )
 
-  const showSidebar = sidebarBackends.length > 1
+  const accountNames = useMemo(
+    () =>
+      onClaudeAccountSelect && installedBackendsSet.has('claude')
+        ? getClaudeAccountNames(customCliProfiles)
+        : [],
+    [customCliProfiles, installedBackendsSet, onClaudeAccountSelect]
+  )
+  const claudeCatalogOptions = useMemo(
+    () => getClaudeCatalogOptions(modelCatalog),
+    [modelCatalog]
+  )
+
+  const favoriteRows = useMemo(
+    () =>
+      buildFavoriteRows(
+        favoriteModels,
+        backendModelSections.filter(section =>
+          installedBackendsSet.has(section.backend)
+        ),
+        accountNames,
+        claudeCatalogOptions
+      ),
+    [
+      accountNames,
+      backendModelSections,
+      claudeCatalogOptions,
+      favoriteModels,
+      installedBackendsSet,
+    ]
+  )
+  const showFavoritesTab = favoriteRows.length > 0
+
+  const showSidebar = sidebarBackends.length > 1 || showFavoritesTab
 
   // Clear search only when the picker opens — not on every sidebarBackends
   // identity change (that array is rebuilt often and wiping search mid-type
@@ -337,43 +393,68 @@ export function BackendModelPickerContent({
     setSearch('')
   }, [open])
 
-  // Sync active backend with locked selection / when picker opens.
-  // Never leave activeBackend on an uninstalled backend (empty model list).
+  const fallbackBackend = sidebarBackends.includes(selectedBackend)
+    ? selectedBackend
+    : (sidebarBackends[0] ?? selectedBackend)
+
+  // Open on Favorites when there are any, else on the session's backend.
+  const pickOpenTab = useEffectEvent(() => {
+    setActiveTab(showFavoritesTab ? FAVORITES_TAB : fallbackBackend)
+  })
+  useEffect(() => {
+    if (open) pickOpenTab()
+  }, [open])
+
+  // Never leave the active tab on an uninstalled backend (empty model list)
+  // or on Favorites after the last favorite is removed.
   useEffect(() => {
     if (!open) return
-    if (isLocked) {
-      setActiveBackend(selectedBackend)
-      return
-    }
-    setActiveBackend(prev => {
-      if (sidebarBackends.includes(prev)) return prev
-      if (sidebarBackends.includes(selectedBackend)) return selectedBackend
-      return sidebarBackends[0] ?? selectedBackend
+    setActiveTab(prev => {
+      if (prev === FAVORITES_TAB) {
+        return showFavoritesTab ? prev : fallbackBackend
+      }
+      return sidebarBackends.includes(prev) ? prev : fallbackBackend
     })
-  }, [open, isLocked, selectedBackend, sidebarBackends])
+  }, [open, showFavoritesTab, sidebarBackends, fallbackBackend])
 
   const activeSection = useMemo(
     () =>
-      backendModelSections.find(section => section.backend === activeBackend),
-    [backendModelSections, activeBackend]
+      activeTab === FAVORITES_TAB
+        ? undefined
+        : backendModelSections.find(section => section.backend === activeTab),
+    [backendModelSections, activeTab]
   )
 
-  const filteredOptions = useMemo(() => {
-    if (!activeSection) return []
+  const filteredOptions = useMemo((): PickerRow[] => {
+    let rows: PickerRow[]
+    if (activeTab === FAVORITES_TAB) {
+      rows = favoriteRows
+    } else if (activeTab === 'claude' && accountNames.length > 0) {
+      rows = buildClaudeAccountRows(claudeCatalogOptions, accountNames)
+    } else if (activeSection) {
+      rows = activeSection.options.map(option => ({
+        ...option,
+        backend: activeTab,
+      }))
+    } else {
+      return []
+    }
     const query = search.trim().toLowerCase()
     const filtered = !query
-      ? activeSection.options
-      : activeSection.options.filter(option =>
-          `${option.label} ${option.value}`.toLowerCase().includes(query)
+      ? rows
+      : rows.filter(row =>
+          `${row.label} ${row.value}`.toLowerCase().includes(query)
         )
-    const favs: typeof filtered = []
-    const rest: typeof filtered = []
-    for (const opt of filtered) {
-      if (favoriteSet.has(favKey(activeBackend, opt.value))) favs.push(opt)
-      else rest.push(opt)
+    if (activeTab === FAVORITES_TAB) return filtered
+    const favs: PickerRow[] = []
+    const rest: PickerRow[] = []
+    for (const row of filtered) {
+      if (favoriteSet.has(modelKey(row.backend, row.value, row.account))) {
+        favs.push(row)
+      } else rest.push(row)
     }
     const result = [...favs, ...rest]
-    if (activeBackend === 'commandcode') {
+    if (activeTab === 'commandcode') {
       const rawQuery = search.trim()
       if (rawQuery) {
         const suffix = rawQuery.startsWith('commandcode/')
@@ -384,6 +465,7 @@ export function BackendModelPickerContent({
         const customExists = result.some(option => option.value === customValue)
         if (!customExists) {
           result.unshift({
+            backend: 'commandcode',
             value: customValue,
             label: `Use Command Code model "${rawQuery}"`,
           })
@@ -391,10 +473,18 @@ export function BackendModelPickerContent({
       }
     }
     return result
-  }, [activeBackend, activeSection, favKey, favoriteSet, search])
+  }, [
+    accountNames,
+    activeSection,
+    activeTab,
+    claudeCatalogOptions,
+    favoriteRows,
+    favoriteSet,
+    search,
+  ])
 
-  const getOptionCommandValue = useCallback(
-    (backend: CliBackend, model: string) => `${backend}:${model}`,
+  const getRowCommandValue = useCallback(
+    (row: PickerRow) => modelKey(row.backend, row.value, row.account),
     []
   )
 
@@ -403,27 +493,16 @@ export function BackendModelPickerContent({
   const resolvedHighlightedValue = useMemo(() => {
     if (!open) return highlightedValue
     const currentStillVisible = filteredOptions.some(
-      option =>
-        getOptionCommandValue(activeBackend, option.value) === highlightedValue
+      row => getRowCommandValue(row) === highlightedValue
     )
     if (currentStillVisible) return highlightedValue
     const firstOption = filteredOptions[0]
-    return firstOption
-      ? getOptionCommandValue(activeBackend, firstOption.value)
-      : ''
-  }, [
-    activeBackend,
-    filteredOptions,
-    getOptionCommandValue,
-    highlightedValue,
-    open,
-  ])
+    return firstOption ? getRowCommandValue(firstOption) : ''
+  }, [filteredOptions, getRowCommandValue, highlightedValue, open])
 
   const highlightedOption = useMemo(() => {
     const match = filteredOptions.find(
-      option =>
-        getOptionCommandValue(activeBackend, option.value) ===
-        resolvedHighlightedValue
+      row => getRowCommandValue(row) === resolvedHighlightedValue
     )
     if (match) return match
     // Only fall back to the first visible option when we have a resolved
@@ -431,12 +510,14 @@ export function BackendModelPickerContent({
     // (e.g. search with zero matches) — do not invent a fast-mode target.
     if (!resolvedHighlightedValue) return undefined
     return filteredOptions[0]
-  }, [
-    activeBackend,
-    filteredOptions,
-    getOptionCommandValue,
-    resolvedHighlightedValue,
-  ])
+  }, [filteredOptions, getRowCommandValue, resolvedHighlightedValue])
+
+  // Backend the toolbar actions (refresh, placeholder, Cmd+F) apply to. On the
+  // Favorites tab it follows the highlighted row.
+  const activeBackend: CliBackend =
+    activeTab === FAVORITES_TAB
+      ? (highlightedOption?.backend ?? selectedBackend)
+      : activeTab
 
   useEffect(() => {
     if (!open) return
@@ -447,47 +528,51 @@ export function BackendModelPickerContent({
     return () => window.cancelAnimationFrame(rafId)
   }, [open])
 
+  // Apply a row's model (or its fast/base variant) to the session.
+  const applyModel = useCallback(
+    (row: PickerRow, model: string) => {
+      if (row.account !== undefined && onClaudeAccountSelect) {
+        onClaudeAccountSelect(row.account, model)
+      } else if (row.backend === selectedBackend) {
+        onModelChange(model)
+      } else {
+        onBackendModelChange(row.backend, model)
+      }
+    },
+    [
+      onBackendModelChange,
+      onClaudeAccountSelect,
+      onModelChange,
+      selectedBackend,
+    ]
+  )
+
   const handleSelect = useCallback(
-    (backend: CliBackend, model: string) => {
+    (row: PickerRow) => {
+      const { backend, value: model } = row
       // Resolve to fast variant if user previously enabled fast for this base model.
       const info = getCatalogModelFastInfo(modelCatalog, backend, model)
       const resolved =
         info.supportsFast &&
         !info.isFast &&
         info.fastModel &&
-        isFastRemembered(backend, info.baseModel)
+        isFastRemembered(backend, info.baseModel, row.account)
           ? info.fastModel
           : model
-      if (backend === selectedBackend) {
-        onModelChange(resolved)
-      } else {
-        onBackendModelChange(backend, resolved)
-      }
+      applyModel(row, resolved)
       onRequestClose()
       onAfterSelect?.(backend, resolved)
     },
-    [
-      isFastRemembered,
-      modelCatalog,
-      onAfterSelect,
-      onBackendModelChange,
-      onModelChange,
-      onRequestClose,
-      selectedBackend,
-    ]
+    [applyModel, isFastRemembered, modelCatalog, onAfterSelect, onRequestClose]
   )
 
-  const handleBackendButtonClick = useCallback(
-    (backend: CliBackend) => {
-      if (isLocked && backend !== selectedBackend) return
-      setActiveBackend(backend)
-      setSearch('')
-      window.requestAnimationFrame(() => {
-        searchInputRef.current?.focus()
-      })
-    },
-    [isLocked, selectedBackend]
-  )
+  const handleTabClick = useCallback((tab: PickerTab) => {
+    setActiveTab(tab)
+    setSearch('')
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus()
+    })
+  }, [])
 
   const handleRefreshModels = useCallback(async () => {
     const toastId = toast.loading('Refreshing model list...')
@@ -507,31 +592,30 @@ export function BackendModelPickerContent({
   const handleUseHighlightedFastMode = useCallback(() => {
     if (!highlightedOption) return false
 
+    const { backend } = highlightedOption
     const fastInfo = getCatalogModelFastInfo(
       modelCatalog,
-      activeBackend,
+      backend,
       highlightedOption.value
     )
     if (!fastInfo.supportsFast || !fastInfo.fastModel) return false
 
-    setFastRemembered(activeBackend, fastInfo.baseModel, true)
-    if (selectedBackend === activeBackend) {
-      onModelChange(fastInfo.fastModel)
-    } else {
-      onBackendModelChange(activeBackend, fastInfo.fastModel)
-    }
+    setFastRemembered(
+      backend,
+      fastInfo.baseModel,
+      true,
+      highlightedOption.account
+    )
+    applyModel(highlightedOption, fastInfo.fastModel)
     onRequestClose()
-    onAfterSelect?.(activeBackend, fastInfo.fastModel)
+    onAfterSelect?.(backend, fastInfo.fastModel)
     return true
   }, [
-    activeBackend,
+    applyModel,
     highlightedOption,
     modelCatalog,
     onAfterSelect,
-    onBackendModelChange,
-    onModelChange,
     onRequestClose,
-    selectedBackend,
     setFastRemembered,
   ])
 
@@ -549,7 +633,7 @@ export function BackendModelPickerContent({
     if (!backend) return
     event.preventDefault()
     event.stopPropagation()
-    handleBackendButtonClick(backend)
+    handleTabClick(backend)
   })
 
   useEffect(() => {
@@ -578,17 +662,15 @@ export function BackendModelPickerContent({
   // mid-session switches stay discoverable (provider is changed via the
   // dedicated Provider control, not locked after the first message).
   const showProviderHint =
-    activeBackend === 'claude' && customCliProfiles.length > 0
+    activeTab === 'claude' && customCliProfiles.length > 0
 
-  const placeholder =
-    searchPlaceholder ??
-    `Search ${getBackendPlainLabel(activeBackend)} models...`
+  const activeTabLabel =
+    activeTab === FAVORITES_TAB ? 'favorite' : getBackendPlainLabel(activeTab)
+  const placeholder = searchPlaceholder ?? `Search ${activeTabLabel} models...`
 
   // Claude/Codex use the CDN model catalog; OpenCode refreshes via CLI.
   const canRefreshModels =
-    activeBackend === 'claude' ||
-    activeBackend === 'codex' ||
-    activeBackend === 'opencode'
+    activeTab === 'claude' || activeTab === 'codex' || activeTab === 'opencode'
   const isRefreshingModels =
     activeBackend === 'opencode'
       ? refreshOpencodeModels.isPending
@@ -598,10 +680,9 @@ export function BackendModelPickerContent({
     <SidebarBackends
       orientation={isMobile ? 'horizontal' : 'vertical'}
       backends={sidebarBackends}
-      activeBackend={activeBackend}
-      selectedBackend={selectedBackend}
-      isLocked={isLocked}
-      onSelect={handleBackendButtonClick}
+      showFavorites={showFavoritesTab}
+      activeTab={activeTab}
+      onSelect={handleTabClick}
     />
   ) : null
 
@@ -661,7 +742,7 @@ export function BackendModelPickerContent({
             )}
           </div>
 
-          {onProviderChange && activeBackend === 'claude' ? (
+          {onProviderChange && activeTab === 'claude' ? (
             <div className="px-4 py-2">
               <Select
                 value={selectedProvider ?? '__anthropic__'}
@@ -699,38 +780,49 @@ export function BackendModelPickerContent({
             )}
           >
             {filteredOptions.length === 0 && (
-              <CommandEmpty>
-                No {getBackendPlainLabel(activeBackend)} models found.
-              </CommandEmpty>
+              <CommandEmpty>No {activeTabLabel} models found.</CommandEmpty>
             )}
 
             {filteredOptions.map(option => {
+              const rowBackend = option.backend
+              const rowKey = getRowCommandValue(option)
               const fastInfo = getCatalogModelFastInfo(
                 modelCatalog,
-                activeBackend,
+                rowBackend,
                 option.value
               )
               const supportsFast = Boolean(
                 fastInfo.supportsFast && fastInfo.fastModel
               )
+              const isSameRowAccount =
+                option.account === undefined ||
+                isSameAccount(option.account, selectedProvider)
               const isSelectedBase =
-                selectedBackend === activeBackend &&
+                selectedBackend === rowBackend &&
+                isSameRowAccount &&
                 selectedModel === option.value
               const isSelectedFast =
                 supportsFast &&
-                selectedBackend === activeBackend &&
+                selectedBackend === rowBackend &&
+                isSameRowAccount &&
                 selectedModel === fastInfo.fastModel
               const isRowSelected = isSelectedBase || isSelectedFast
-              const isFavorite = favoriteSet.has(
-                favKey(activeBackend, option.value)
-              )
+              const isFavorite = favoriteSet.has(rowKey)
+              const RowBackendIcon =
+                activeTab === FAVORITES_TAB ? getBackendIcon(rowBackend) : null
 
               return (
                 <CommandItem
-                  key={`${activeBackend}-${option.value}`}
-                  value={getOptionCommandValue(activeBackend, option.value)}
-                  onSelect={() => handleSelect(activeBackend, option.value)}
+                  key={rowKey}
+                  value={rowKey}
+                  onSelect={() => handleSelect(option)}
                 >
+                  {RowBackendIcon && (
+                    <RowBackendIcon
+                      className="h-4 w-4 shrink-0 text-muted-foreground"
+                      aria-label={getBackendPlainLabel(rowBackend)}
+                    />
+                  )}
                   <div className="min-w-0 flex-1">
                     <div className="truncate">{option.label}</div>
                     {option.value !== defaultModelOption?.value && (
@@ -741,7 +833,7 @@ export function BackendModelPickerContent({
                   </div>
                   <div
                     className="ml-2 grid shrink-0 grid-cols-[5.75rem_1.5rem_1rem] items-center gap-2"
-                    data-testid={`model-actions-${activeBackend}-${option.value}`}
+                    data-testid={`model-actions-${rowKey}`}
                   >
                     <div className="flex w-[5.75rem] justify-end">
                       {supportsFast && fastInfo.fastModel && (
@@ -766,15 +858,12 @@ export function BackendModelPickerContent({
                                   : fastInfo.fastModel
                                 if (!next) return
                                 setFastRemembered(
-                                  activeBackend,
+                                  rowBackend,
                                   fastInfo.baseModel,
-                                  !isSelectedFast
+                                  !isSelectedFast,
+                                  option.account
                                 )
-                                if (selectedBackend === activeBackend) {
-                                  onModelChange(next)
-                                } else {
-                                  onBackendModelChange(activeBackend, next)
-                                }
+                                applyModel(option, next)
                               }}
                               className={cn(
                                 'flex h-6 shrink-0 items-center gap-1 rounded-md border border-border/60 px-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground transition-colors',
@@ -818,7 +907,7 @@ export function BackendModelPickerContent({
                           onClick={event => {
                             event.preventDefault()
                             event.stopPropagation()
-                            handleToggleFavorite(activeBackend, option.value)
+                            handleToggleFavorite(option)
                           }}
                           className={cn(
                             'flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors',
@@ -860,21 +949,20 @@ export function BackendModelPickerContent({
 function SidebarBackends({
   orientation,
   backends,
-  activeBackend,
-  selectedBackend,
-  isLocked,
+  showFavorites,
+  activeTab,
   onSelect,
 }: {
   orientation: 'vertical' | 'horizontal'
   backends: CliBackend[]
-  activeBackend: CliBackend
-  selectedBackend: CliBackend
-  isLocked: boolean
-  onSelect: (backend: CliBackend) => void
+  showFavorites: boolean
+  activeTab: PickerTab
+  onSelect: (tab: PickerTab) => void
 }) {
   const isVertical = orientation === 'vertical'
   const modKey = getModifierSymbol()
   const showHints = isVertical && backends.length > 1
+  const isFavoritesActive = activeTab === FAVORITES_TAB
 
   return (
     <div
@@ -885,10 +973,39 @@ function SidebarBackends({
       role="tablist"
       aria-orientation={orientation}
     >
+      {showFavorites && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={isFavoritesActive}
+              aria-label="Favorites"
+              onClick={() => onSelect(FAVORITES_TAB)}
+              className={cn(
+                'flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors',
+                'hover:bg-background hover:text-foreground',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                isFavoritesActive &&
+                  'bg-background text-foreground shadow-sm ring-1 ring-border'
+              )}
+            >
+              <Star
+                className={cn(
+                  'h-4 w-4',
+                  isFavoritesActive && 'fill-warning text-warning'
+                )}
+              />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side={isVertical ? 'right' : 'bottom'}>
+            Favorites
+          </TooltipContent>
+        </Tooltip>
+      )}
       {backends.map((backend, index) => {
         const Icon = getBackendIcon(backend)
-        const isActive = backend === activeBackend
-        const isDisabled = isLocked && backend !== selectedBackend
+        const isActive = backend === activeTab
         const label = getBackendPlainLabel(backend)
         const showHint = showHints && index < 9
 
@@ -900,7 +1017,6 @@ function SidebarBackends({
                 role="tab"
                 aria-selected={isActive}
                 aria-label={label}
-                disabled={isDisabled}
                 onClick={() => onSelect(backend)}
                 className={cn(
                   'group relative flex w-9 shrink-0 flex-col items-center justify-center rounded-md text-muted-foreground transition-colors',
@@ -908,9 +1024,7 @@ function SidebarBackends({
                   'hover:bg-background hover:text-foreground',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                   isActive &&
-                    'bg-background text-foreground shadow-sm ring-1 ring-border',
-                  isDisabled &&
-                    'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground'
+                    'bg-background text-foreground shadow-sm ring-1 ring-border'
                 )}
               >
                 <Icon className="h-4 w-4" />
@@ -937,7 +1051,7 @@ function SidebarBackends({
               </button>
             </TooltipTrigger>
             <TooltipContent side={isVertical ? 'right' : 'bottom'}>
-              {isDisabled ? `${label} (locked)` : label}
+              {label}
             </TooltipContent>
           </Tooltip>
         )

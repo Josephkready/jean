@@ -336,6 +336,20 @@ export const ChatToolbar = memo(function ChatToolbar({
     [onProviderChange, onModelChange, selectedModel]
   )
 
+  // Account rows set the login and the model together. Account profiles use
+  // the real model catalog, so skip handleProviderChange's model rewrites.
+  const handleClaudeAccountSelect = useCallback(
+    (account: string | null, model: string) => {
+      onProviderChange(account)
+      if (selectedBackend === 'claude') {
+        onModelChange(model as ClaudeModel)
+      } else {
+        onBackendModelChange('claude', model)
+      }
+    },
+    [onBackendModelChange, onModelChange, onProviderChange, selectedBackend]
+  )
+
   const handleThinkingLevelChange = useCallback(
     (value: string) => {
       onThinkingLevelChange(value as ThinkingLevel)
@@ -608,6 +622,7 @@ export const ChatToolbar = memo(function ChatToolbar({
                 customCliProfiles={customCliProfiles}
                 onModelChange={handleModelChange}
                 onBackendModelChange={onBackendModelChange}
+                onClaudeAccountSelect={handleClaudeAccountSelect}
                 onAfterModelSelect={handleAfterMobileModelSelect}
               />
             )}
@@ -677,6 +692,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               onToggleMcpServer={onToggleMcpServer}
               handleModelChange={handleModelChange}
               handleBackendModelChange={onBackendModelChange}
+              handleClaudeAccountSelect={handleClaudeAccountSelect}
               handleProviderChange={handleProviderChange}
               handleThinkingLevelChange={handleThinkingLevelChange}
               handleEffortLevelChange={handleEffortLevelChange}

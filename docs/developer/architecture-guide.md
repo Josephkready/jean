@@ -235,8 +235,19 @@ Duplicate pairs are rejected while running. Job progress emits
 
 Claude and Codex sessions use the CLI's own config home (`~/.claude` and
 `~/.codex`). Jean does not store named subscription logins, does not switch
-`CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and does not auto-switch accounts.
-Multi-account pooling belongs in an external CLIProxy sidecar.
+`CODEX_HOME`, and does not auto-switch accounts. Multi-account pooling belongs
+in an external CLIProxy sidecar.
+
+Fork addition: a custom Claude CLI profile whose `env` sets
+`CLAUDE_CONFIG_DIR` is an **account profile** (an existing login, for example
+`~/.claude-accounts/<name>`). Jean sets that one variable on the Claude process
+on every platform, because the CLI picks its login before it applies
+`--settings`. The chat model picker then shows each Claude model once per
+account (`Default · Opus 5.5`, `<name> · Opus 5.5`) from the real model
+catalog, and one row sets the provider and the model together
+(`model-picker-rows.ts`). Favorites (`favorite_models`) are keyed
+`backend:model`, or `claude@<account>:model` for account rows, and show in a
+Favorites tab across all backends.
 
 Settings → Providers still holds API routing profiles: custom Claude CLI
 profiles (`custom_cli_profiles`), custom Codex model providers

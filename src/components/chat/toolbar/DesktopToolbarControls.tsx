@@ -147,6 +147,7 @@ interface DesktopToolbarControlsProps {
 
   handleModelChange: (value: string) => void
   handleBackendModelChange: (backend: CliBackend, model: string) => void
+  handleClaudeAccountSelect?: (account: string | null, model: string) => void
   handleProviderChange: (value: string) => void
   handleThinkingLevelChange: (value: string) => void
   handleEffortLevelChange: (value: string) => void
@@ -213,6 +214,7 @@ export function DesktopToolbarControls({
   onToggleMcpServer: _onToggleMcpServer,
   handleModelChange,
   handleBackendModelChange,
+  handleClaudeAccountSelect,
   handleProviderChange,
   handleThinkingLevelChange,
   handleEffortLevelChange,
@@ -857,6 +859,7 @@ export function DesktopToolbarControls({
           customCliProfiles={customCliProfiles}
           onModelChange={handleModelChange}
           onBackendModelChange={handleBackendModelChange}
+          onClaudeAccountSelect={handleClaudeAccountSelect}
         />
       )}
 
