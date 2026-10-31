@@ -912,9 +912,6 @@ export const ChatInput = memo(function ChatInput({
       for (const item of items) {
         const file = item.getAsFile()
         if (!file) continue
-        // Prevent the browser from inserting a fallback representation. Mixed
-        // text is handled explicitly below.
-        e.preventDefault()
         attachmentFiles.push(file)
       }
       // iOS can expose a file copied from the share sheet through `files`
@@ -928,10 +925,23 @@ export const ChatInput = memo(function ChatInput({
             attachmentFile.lastModified === file.lastModified
         )
         if (!isAlreadyExposedByItem) {
-          e.preventDefault()
           attachmentFiles.push(file)
         }
       }
+      // Dictation tools (e.g. Wispr Flow) and Office apps put text plus extra
+      // file-kind entries on the clipboard. When real text is present, only
+      // genuine images count as attachments; anything else must not hijack the
+      // paste or trigger an upload error (issue #34).
+      if (plainText.trim()) {
+        for (let i = attachmentFiles.length - 1; i >= 0; i--) {
+          if (!attachmentFiles[i]?.type.startsWith('image/')) {
+            attachmentFiles.splice(i, 1)
+          }
+        }
+      }
+      // Prevent the browser from inserting a fallback representation. Mixed
+      // text is handled explicitly below.
+      if (attachmentFiles.length > 0) e.preventDefault()
       const hasFiles = attachmentFiles.length > 0
       if (hasFiles) {
         await Promise.all(

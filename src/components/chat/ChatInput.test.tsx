@@ -729,6 +729,36 @@ describe('ChatInput attachments', () => {
     expect(textarea.value).toBe('caption text')
   })
 
+  it('pastes text normally when the clipboard also has non-image file entries (#34)', async () => {
+    const textarea = renderInput()
+    const stray = new File(['x'], 'blob.bin', {
+      type: 'application/octet-stream',
+    })
+
+    const notPrevented = fireEvent.paste(textarea, {
+      clipboardData: {
+        getData: (type: string) =>
+          type === 'text/plain'
+            ? 'hello from dictation'
+            : type === 'text/html'
+              ? '<span>hello from dictation</span>'
+              : '',
+        items: [
+          { type: 'text/plain', kind: 'string', getAsFile: () => null },
+          { type: 'text/html', kind: 'string', getAsFile: () => null },
+          { type: 'application/octet-stream', getAsFile: () => stray },
+        ],
+        files: [stray],
+      },
+    })
+
+    await new Promise(r => setTimeout(r, 20))
+    // fireEvent returns false when preventDefault was called
+    expect(notPrevented).toBe(true)
+    expect(processAttachmentFile).not.toHaveBeenCalled()
+    expect(invokeMock).not.toHaveBeenCalledWith('read_clipboard_image')
+  })
+
   it('uses clipboard files when iOS omits the image from clipboard items', async () => {
     const textarea = renderInput()
     const image = new File(['png'], 'image.png', { type: 'image/png' })
