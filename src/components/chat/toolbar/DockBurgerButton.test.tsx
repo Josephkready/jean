@@ -25,6 +25,7 @@ vi.mock('@/services/claude-cli', () => ({
     data: { authenticated: environment.claudeReady },
   }),
   useClaudeUsage: () => ({ data: environment.claudeUsage }),
+  useClaudeDefaultAccountLabel: () => ({ label: 'Anthropic' }),
 }))
 vi.mock('@/services/codex-cli', () => ({
   useCodexCliStatus: () => ({ data: { installed: false } }),

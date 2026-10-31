@@ -13,6 +13,7 @@ import { GrokIcon } from '@/components/icons/GrokIcon'
 import {
   claudeCliQueryKeys,
   useClaudeCliAuth,
+  useClaudeDefaultAccountLabel,
   useClaudeCliStatus,
   useClaudeUsage,
 } from '@/services/claude-cli'
@@ -276,6 +277,7 @@ export const UsagePane: React.FC = () => {
   const claudeAccounts = getClaudeAccountNames(
     preferences?.custom_cli_profiles ?? []
   )
+  const { label: defaultAccountLabel } = useClaudeDefaultAccountLabel()
   const claudeStatus = useClaudeCliStatus()
   const claudeAuth = useClaudeCliAuth({
     enabled: !!claudeStatus.data?.installed,
@@ -577,7 +579,9 @@ export const UsagePane: React.FC = () => {
 
       {showClaude ? (
         <UsageCard
-          title="Claude"
+          title={
+            claudeAccounts.length ? `Claude · ${defaultAccountLabel}` : 'Claude'
+          }
           subtitle={claudeUsage.data?.email}
           Icon={ClaudeIcon}
           plan={claudePlan}
