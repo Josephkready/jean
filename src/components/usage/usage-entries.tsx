@@ -7,6 +7,7 @@ import {
   claudeUsageQueryOptions,
   useClaudeCliAuth,
   useClaudeCliStatus,
+  useClaudeDefaultAccountLabel,
   useClaudeUsage,
 } from '@/services/claude-cli'
 import { usePreferences } from '@/services/preferences'
@@ -75,6 +76,7 @@ export function useUsageEntries(fetchEnabled: boolean): UsageEntry[] {
     preferences?.custom_cli_profiles ?? []
   )
   const claudeAccountsAvailable = !!claudeStatus.data?.installed
+  const { label: defaultAccountLabel } = useClaudeDefaultAccountLabel()
   const claudeAccountUsages = useQueries({
     queries: claudeAccounts.map(account =>
       claudeUsageQueryOptions({
@@ -108,7 +110,10 @@ export function useUsageEntries(fetchEnabled: boolean): UsageEntry[] {
     {
       id: 'claude',
       key: 'claude',
-      label: 'Claude',
+      // Name the default login once account cards sit beside it.
+      label: claudeAccounts.length
+        ? `Claude · ${defaultAccountLabel}`
+        : 'Claude',
       Icon: ClaudeIcon,
       plan: formatPlanName(
         claudeUsage.data?.planType,

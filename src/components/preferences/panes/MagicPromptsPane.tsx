@@ -31,6 +31,7 @@ import {
   CommandList,
 } from '@/components/ui/command'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import { useServerCapabilities } from '@/services/server-capabilities'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
@@ -827,6 +828,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     preferences?.magic_prompt_efforts ?? DEFAULT_MAGIC_PROMPT_EFFORTS
   const currentModes =
     preferences?.magic_prompt_modes ?? DEFAULT_MAGIC_PROMPT_MODES
+  const { label: defaultAccountLabel } = useClaudeDefaultAccountLabel()
   const profiles = useMemo(
     () => preferences?.custom_cli_profiles ?? [],
     [preferences?.custom_cli_profiles]
@@ -1343,17 +1345,21 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
         : undefined
       const reviewConfigs =
         selectedKey === 'code_review'
-          ? codeReviewConfigs.map(config => ({
-              ...config,
-              reasoning_effort:
-                getMagicPromptModelReasoning(
-                  modelCatalog,
-                  config.backend as CliBackend,
-                  config.model,
-                  config.backend === 'claude' ? selectedProvider : null,
-                  profiles
-                )?.default ?? null,
-            }))
+          ? codeReviewConfigs.map(config =>
+              config.backend !== 'claude'
+                ? config
+                : {
+                    ...config,
+                    reasoning_effort:
+                      getMagicPromptModelReasoning(
+                        modelCatalog,
+                        config.backend as CliBackend,
+                        config.model,
+                        selectedProvider,
+                        profiles
+                      )?.default ?? null,
+                  }
+            )
           : undefined
       patchPreferences.mutate({
         magic_prompt_providers: {
@@ -2075,7 +2081,9 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="anthropic">Anthropic</SelectItem>
+                    <SelectItem value="anthropic">
+                      {defaultAccountLabel}
+                    </SelectItem>
                     {profiles.map(p => (
                       <SelectItem key={p.name} value={p.name}>
                         {p.name}

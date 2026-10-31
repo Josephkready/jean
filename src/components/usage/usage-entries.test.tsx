@@ -9,12 +9,14 @@ const mocks = vi.hoisted(() => ({
   claudeUsage: { data: undefined as unknown },
   preferences: { data: { custom_cli_profiles: [] as unknown[] } },
   accountQueries: [] as unknown[],
+  defaultLabel: 'j60218',
 }))
 
 vi.mock('@/services/claude-cli', () => ({
   claudeUsageQueryOptions: vi.fn((opts: unknown) => opts),
   useClaudeCliAuth: () => mocks.claudeAuth,
   useClaudeCliStatus: () => mocks.claudeStatus,
+  useClaudeDefaultAccountLabel: () => ({ label: mocks.defaultLabel }),
   useClaudeUsage: () => mocks.claudeUsage,
 }))
 
@@ -79,6 +81,20 @@ describe('useUsageEntries account rows', () => {
     expect(keys).not.toContain('claude:minimax')
     const entry = result.current.find(e => e.key === 'claude:josephkready')
     expect(entry?.label).toBe('Claude · josephkready')
+  })
+
+  it('labels the default login by its account once account cards exist (#30)', () => {
+    mocks.claudeAuth = { data: { authenticated: true } }
+    const { result } = renderHook(() => useUsageEntries(true))
+    expect(result.current.find(e => e.key === 'claude')?.label).toBe(
+      'Claude · j60218'
+    )
+    mocks.defaultLabel = 'Anthropic'
+    const fallback = renderHook(() => useUsageEntries(true))
+    expect(fallback.result.current.find(e => e.key === 'claude')?.label).toBe(
+      'Claude · Anthropic'
+    )
+    mocks.defaultLabel = 'j60218'
   })
 
   it('keeps account entries available when the default login is unauthenticated', () => {

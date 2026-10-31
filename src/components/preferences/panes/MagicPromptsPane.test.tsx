@@ -1,3 +1,4 @@
+import type * as ClaudeCli from '@/services/claude-cli'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@/test/test-utils'
@@ -8,6 +9,7 @@ const mutateMock = vi.fn()
 let installedBackendsMock = ['claude', 'codex']
 let codexCatalogOptionsMock = [{ value: 'gpt-6-astra', label: 'GPT 6 Astra' }]
 let preferencesMock = { ...defaultPreferences }
+let defaultAccountLabelMock = 'Anthropic'
 let availableGrokModelsMock:
   | { id: string; label: string; isDefault: boolean }[]
   | undefined
@@ -15,6 +17,15 @@ let availableAntigravityModelsMock:
   | { id: string; label: string; isDefault?: boolean }[]
   | undefined
 let availableMuseModelsMock: { id: string; label: string }[] | undefined
+
+vi.mock('@/services/claude-cli', async importOriginal => ({
+  ...(await importOriginal<typeof ClaudeCli>()),
+  useClaudeDefaultAccountLabel: () => ({
+    label: defaultAccountLabelMock,
+    rowLabel: defaultAccountLabelMock,
+    email: null,
+  }),
+}))
 
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
@@ -154,6 +165,7 @@ beforeEach(() => {
   installedBackendsMock = ['claude', 'codex']
   codexCatalogOptionsMock = [{ value: 'gpt-6-astra', label: 'GPT 6 Astra' }]
   preferencesMock = { ...defaultPreferences }
+  defaultAccountLabelMock = 'Anthropic'
   availableGrokModelsMock = undefined
   availableAntigravityModelsMock = undefined
   availableMuseModelsMock = undefined
@@ -876,6 +888,21 @@ describe('MagicPromptsPane', () => {
     )
   })
 
+  it('labels the default provider with the default Claude account (#30)', async () => {
+    defaultAccountLabelMock = 'j60218'
+    preferencesMock = {
+      ...defaultPreferences,
+      custom_cli_profiles: [{ name: 'Custom Provider', settings_json: '{}' }],
+    }
+    const user = userEvent.setup()
+    render(<MagicPromptsPane />)
+
+    await user.click(screen.getByRole('button', { name: 'Code Review' }))
+    const provider = screen.getByRole('combobox', { name: 'Provider' })
+    expect(provider).toHaveTextContent('j60218')
+    expect(provider).not.toHaveTextContent('Anthropic')
+  })
+
   it('applies the selected provider capability only to Claude review rows', async () => {
     preferencesMock = {
       ...defaultPreferences,
@@ -894,7 +921,7 @@ describe('MagicPromptsPane', () => {
         {
           backend: 'codex',
           model: 'gpt-5.6-sol',
-          reasoning_effort: 'low',
+          reasoning_effort: 'high',
         },
         {
           backend: 'claude',
@@ -913,7 +940,7 @@ describe('MagicPromptsPane', () => {
     expect(mutateMock).toHaveBeenCalledWith(
       expect.objectContaining({
         magic_code_review_configs: [
-          expect.objectContaining({ reasoning_effort: 'low' }),
+          expect.objectContaining({ reasoning_effort: 'high' }),
           expect.objectContaining({ reasoning_effort: 'high' }),
         ],
       })

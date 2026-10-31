@@ -14,12 +14,14 @@ const mocks = vi.hoisted(() => ({
   useGrokCliAuth: vi.fn(),
   useGrokUsage: vi.fn(),
   usePreferences: vi.fn(),
+  defaultLabel: 'j60218',
 }))
 
 vi.mock('@/services/claude-cli', () => ({
   claudeCliQueryKeys: { usage: () => ['claude-cli', 'usage'] },
   useClaudeCliStatus: () => mocks.useClaudeCliStatus(),
   useClaudeCliAuth: () => mocks.useClaudeCliAuth(),
+  useClaudeDefaultAccountLabel: () => ({ label: mocks.defaultLabel }),
   useClaudeUsage: (options?: { account?: string }) =>
     mocks.useClaudeUsage(options),
 }))
@@ -333,6 +335,10 @@ describe('UsagePane', () => {
     expect(
       document.getElementById('pref-usage-section-claude')
     ).toHaveTextContent('me@example.com')
+    // The default login is named by its account, not just "Claude" (#30).
+    expect(
+      document.getElementById('pref-usage-section-claude')
+    ).toHaveTextContent('Claude · j60218')
     // API routing profiles are not accounts.
     expect(screen.queryByText(/Claude · OpenRouter/)).not.toBeInTheDocument()
   })
