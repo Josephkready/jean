@@ -110,9 +110,27 @@ export async function disablePush(
 ): Promise<void> {
   // Persist opt-out before removing the local capability. Retrying is safe.
   await invoke('unsubscribe_web_push', { endpoint: subscription.endpoint })
-  if (!(await subscription.unsubscribe())) {
+  let removed = false
+  try {
+    removed = await subscription.unsubscribe()
+  } catch {
+    removed = false
+  }
+  if (!removed) {
+    // Compensate: the browser still holds a live subscription, so restore the
+    // server registration to keep server and browser state consistent.
+    try {
+      await invoke('subscribe_web_push', {
+        subscription: subscription.toJSON(),
+      })
+    } catch (restoreError) {
+      console.warn(
+        'Browser push opt-out could not restore server registration',
+        restoreError
+      )
+    }
     throw new Error(
-      'Notifications are off on the server, but this browser kept its local subscription. Try again to finish disabling.'
+      'Notifications are still on for this device because this browser kept its subscription. Try again to disable.'
     )
   }
 }

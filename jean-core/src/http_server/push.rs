@@ -253,6 +253,15 @@ where
         .await;
 }
 
+fn dedup_key(notification: &Value, payload: &Value) -> String {
+    format!(
+        "{}:{}:{}",
+        notification["tag"],
+        notification["title"],
+        payload.get("run_id").unwrap_or(&Value::Null)
+    )
+}
+
 fn is_duplicate(recent: &Mutex<HashMap<String, Instant>>, key: String, now: Instant) -> bool {
     let mut recent = recent.lock().unwrap_or_else(|error| {
         log::error!("Web Push dedup lock poisoned: {error}");
@@ -264,6 +273,10 @@ fn is_duplicate(recent: &Mutex<HashMap<String, Instant>>, key: String, now: Inst
     }
     recent.insert(key, now);
     false
+}
+
+fn try_admit_event(permits: &tokio::sync::Semaphore) -> Option<tokio::sync::SemaphorePermit<'_>> {
+    permits.try_acquire().ok()
 }
 
 pub fn initialize(app: &AppHandle) -> Result<(), String> {
@@ -282,7 +295,6 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
         "chat:codex_mcp_elicitation_request",
         "chat:codex_dynamic_tool_call_request",
     ] {
-        let app = app.clone();
         let context = app.clone();
         app.listen(name, move |event| {
             let Some(state) = context.try_state::<PushState>() else {
@@ -305,12 +317,7 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
                 return;
             };
             // Some backends emit the terminal marker twice. Bound this dedup window.
-            let key = format!(
-                "{}:{}:{}",
-                notification["tag"],
-                notification["title"],
-                payload.get("run_id").unwrap_or(&Value::Null)
-            );
+            let key = dedup_key(&notification, &payload);
             if is_duplicate(&state.recent, key, Instant::now()) {
                 log::debug!("Suppressed duplicate Web Push event: {name}");
                 return;
@@ -323,7 +330,7 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
                 }
             };
             // Bound event jobs before spawning, including jobs waiting for send slots.
-            let Ok(event_permit) = PUSH_EVENT_PERMITS.try_acquire() else {
+            let Some(event_permit) = try_admit_event(&PUSH_EVENT_PERMITS) else {
                 log::warn!("Web Push event capacity reached; dropping notification event");
                 return;
             };
@@ -413,6 +420,7 @@ pub async fn dispatch(app: AppHandle, command: &str, args: Value) -> Result<Valu
                 .find(|s| s.endpoint == endpoint)
                 .cloned()
                 .ok_or("This device is not subscribed")?;
+            let _permit = PUSH_PERMITS.acquire().await.map_err(|e| e.to_string())?;
             let live = state.send(&subscription, &json!({"title":"Jean notifications enabled", "body":"This device can receive Jean notifications.", "tag":"jean-test", "url":"/"})).await?;
             if !live {
                 if let Err(error) = state.remove(endpoint) {
@@ -512,6 +520,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn event_admission_rejects_ninth_and_releases_on_drop() {
+        let permits = tokio::sync::Semaphore::new(8);
+        let held: Vec<_> = (0..8)
+            .map(|_| try_admit_event(&permits).expect("slot available"))
+            .collect();
+        assert!(try_admit_event(&permits).is_none());
+        drop(held);
+        assert!(try_admit_event(&permits).is_some());
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_replaces_stale_world_readable_temporary_file() {
@@ -591,6 +610,18 @@ mod tests {
         std::fs::write(&path, b"broken").unwrap();
         assert!(PushState::load(path.clone()).is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"broken");
+    }
+
+    #[test]
+    fn dedup_key_separates_runs_and_is_stable_without_run_id() {
+        let notification = json!({"tag": "jean-s1", "title": "Session finished"});
+        let run_a = dedup_key(&notification, &json!({"run_id": "a"}));
+        let run_b = dedup_key(&notification, &json!({"run_id": "b"}));
+        assert_ne!(run_a, run_b);
+        assert_eq!(run_a, dedup_key(&notification, &json!({"run_id": "a"})));
+        let missing = dedup_key(&notification, &json!({"session_id": "s1"}));
+        assert_eq!(missing, dedup_key(&notification, &json!({})));
+        assert_ne!(missing, run_a);
     }
 
     #[test]
