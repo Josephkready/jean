@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
@@ -125,6 +126,9 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
   const [tauriVersion, setTauriVersion] = useState<string | null>(null)
   const descriptionRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Synchronous mirrors of state so async handlers see the latest values.
+  const latestDescriptionRef = useRef(description)
+  const inFlightRef = useRef(false)
   const screenshotsRef = useRef(screenshots)
   screenshotsRef.current = screenshots
 
@@ -160,13 +164,25 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
     []
   )
 
-  // Captured on each render so the details list is current; submit uses the
-  // same function, so the report shows where the user is at submit time.
-  const collectContext = () => {
-    const chat = useChatStore.getState()
-    const sessionId = activeWorktreeId
-      ? chat.activeSessionIds[activeWorktreeId]
-      : undefined
+  const sessionId = useChatStore(state =>
+    activeWorktreeId ? state.activeSessionIds[activeWorktreeId] : undefined
+  )
+  const sessionBackend = useChatStore(state =>
+    sessionId ? state.selectedBackends[sessionId] : undefined
+  )
+  const sessionModel = useChatStore(state =>
+    sessionId ? state.selectedModels[sessionId] : undefined
+  )
+  const sessionExecutionMode = useChatStore(state =>
+    sessionId ? state.executionModes[sessionId] : undefined
+  )
+
+  const buildContext = (session: {
+    sessionId?: string
+    backend?: string
+    model?: string
+    executionMode?: string
+  }) => {
     const projectId = worktree?.project_id ?? selectedProjectId
     const project = projects?.find(p => p.id === projectId)
     return buildBugReportContext({
@@ -175,10 +191,7 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
       projectPath: project?.path,
       worktreeName: worktree?.name,
       worktreeBranch: worktree?.branch,
-      sessionId,
-      backend: sessionId ? chat.selectedBackends[sessionId] : undefined,
-      model: sessionId ? chat.selectedModels[sessionId] : undefined,
-      executionMode: sessionId ? chat.executionModes[sessionId] : undefined,
+      ...session,
       runtime: isNativeApp() ? 'native' : isMobile ? 'web-mobile' : 'web',
       ...deviceSnapshot,
       theme,
@@ -189,7 +202,46 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
       cliVersions,
     })
   }
-  const details = collectContext()
+
+  // Submit re-reads the stores so the report shows where the user is at submit time.
+  const collectContext = () => {
+    const chat = useChatStore.getState()
+    const sid = activeWorktreeId
+      ? chat.activeSessionIds[activeWorktreeId]
+      : undefined
+    return buildContext({
+      sessionId: sid,
+      backend: sid ? chat.selectedBackends[sid] : undefined,
+      model: sid ? chat.selectedModels[sid] : undefined,
+      executionMode: sid ? chat.executionModes[sid] : undefined,
+    })
+  }
+  // Memoized so typing in the description doesn't rebuild the details list.
+  const details = useMemo(
+    () =>
+      buildContext({
+        sessionId,
+        backend: sessionBackend,
+        model: sessionModel,
+        executionMode: sessionExecutionMode,
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- buildContext closes over exactly the listed inputs
+    [
+      activeWorktreeId,
+      worktree,
+      projects,
+      selectedProjectId,
+      theme,
+      isMobile,
+      tauriVersion,
+      deviceSnapshot,
+      cliVersions,
+      sessionId,
+      sessionBackend,
+      sessionModel,
+      sessionExecutionMode,
+    ]
+  )
 
   const trimmedLength = description.trim().length
   const canSubmit =
@@ -198,6 +250,7 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
     trimmedLength <= BUG_REPORT_MAX_LENGTH
 
   const handleChange = (value: string) => {
+    latestDescriptionRef.current = value
     setDescription(value)
     writeDraft(value)
   }
@@ -253,7 +306,10 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
   }
 
   const handleSubmit = async (mode: SubmitMode) => {
-    if (!canSubmit) return
+    if (!canSubmit || inFlightRef.current) return
+    inFlightRef.current = true
+    const submittedDraft = description
+    const submittedIds = new Set(screenshots.map(s => s.id))
     setSubmitting(mode)
     setError(null)
     try {
@@ -270,9 +326,17 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
         attachments,
       })
       // The report is now saved on the server, so the draft can go.
-      writeDraft('')
-      setDescription('')
-      setScreenshots([])
+      if (latestDescriptionRef.current === submittedDraft) {
+        writeDraft('')
+        setDescription('')
+        latestDescriptionRef.current = ''
+      }
+      setScreenshots(current => {
+        for (const shot of current) {
+          if (submittedIds.has(shot.id)) URL.revokeObjectURL(shot.previewUrl)
+        }
+        return current.filter(s => !submittedIds.has(s.id))
+      })
       setAttachError(null)
       toast.success('Bug report saved', {
         description:
@@ -289,6 +353,7 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
+      inFlightRef.current = false
       setSubmitting(null)
     }
   }

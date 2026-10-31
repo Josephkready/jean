@@ -2,10 +2,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { BugReportDialog } from './BugReportDialog'
 import type * as BugReportService from '@/services/bug-report'
+import { bugReportStatusMessage } from '@/services/bug-report'
 import type * as EnvironmentModule from '@/lib/environment'
 import { useUIStore } from '@/store/ui-store'
 
-const { submitBugReport } = vi.hoisted(() => ({ submitBugReport: vi.fn() }))
+const { submitBugReport, toastSuccess } = vi.hoisted(() => ({
+  submitBugReport: vi.fn(),
+  toastSuccess: vi.fn(),
+}))
+
+vi.mock('sonner', () => ({
+  toast: {
+    success: (...args: unknown[]) => toastSuccess(...args),
+    error: vi.fn(),
+    message: vi.fn(),
+  },
+}))
 
 vi.mock('@/services/bug-report', async importOriginal => ({
   ...(await importOriginal<typeof BugReportService>()),
@@ -43,6 +55,7 @@ describe('BugReportDialog send buttons (#12)', () => {
     render(<BugReportDialog />)
     const textarea = await typeReport()
 
+    ;(document.activeElement as HTMLElement | null)?.blur()
     fireEvent.click(screen.getByTestId('bug-report-send'))
 
     await waitFor(() => expect(submitBugReport).toHaveBeenCalledTimes(1))
@@ -51,6 +64,10 @@ describe('BugReportDialog send buttons (#12)', () => {
     expect(useUIStore.getState().bugReportOpen).toBe(true)
     expect(document.activeElement).toBe(textarea)
     expect(localStorage.getItem('jean:bug-report-draft')).toBeNull()
+    expect(toastSuccess).toHaveBeenCalledWith(
+      'Bug report saved',
+      expect.objectContaining({ description: expect.any(String) })
+    )
   })
 
   it('Send & done submits and closes the modal', async () => {
@@ -61,6 +78,57 @@ describe('BugReportDialog send buttons (#12)', () => {
 
     await waitFor(() => expect(submitBugReport).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(useUIStore.getState().bugReportOpen).toBe(false))
+  })
+
+  it('Cmd/Ctrl+Enter sends and closes the modal', async () => {
+    render(<BugReportDialog />)
+    await typeReport()
+
+    fireEvent.keyDown(screen.getByTestId('bug-report-description'), {
+      key: 'Enter',
+      ctrlKey: true,
+    })
+
+    await waitFor(() => expect(submitBugReport).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(useUIStore.getState().bugReportOpen).toBe(false))
+  })
+
+  it('Meta+Enter sends and closes the modal', async () => {
+    render(<BugReportDialog />)
+    await typeReport()
+
+    fireEvent.keyDown(screen.getByTestId('bug-report-description'), {
+      key: 'Enter',
+      metaKey: true,
+    })
+
+    await waitFor(() => expect(submitBugReport).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(useUIStore.getState().bugReportOpen).toBe(false))
+  })
+
+  it('Cmd/Ctrl+Shift+Enter sends, stays open and clears the textarea', async () => {
+    render(<BugReportDialog />)
+    const textarea = await typeReport()
+
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, shiftKey: true })
+
+    await waitFor(() => expect(submitBugReport).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(textarea.value).toBe(''))
+    expect(useUIStore.getState().bugReportOpen).toBe(true)
+  })
+
+  it('shows the filed message when the server reports the report as filed', async () => {
+    submitBugReport.mockResolvedValue({ id: 'r2', status: 'filed' })
+    render(<BugReportDialog />)
+    await typeReport()
+
+    fireEvent.click(screen.getByTestId('bug-report-send'))
+
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith('Bug report saved', {
+        description: bugReportStatusMessage('filed'),
+      })
+    )
   })
 
   it('keeps the draft and stays open when saving fails', async () => {

@@ -620,6 +620,15 @@ export function useMessageSending({
         }
       }
 
+      if (options?.beforeSend) {
+        try {
+          await options.beforeSend()
+        } catch {
+          useChatStore.getState().setInputDraft(activeSessionId, textMessage)
+          return
+        }
+      }
+
       if (
         images.length > 0 ||
         files.length > 0 ||
@@ -680,15 +689,6 @@ export function useMessageSending({
         ),
         backend: selectedBackend,
         queuedAt: Date.now(),
-      }
-
-      if (options?.beforeSend) {
-        try {
-          await options.beforeSend()
-        } catch {
-          useChatStore.getState().setInputDraft(activeSessionId, textMessage)
-          return
-        }
       }
 
       markAtBottom()
