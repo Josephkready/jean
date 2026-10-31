@@ -254,8 +254,11 @@ If you add the same repository to both services, both can change its files.
 | `--allow-unsafe-no-token` | `JEAN_ALLOW_UNSAFE_NO_TOKEN=1` | off                                    |
 | `--allow-native-open`     | `JEAN_ALLOW_NATIVE_OPEN=1`     | off (auto-on under WSL)                |
 | n/a                       | `JEAN_ALLOWED_ORIGINS`         | same-origin only                       |
+| n/a                       | `JEAN_DISABLE_UPDATE_CHECK=1`  | off (update check enabled)             |
 
 By default a token is required (using `--token`, `JEAN_TOKEN`, or an auto-generated one); pass `--no-token` to disable it. `--token` and `--no-token` are mutually exclusive. Jean rejects `--no-token` with `--host 0.0.0.0` or `--host ::` unless `--allow-unsafe-no-token` is also set.
+
+`JEAN_DISABLE_UPDATE_CHECK=1` makes `check_server_update` return "no update" without contacting GitHub, so Web Access clients never see the "jean-server X is available" toast or title-bar badge. Use it on forks that deploy their own build (upstream releases do not apply).
 
 ### Native open actions (editor / file manager / terminal)
 

@@ -98,6 +98,9 @@ struct DesktopUpdateManifest {
 /// native app, including macOS/Windows) use desktop `latest.json` so web
 /// clients can show the same update badge/modal as the native shell.
 pub async fn check_server_update(_app: &AppHandle) -> Result<ServerUpdateStatus, String> {
+    if update_check_disabled() {
+        return Ok(disabled_status());
+    }
     if is_headless_host() {
         check_headless_server_update().await
     } else {
@@ -284,6 +287,38 @@ async fn apply_desktop_host_update(app: AppHandle) -> Result<ServerUpdateApplyRe
         ),
         restart_scheduled: false,
     })
+}
+
+/// True when `JEAN_DISABLE_UPDATE_CHECK` is set to a truthy value (`1`/`true`/`yes`).
+///
+/// Forks that deploy their own build (so upstream releases are irrelevant and
+/// "Update & restart" would be wrong) set this to skip the GitHub manifest
+/// fetch entirely; clients then never see a host-update offer.
+fn update_check_disabled() -> bool {
+    match std::env::var("JEAN_DISABLE_UPDATE_CHECK") {
+        Ok(value) => {
+            let v = value.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
+/// "No update" status returned without any network access when checks are disabled.
+fn disabled_status() -> ServerUpdateStatus {
+    ServerUpdateStatus {
+        update_available: false,
+        current_version: crate::app_version().to_string(),
+        latest_version: None,
+        notes: None,
+        can_update: false,
+        reason: Some("Update checks disabled by JEAN_DISABLE_UPDATE_CHECK".to_string()),
+        channel: if is_headless_host() {
+            HostUpdateChannel::Server
+        } else {
+            HostUpdateChannel::Desktop
+        },
+    }
 }
 
 /// True when running the headless `jean-server` binary (`JEAN_HEADLESS=1`).
@@ -790,6 +825,38 @@ mod tests {
         }"#;
         let status: ServerUpdateStatus = serde_json::from_str(json).unwrap();
         assert_eq!(status.channel, HostUpdateChannel::Server);
+    }
+
+    #[test]
+    fn disable_env_skips_update_check_without_network() {
+        // Regression for Josephkready/jean#32: fork deployments must not be
+        // offered upstream coollabsio/jean releases.
+        let before = std::env::var("JEAN_DISABLE_UPDATE_CHECK").ok();
+        // SAFETY: test-only temporary env mutation.
+        unsafe {
+            std::env::remove_var("JEAN_DISABLE_UPDATE_CHECK");
+        }
+        assert!(!update_check_disabled());
+        for v in ["1", "true", "YES"] {
+            unsafe {
+                std::env::set_var("JEAN_DISABLE_UPDATE_CHECK", v);
+            }
+            assert!(update_check_disabled(), "{v}");
+        }
+        unsafe {
+            std::env::set_var("JEAN_DISABLE_UPDATE_CHECK", "0");
+        }
+        assert!(!update_check_disabled());
+        let status = disabled_status();
+        assert!(!status.update_available);
+        assert!(!status.can_update);
+        assert!(status.latest_version.is_none());
+        unsafe {
+            match before {
+                Some(value) => std::env::set_var("JEAN_DISABLE_UPDATE_CHECK", value),
+                None => std::env::remove_var("JEAN_DISABLE_UPDATE_CHECK"),
+            }
+        }
     }
 
     #[test]
