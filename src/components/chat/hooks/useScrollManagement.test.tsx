@@ -140,9 +140,15 @@ function setupHook({
               data-open-scroll-anchor
               data-testid="anchor"
               ref={el => {
+                // Like a real layout: the anchor moves up as the viewport scrolls.
                 if (el)
                   el.getBoundingClientRect = () =>
-                    ({ top: anchorOffset }) as DOMRect
+                    ({
+                      top:
+                        anchorOffset -
+                        (el.closest<HTMLElement>('[data-testid="viewport"]')
+                          ?.scrollTop ?? 0),
+                    }) as DOMRect
               }}
             />
           )}
@@ -781,6 +787,42 @@ describe('useScrollManagement session scroll retention (issue #594)', () => {
 
       expect(viewport.scrollTop).toBe(2000)
       expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+    })
+
+    // Real-browser regression: the answer was not laid out yet (markdown still
+    // rendering) when the chat opened, so the first apply fell back to the tail
+    // and the size observer then re-pinned to the bottom.
+    it('re-applies the anchor when the answer lays out after open', async () => {
+      const { viewport, getByTestId, setScrollHeight } = setupHook({
+        isSending: false,
+        activeSessionId: 'open-e',
+        messages: makeMessages(3),
+        scrollHeight: 400,
+        anchorOffset: 308,
+      })
+      expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+
+      setScrollHeight(2000)
+      await triggerResize()
+
+      expect(viewport.scrollTop).toBe(300)
+      expect(getByTestId('is-at-bottom')).toHaveTextContent('false')
+    })
+
+    it('does not yank the view back to the anchor after the user scrolls', async () => {
+      const { viewport, setScrollHeight } = setupHook({
+        isSending: false,
+        activeSessionId: 'open-f',
+        messages: makeMessages(3),
+        scrollHeight: 400,
+        anchorOffset: 308,
+      })
+
+      fireEvent.wheel(viewport, { deltaY: 100 })
+      setScrollHeight(2000)
+      await triggerResize()
+
+      expect(viewport.scrollTop).not.toBe(300)
     })
 
     it('prefers a saved non-tail position over the latest answer', () => {

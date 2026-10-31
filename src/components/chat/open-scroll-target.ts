@@ -20,7 +20,7 @@ export function findOpenScrollAnchor(root: ParentNode): HTMLElement | null {
   )
   const answer = anchors.item(anchors.length - 1)
   if (!answer) return null
-  const headings = answer.querySelectorAll<HTMLElement>('h1, h2, h3')
+  const headings = answer.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6')
   for (const heading of Array.from(headings).reverse()) {
     if (RECAP_HEADING_TEXT_RE.test(heading.textContent?.trim() ?? '')) {
       return heading

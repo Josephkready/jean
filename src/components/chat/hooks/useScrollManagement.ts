@@ -64,6 +64,8 @@ interface UseScrollManagementReturn {
 }
 
 const SCROLL_EPSILON_PX = 2
+/** How long after opening a chat the size observer may re-apply the recap anchor. */
+const OPEN_SETTLE_MS = 3000
 /** Cap deferred non-tail restores so an unreachable scrollTop cannot latch forever. */
 const MAX_PENDING_RESTORE_ATTEMPTS = 20
 /** Re-check a still-pending restore when ResizeObserver goes quiet (history trim, etc.). */
@@ -127,6 +129,11 @@ export function useScrollManagement({
   useLayoutEffect(() => {
     isSendingRef.current = !!isSending
   }, [isSending])
+  // Open-at-recap settle window (issue #26): content can still be laying out
+  // right after open, so the size observer re-applies the anchor until it ends
+  // or the user scrolls.
+  const openSettleUntilRef = useRef(0)
+  const openUserMovedRef = useRef(false)
   const scrollViewportRef = useRef<HTMLDivElement>(null)
 
   // State for tracking if user is at the bottom of scroll area
@@ -354,6 +361,23 @@ export function useScrollManagement({
     return () => viewport.removeEventListener('wheel', handleWheel)
   }, [stopFollowingTail])
 
+  // Any real user input ends the open-at-recap settle window (issue #26).
+  useEffect(() => {
+    const viewport = scrollViewportRef.current
+    if (!viewport) return
+    const markMoved = () => {
+      openUserMovedRef.current = true
+    }
+    viewport.addEventListener('wheel', markMoved, { passive: true })
+    viewport.addEventListener('touchstart', markMoved, { passive: true })
+    viewport.addEventListener('keydown', markMoved)
+    return () => {
+      viewport.removeEventListener('wheel', markMoved)
+      viewport.removeEventListener('touchstart', markMoved)
+      viewport.removeEventListener('keydown', markMoved)
+    }
+  }, [])
+
   // Touch scrolling does not emit wheel events. Disable follow mode when the
   // gesture moves content upward (finger moves down), and resume only when the
   // actual scroll position reaches bottom.
@@ -397,6 +421,32 @@ export function useScrollManagement({
     }
   }, [stopFollowingTail])
 
+  // Issue #26: scroll to the latest answer/recap top. Returns true when the
+  // viewport now sits above the bottom on that anchor.
+  const tryApplyOpenAnchor = useCallback(
+    (viewport: HTMLDivElement, sessionId: string | null | undefined) => {
+      const top = scrollToLatestAnswerTop(viewport)
+      if (top == null || isViewportAtBottom(viewport)) return false
+      isFollowingTailRef.current = false
+      isAtBottomRef.current = false
+      userScrollUpUntilRef.current = Date.now() + 1000
+      setIsAtBottom(false)
+      lastScrollTopRef.current = top
+      if (sessionId) {
+        lastKnownScrollRef.current = {
+          sessionId,
+          scrollTop: top,
+          isFollowingTail: false,
+        }
+      }
+      pendingRestoreRef.current = false
+      pendingRestoreAttemptsRef.current = 0
+      clearPendingRestoreRetry()
+      return true
+    },
+    [clearPendingRestoreRetry]
+  )
+
   // Apply a saved scroll snapshot (or default to bottom) for the given session.
   // Defined before size-sync / session effects so those closures can capture it
   // directly (no render-time ref smuggling — issue #594 review).
@@ -410,26 +460,12 @@ export function useScrollManagement({
       if (!saved || saved.isFollowingTail) {
         // Issue #26: when opening a finished chat, land on the top of the
         // latest finished answer instead of the bottom. Never while streaming.
+        // The answer may not be laid out yet (markdown still rendering), so
+        // keep a short settle window in which the size observer retries.
         if (!isSendingRef.current) {
-          const top = scrollToLatestAnswerTop(viewport)
-          if (top != null && !isViewportAtBottom(viewport)) {
-            isFollowingTailRef.current = false
-            isAtBottomRef.current = false
-            userScrollUpUntilRef.current = Date.now() + 1000
-            setIsAtBottom(false)
-            lastScrollTopRef.current = top
-            if (sessionId) {
-              lastKnownScrollRef.current = {
-                sessionId,
-                scrollTop: top,
-                isFollowingTail: false,
-              }
-            }
-            pendingRestoreRef.current = false
-            pendingRestoreAttemptsRef.current = 0
-            clearPendingRestoreRetry()
-            return
-          }
+          openSettleUntilRef.current = Date.now() + OPEN_SETTLE_MS
+          openUserMovedRef.current = false
+          if (tryApplyOpenAnchor(viewport, sessionId)) return
         }
         isFollowingTailRef.current = true
         isAtBottomRef.current = true
@@ -503,7 +539,7 @@ export function useScrollManagement({
         }
       }
     },
-    [clearPendingRestoreRetry]
+    [clearPendingRestoreRetry, tryApplyOpenAnchor]
   )
 
   // Keep scroll state honest when content/viewport size changes. If the chat no
@@ -532,6 +568,17 @@ export function useScrollManagement({
       isFollowingTailRef.current = true
       isAtBottomRef.current = true
       setIsAtBottom(prev => (prev ? prev : true))
+    }
+
+    if (
+      contentReady &&
+      activeSessionId &&
+      !isSending &&
+      !openUserMovedRef.current &&
+      Date.now() < openSettleUntilRef.current &&
+      tryApplyOpenAnchor(viewport, activeSessionId)
+    ) {
+      return
     }
 
     if (pendingRestoreRef.current && contentReady && activeSessionId) {
