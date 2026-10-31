@@ -5414,6 +5414,10 @@ pub fn initialize_runtime(context: &RuntimeContext) -> Result<(), String> {
         }
     }
 
+    if let Err(error) = http_server::push::initialize(context) {
+        log::warn!("Web Push is unavailable: {error}");
+    }
+
     let (broadcaster, _) = http_server::WsBroadcaster::new();
     context.manage(broadcaster);
     context.manage(std::sync::Arc::new(tokio::sync::Mutex::new(

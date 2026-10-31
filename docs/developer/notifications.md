@@ -177,3 +177,24 @@ Use the built-in test commands to verify both toast and native notifications are
 1. Open command palette (Cmd+K)
 2. Search for "notification" or "toast"
 3. Run test commands to verify functionality
+
+## Browser and iOS Web Push
+
+Web Access has a separate, per-device opt-in in **Settings → General → Notifications → Push notifications**. Enable it on each device, use **Send test** to check delivery, and use **Disable notifications** to remove that device. Desktop native notification preferences do not control browser subscriptions.
+
+On iOS/iPadOS 16.4 or later, open Jean over trusted HTTPS, use **Share → Add to Home Screen**, then open that icon before enabling notifications. The permission request runs directly from the Enable button. If permission was denied, allow notifications in the device's settings first. Browser support and OS Focus/notification settings can affect delivery.
+
+The shared core owns delivery, including when no browser WebSocket is connected. `http_server/push.rs` listens for completion, plan-ready, error, and approval/input events. Notifications contain generic text, not session names or conversation content. Clicking a notification focuses an existing Jean window or opens the server's root page; it does not select a specific session.
+
+`web-push.json` in Jean's app-data directory stores the stable VAPID private key and subscriptions. Writes are atomic, serialized, and mode 0600 on Unix. Include this file in protected server backups: losing the signing key requires devices to enable notifications again. Never copy keys between unrelated servers. Browser endpoints are limited to Apple, Google, Mozilla, and Windows push services, redirects are disabled, and delivery has a timeout. Delivery is best effort: at most eight notification event jobs and eight push requests run at once. Each accepted event attempts every subscribed device. If all event slots are busy, the new event is dropped with a warning instead of creating an unlimited queue. HTTP 404/410 removes expired subscriptions. Other delivery failures are logged without subscription URLs or conversation content.
+
+The authenticated WebSocket dispatcher exposes `get_web_push_key`, `has_web_push_subscription`, `subscribe_web_push`, `unsubscribe_web_push`, and `test_web_push`. These are browser-only commands, not new native Tauri commands. The same core runs inside native Jean when Web Access is enabled. `public/push-sw.js` handles push and click events without a fetch handler or offline cache. `public/manifest.webmanifest` enables standalone installation.
+
+Checks:
+
+- `bunx vitest run src/lib/web-push.test.ts src/lib/push-worker.test.ts`
+- `cargo test --manifest-path jean-core/Cargo.toml http_server::push::tests`
+- `bunx playwright test --config e2e/playwright.config.ts web-push.spec.ts` against a Jean-managed E2E environment. The UI flow uses platform/subscription stubs and does not prove external push delivery.
+- For opt-in live delivery, save a disposable browser subscription JSON and its matching server `web-push.json` to protected files. Set `JEAN_WEB_PUSH_LIVE_SUBSCRIPTION` and `JEAN_WEB_PUSH_LIVE_STORE` to their paths, then run `cargo test --manifest-path jean-core/Cargo.toml live_browser_push_delivery -- --ignored`. Success means the push service accepted delivery; confirm the notification on the device as well.
+
+References: [WebKit iOS requirements](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/) and [web-push 0.11 API](https://docs.rs/web-push/0.11.0/web_push/).
