@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import React, { useState } from 'react'
 import { invoke } from '@/lib/transport'
 import { Pencil, Plus, Trash2 } from '@/components/icons/reicon'
@@ -24,6 +25,7 @@ import {
 import { SettingsSection } from '../SettingsSection'
 
 export const ProvidersPane: React.FC = () => {
+  const { label: defaultAccountLabel } = useClaudeDefaultAccountLabel()
   const { data: preferences } = usePreferences()
   const patchPreferences = usePatchPreferences()
 
@@ -83,7 +85,7 @@ export const ProvidersPane: React.FC = () => {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="default">Anthropic</SelectItem>
+                <SelectItem value="default">{defaultAccountLabel}</SelectItem>
                 {profiles.map(p => (
                   <SelectItem key={p.name} value={p.name}>
                     {p.name}

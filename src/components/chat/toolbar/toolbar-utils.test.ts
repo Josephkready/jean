@@ -7,6 +7,19 @@ import {
   getSessionProviderDisplayName,
 } from './toolbar-utils'
 
+describe('getProviderDisplayName default account (issue #30)', () => {
+  it('shows the default account label when provided, else Anthropic', () => {
+    expect(getProviderDisplayName(null, 'claude', 'j60218')).toBe('j60218')
+    expect(getProviderDisplayName('__anthropic__', 'claude', 'j60218')).toBe(
+      'j60218'
+    )
+    expect(getProviderDisplayName(null, 'claude')).toBe('Anthropic')
+    expect(getProviderDisplayName('josephkready', 'claude', 'j60218')).toBe(
+      'josephkready'
+    )
+  })
+})
+
 describe('getProviderDisplayName', () => {
   it('defaults to Anthropic for missing providers', () => {
     expect(getProviderDisplayName(null)).toBe('Anthropic')

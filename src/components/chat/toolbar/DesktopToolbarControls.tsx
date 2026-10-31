@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import {
   CircleDot,
   ExternalLink,
@@ -331,9 +332,12 @@ export function DesktopToolbarControls({
   const loadedLinearCount = loadedLinearContexts.length
   const loadedSentryCount = loadedSentryContexts.length
   const loadedContextCount = attachedSavedContexts.length
+  const { label: defaultAccountLabel, email: defaultAccountEmail } =
+    useClaudeDefaultAccountLabel()
   const providerDisplayName = getProviderDisplayName(
     selectedProvider,
-    selectedBackend
+    selectedBackend,
+    defaultAccountLabel
   )
   const showClaudeProviders =
     customCliProfiles.length > 0 && selectedBackend === 'claude'
@@ -785,8 +789,11 @@ export function DesktopToolbarControls({
                   value={selectedProvider ?? '__anthropic__'}
                   onValueChange={handleProviderChange}
                 >
-                  <DropdownMenuRadioItem value="__anthropic__">
-                    Anthropic
+                  <DropdownMenuRadioItem
+                    value="__anthropic__"
+                    title={defaultAccountEmail ?? undefined}
+                  >
+                    {defaultAccountLabel}
                     <Kbd className="ml-auto text-[10px]">1</Kbd>
                   </DropdownMenuRadioItem>
                   <DropdownMenuSeparator />

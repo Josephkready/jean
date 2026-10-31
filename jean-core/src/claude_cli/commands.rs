@@ -1584,6 +1584,15 @@ pub async fn get_claude_usage(account: Option<String>) -> Result<ClaudeUsageSnap
     get_claude_usage_with_source("ui", account.as_deref()).await
 }
 
+/// Login email of the default `~/.claude` account (`None` when not logged in
+/// or unreadable). Reads only the non-secret `oauthAccount.emailAddress`.
+pub async fn get_claude_default_account_email() -> Option<String> {
+    tokio::task::spawn_blocking(|| read_claude_account_email(None))
+        .await
+        .ok()
+        .flatten()
+}
+
 fn claude_usage_rate_limited_error() -> String {
     "Claude usage API is rate-limiting requests. Usage updates after your next Claude message, or try again in a few minutes.".to_string()
 }

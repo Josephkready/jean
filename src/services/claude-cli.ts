@@ -28,6 +28,10 @@ import type {
   ClaudeUsageSnapshot,
 } from '@/types/claude-cli'
 
+import {
+  DEFAULT_ACCOUNT_LABEL,
+  defaultAccountShortName,
+} from '@/components/chat/toolbar/model-picker-rows'
 import { hasBackendTransport } from '@/lib/environment'
 import { useOptionalSettingsTargetServerId } from '@/lib/settings-target'
 
@@ -40,6 +44,8 @@ export const claudeCliQueryKeys = {
   status: () => [...claudeCliQueryKeys.all, 'status'] as const,
   auth: () => [...claudeCliQueryKeys.all, 'auth'] as const,
   usage: () => [...claudeCliQueryKeys.all, 'usage'] as const,
+  defaultAccountEmail: () =>
+    [...claudeCliQueryKeys.all, 'default-account-email'] as const,
   accountUsage: (account: string) =>
     [...claudeCliQueryKeys.usage(), account] as const,
   versions: () => [...claudeCliQueryKeys.all, 'versions'] as const,
@@ -224,6 +230,45 @@ export function useClaudeUsage(options?: {
   account?: string
 }) {
   return useQuery(claudeUsageQueryOptions(options))
+}
+
+/**
+ * Login email of the default `~/.claude` account (null when unknown). Read
+ * from the non-secret `.claude.json`, so it works without a usage fetch.
+ */
+export function useClaudeDefaultAccountEmail(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: claudeCliQueryKeys.defaultAccountEmail(),
+    queryFn: async (): Promise<string | null> => {
+      if (!isTauri()) return null
+      try {
+        return (
+          (await invoke<string | null>('get_claude_default_account_email')) ??
+          null
+        )
+      } catch {
+        return null
+      }
+    },
+    enabled: options?.enabled ?? true,
+    staleTime: 1000 * 60 * 5,
+    gcTime: 1000 * 60 * 60,
+  })
+}
+
+/** Label for the default Claude login: its short account name, else "Anthropic". */
+export function useClaudeDefaultAccountLabel(): {
+  label: string
+  /** Like `label`, but falls back to "Default" (for account rows). */
+  rowLabel: string
+  email: string | null
+} {
+  const { data: email } = useClaudeDefaultAccountEmail()
+  return {
+    label: defaultAccountShortName(email),
+    rowLabel: defaultAccountShortName(email, DEFAULT_ACCOUNT_LABEL),
+    email: email ?? null,
+  }
 }
 
 /**

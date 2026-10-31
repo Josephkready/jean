@@ -24,7 +24,8 @@ export function getPrStatusDisplay(status: PrDisplayStatus): {
 
 export function getProviderDisplayName(
   selectedProvider: string | null,
-  selectedBackend?: Backend
+  selectedBackend?: Backend,
+  defaultAccountLabel?: string
 ): string {
   if (
     !selectedProvider ||
@@ -32,7 +33,7 @@ export function getProviderDisplayName(
     selectedProvider === '__default__'
   ) {
     if (selectedBackend === 'codex') return 'Default'
-    return 'Anthropic'
+    return defaultAccountLabel || 'Anthropic'
   }
   return selectedProvider
 }

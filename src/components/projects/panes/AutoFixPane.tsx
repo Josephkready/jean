@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Check, ChevronsUpDown, Loader2 } from '@/components/icons/reicon'
 import { Badge } from '@/components/ui/badge'
@@ -373,6 +374,7 @@ function AutoFixProviderSelect({
   disabled?: boolean
   onChange: (provider: string | null) => void
 }) {
+  const { label: defaultAccountLabel } = useClaudeDefaultAccountLabel()
   if (profiles.length === 0) return null
 
   return (
@@ -384,10 +386,12 @@ function AutoFixProviderSelect({
       disabled={disabled}
     >
       <SelectTrigger aria-label={`Choose ${label} provider`} className="w-full">
-        <SelectValue placeholder="Anthropic" />
+        <SelectValue placeholder={defaultAccountLabel} />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value={ANTHROPIC_PROVIDER_VALUE}>Anthropic</SelectItem>
+        <SelectItem value={ANTHROPIC_PROVIDER_VALUE}>
+          {defaultAccountLabel}
+        </SelectItem>
         {profiles.map(profile => (
           <SelectItem key={profile.name} value={profile.name}>
             {profile.name}

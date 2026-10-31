@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  accountRowLabel,
   buildClaudeAccountRows,
   buildFavoriteRows,
+  defaultAccountShortName,
   getClaudeAccountNames,
   isClaudeAccountProfile,
   modelKey,
@@ -135,5 +137,30 @@ describe('buildClaudeAccountRows', () => {
       ['Default · Haiku', null],
       ['Work · Haiku', 'Work'],
     ])
+  })
+})
+
+describe('defaultAccountShortName (issue #30)', () => {
+  it('uses the local part of the account email', () => {
+    expect(defaultAccountShortName('j60218@gmail.com')).toBe('j60218')
+  })
+
+  it.each([null, undefined, '', '@gmail.com'])(
+    'falls back to Anthropic for %j',
+    email => {
+      expect(defaultAccountShortName(email)).toBe('Anthropic')
+    }
+  )
+
+  it('labels the default account row with the short name', () => {
+    expect(accountRowLabel(null, 'Opus', 'j60218')).toBe('j60218 · Opus')
+    expect(accountRowLabel(null, 'Opus')).toBe('Default · Opus')
+    expect(
+      buildClaudeAccountRows(
+        [{ value: 'opus', label: 'Opus' }],
+        ['work'],
+        'j60218'
+      ).map(r => r.label)
+    ).toEqual(['j60218 · Opus', 'work · Opus'])
   })
 })
