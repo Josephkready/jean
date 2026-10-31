@@ -186,6 +186,20 @@ pub async fn dispatch_command(
             crate::save_ui_state(app.clone(), client_id, ui_state).await?;
             Ok(Value::Null)
         }
+        "save_ui_state_with_draft_changes" => {
+            let ui_state = field(&args, "uiState", "ui_state")?;
+            let client_id: String = field(&args, "clientId", "client_id")?;
+            let draft_changes = field(&args, "draftChanges", "draft_changes")?;
+            to_value(
+                crate::save_ui_state_with_draft_changes(
+                    app.clone(),
+                    client_id,
+                    ui_state,
+                    draft_changes,
+                )
+                .await?,
+            )
+        }
         "get_pinned_recent_session_ids" => {
             to_value(crate::get_pinned_recent_session_ids(app.clone()).await?)
         }

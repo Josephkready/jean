@@ -4491,6 +4491,27 @@ async fn save_ui_state(app: AppHandle, client_id: String, ui_state: UIState) -> 
     Ok(())
 }
 
+/// Like `save_ui_state`, but merges `draft_changes` into the drafts already on
+/// disk inside one critical section (see `save_client_ui_state_merging_drafts`).
+/// Returns the drafts that were written.
+async fn save_ui_state_with_draft_changes(
+    app: AppHandle,
+    client_id: String,
+    ui_state: UIState,
+    draft_changes: std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    log::trace!("Saving UI state with draft changes for client {client_id}");
+    let dir = app_data_dir(&app)?;
+    let drafts = ui_client_state::save_client_ui_state_merging_drafts(
+        &dir,
+        &client_id,
+        ui_state,
+        draft_changes,
+    )?;
+    emit_ui_state_invalidation(&app);
+    Ok(drafts)
+}
+
 /// Returns the pinned recent session IDs. Native clients also use this command
 /// to detect that a remote Jean server supports per-ID pin sync.
 async fn get_pinned_recent_session_ids(app: AppHandle) -> Result<Vec<String>, String> {

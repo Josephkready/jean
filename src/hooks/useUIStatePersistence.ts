@@ -29,6 +29,7 @@ import type {
   PendingTextFileDraft,
   UIState,
 } from '@/types/ui-state'
+import { trackInputDraftChanges } from '@/lib/input-draft-sync'
 import { registerUIStateRelaunchSaver } from '@/lib/ui-state-relaunch'
 
 const getPinnedCanvasSettings = () =>
@@ -1294,6 +1295,9 @@ export function useUIStatePersistence() {
         state.lastActiveWorktreeId !== prevLastActiveWorktreeId
       const sessionsChanged = state.activeSessionIds !== prevActiveSessionIds
       const inputDraftsChanged = state.inputDrafts !== prevInputDrafts
+      if (inputDraftsChanged) {
+        trackInputDraftChanges(prevInputDrafts, state.inputDrafts)
+      }
       const pendingImagesChanged = state.pendingImages !== prevPendingImages
       const pendingTextFilesChanged =
         state.pendingTextFiles !== prevPendingTextFiles
