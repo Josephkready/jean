@@ -89,8 +89,6 @@ export interface SendMessageArgs {
   chromeEnabled?: boolean
   customProfileName?: string
   backend?: string
-  /** When false, skip the end-of-turn recap instruction. */
-  includeRecap?: boolean
 }
 
 export function getSupportedPermissionModes(

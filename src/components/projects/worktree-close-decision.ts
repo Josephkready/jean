@@ -7,6 +7,22 @@
  * unit-testable without rendering the full store/query tree.
  */
 
+/**
+ * Whether closing must ask first. Archiving is recoverable (the item can be
+ * restored), so when removal behavior is `archive` (or the action is an
+ * explicit archive) closing just archives with no dialog (issue #35). Only the
+ * permanent `delete` behavior is gated by `confirm_session_close`.
+ */
+export function closeRequiresConfirmation(
+  confirmSessionClose: boolean | undefined,
+  removalBehavior: string | undefined,
+  explicitArchive = false
+): boolean {
+  if (confirmSessionClose === false) return false
+  if (explicitArchive || removalBehavior === 'archive') return false
+  return true
+}
+
 export type WorktreeCloseDecision = 'confirm' | 'close'
 
 /**
@@ -16,10 +32,13 @@ export type WorktreeCloseDecision = 'confirm' | 'close'
  */
 export function decideWorktreeMiddleClose(
   confirmSessionClose: boolean | undefined,
-  bypassConfirm = false
+  bypassConfirm = false,
+  removalBehavior?: string
 ): WorktreeCloseDecision {
   if (bypassConfirm) return 'close'
-  return confirmSessionClose === false ? 'close' : 'confirm'
+  return closeRequiresConfirmation(confirmSessionClose, removalBehavior)
+    ? 'confirm'
+    : 'close'
 }
 
 export type SessionCloseDecision = 'confirm' | 'delete'
@@ -39,10 +58,19 @@ export function decideSessionMiddleClose(params: {
   sessionIsEmpty: boolean
   confirmSessionClose: boolean | undefined
   bypassConfirm?: boolean
+  removalBehavior?: string
 }): SessionCloseDecision {
-  const { sessionIsEmpty, confirmSessionClose, bypassConfirm = false } = params
+  const {
+    sessionIsEmpty,
+    confirmSessionClose,
+    bypassConfirm = false,
+    removalBehavior,
+  } = params
   if (bypassConfirm) return 'delete'
-  if (confirmSessionClose !== false && !sessionIsEmpty) {
+  if (
+    closeRequiresConfirmation(confirmSessionClose, removalBehavior) &&
+    !sessionIsEmpty
+  ) {
     return 'confirm'
   }
   return 'delete'
@@ -57,4 +85,37 @@ export function isSessionEmpty(
   inputDrafts: Record<string, string>
 ): boolean {
   return !session.message_count && !inputDrafts[session.id]?.trim()
+}
+
+export type SessionTabRemovalDecision =
+  | { confirm: false }
+  | { confirm: true; mode: 'session' }
+
+/**
+ * Decide whether removing a session tab prompts, and which dialog mode to use.
+ * Archive (preference or explicit) and empty sessions skip the dialog, so the
+ * only dialog mode reachable from a session tab is `session` (issue #35).
+ */
+export function decideSessionTabRemoval(params: {
+  confirmSessionClose: boolean | undefined
+  removalBehavior: string | undefined
+  archive: boolean
+  bypassConfirm: boolean
+  sessionIsEmpty: boolean
+}): SessionTabRemovalDecision {
+  const {
+    confirmSessionClose,
+    removalBehavior,
+    archive,
+    bypassConfirm,
+    sessionIsEmpty,
+  } = params
+  if (
+    bypassConfirm ||
+    sessionIsEmpty ||
+    !closeRequiresConfirmation(confirmSessionClose, removalBehavior, archive)
+  ) {
+    return { confirm: false }
+  }
+  return { confirm: true, mode: 'session' }
 }

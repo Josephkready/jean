@@ -104,6 +104,40 @@ pub fn save_client_ui_state(
     merge_shared_canvas_settings_locked(app_data, canvas_settings)
 }
 
+/// Saves a client snapshot, but takes `input_drafts` from the file already on
+/// disk plus `draft_changes` (session id -> new text, empty string = cleared).
+/// The read-merge-write runs under the UI-state write lock, so concurrent pages
+/// cannot lose each other's edits or resurrect drafts another page cleared (#33).
+/// Returns the drafts that were written.
+pub fn save_client_ui_state_merging_drafts(
+    app_data: &Path,
+    client_id: &str,
+    mut ui_state: UIState,
+    draft_changes: HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let id = canonical_client_id(client_id)?;
+    let _guard = lock_ui_state_writes();
+    let path = ui_clients_dir(app_data).join(format!("{id}.json"));
+    let mut drafts = if path.exists() {
+        read_ui_state_file(&path)?.input_drafts
+    } else {
+        HashMap::new()
+    };
+    for (session_id, text) in draft_changes {
+        if text.is_empty() {
+            drafts.remove(&session_id);
+        } else {
+            drafts.insert(session_id, text);
+        }
+    }
+    ui_state.input_drafts = drafts.clone();
+    ui_state.pinned_recent_session_ids.clear();
+    let canvas_settings = ui_state.project_canvas_settings.clone();
+    write_ui_state_file(&path, &ui_state)?;
+    merge_shared_canvas_settings_locked(app_data, canvas_settings)?;
+    Ok(drafts)
+}
+
 /// Running and stopped command terminals recorded by any client's panel list.
 ///
 /// Conflicting per-worktree active sessions are omitted so one client does not
@@ -505,6 +539,47 @@ mod tests {
                 .unwrap()
                 .active_worktree_id,
             None
+        );
+    }
+
+    #[test]
+    fn draft_merge_keeps_other_pages_edits_and_clears_sent_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = client_id();
+        let mut first = UIState::default();
+        first.input_drafts = HashMap::from([("s1".to_string(), "a".to_string())]);
+        save_client_ui_state(dir.path(), &id, first).unwrap();
+
+        // A stale page still holds s1 but only changed s2.
+        let mut stale = UIState::default();
+        stale.input_drafts = HashMap::from([("s1".to_string(), "a".to_string())]);
+        let written = save_client_ui_state_merging_drafts(
+            dir.path(),
+            &id,
+            stale,
+            HashMap::from([
+                ("s1".to_string(), String::new()),
+                ("s2".to_string(), "b".to_string()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            HashMap::from([("s2".to_string(), "b".to_string())])
+        );
+
+        // A page with no tracked change must not resurrect s1.
+        let mut stale = UIState::default();
+        stale.input_drafts = HashMap::from([("s1".to_string(), "a".to_string())]);
+        let written =
+            save_client_ui_state_merging_drafts(dir.path(), &id, stale, HashMap::new()).unwrap();
+        assert_eq!(
+            written,
+            HashMap::from([("s2".to_string(), "b".to_string())])
+        );
+        assert_eq!(
+            load_client_ui_state(dir.path(), &id).unwrap().input_drafts,
+            written
         );
     }
 

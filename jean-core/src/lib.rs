@@ -1118,7 +1118,6 @@ mod tests {
         let off = crate::apply_agent_browser_preference(prompt.clone(), Some(&prefs));
         assert!(!off.to_ascii_lowercase().contains("agent browser"));
         assert!(off.contains("ALWAYS use a browser when the user asks for it"));
-        assert!(off.contains("Not tested in browser"));
         assert!(
             !crate::apply_agent_browser_preference(prompt.clone(), None).contains("Agent Browser")
         );
@@ -2612,7 +2611,7 @@ fn default_global_system_prompt() -> String {
 - Write detailed specs upfront to reduce ambiguity
 - Keep plans concise but complete enough for zero-context handoff (Full access/Build in a new worktree must not require re-scanning the repo). Prefer short wording over thin checklists.
 - When the current execution mode is plan, use the backend's native plan tool/UI call when available (Claude ExitPlanMode, Codex `<proposed_plan>` / collaboration Plan mode, Cursor/OpenCode equivalent), not plain text only.
-- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline in this exact format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options, one option per line. Jean shows these options as buttons. If you end with a `## Recap`, put this question at the end of the recap, not before it.
+- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline in this exact format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options, one option per line. Jean shows these options as buttons.
 - For Codex specifically, when the current execution mode is plan: do not write plan files or code; when the plan is ready wrap it in `<proposed_plan>...</proposed_plan>` so Jean can show the approval UI. Do not use the `update_plan` checklist tool in plan mode.
 - Every Codex response that contains or revises a plan while the current execution mode is plan must use a complete `<proposed_plan>` block (or a native plan item); do not provide plain-text-only plans, and do not attempt file writes.
 - Use a plain-text Unresolved Questions section only for non-actionable notes or when the backend cannot ask interactively.
@@ -2643,7 +2642,7 @@ fn default_global_system_prompt() -> String {
 - Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called.
 - ALWAYS use a browser when the user asks for it, or when the task is visual: copy or match a style from a reference, compare with another page or screenshot, or fix a layout or visual bug.
 - Also use a browser when the change has runtime UI behavior that typecheck, lint, or tests cannot prove: new or changed user flows, or state/interaction logic.
-- In all other cases, do NOT open a browser. Examples: small copy/text edits, small class or prop tweaks that you did not have to match to a reference, refactors with no behavior change, backend-only changes. For these, a typecheck or the narrowest test is enough. Say "Not tested in browser" in the recap.
+- In all other cases, do NOT open a browser. Examples: small copy/text edits, small class or prop tweaks that you did not have to match to a reference, refactors with no behavior change, backend-only changes. For these, a typecheck or the narrowest test is enough.
 - Before you open a browser on your own decision (not a user request), state in one line why a cheaper check is not enough.
 - If a UI check needs a browser and no other browser tool is available, use the Agent Browser. Check only the changed area, not the full app.
 
@@ -4489,6 +4488,27 @@ async fn save_ui_state(app: AppHandle, client_id: String, ui_state: UIState) -> 
     log::trace!("Saved UI state for client {client_id}");
     emit_ui_state_invalidation(&app);
     Ok(())
+}
+
+/// Like `save_ui_state`, but merges `draft_changes` into the drafts already on
+/// disk inside one critical section (see `save_client_ui_state_merging_drafts`).
+/// Returns the drafts that were written.
+async fn save_ui_state_with_draft_changes(
+    app: AppHandle,
+    client_id: String,
+    ui_state: UIState,
+    draft_changes: std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    log::trace!("Saving UI state with draft changes for client {client_id}");
+    let dir = app_data_dir(&app)?;
+    let drafts = ui_client_state::save_client_ui_state_merging_drafts(
+        &dir,
+        &client_id,
+        ui_state,
+        draft_changes,
+    )?;
+    emit_ui_state_invalidation(&app);
+    Ok(drafts)
 }
 
 /// Returns the pinned recent session IDs. Native clients also use this command

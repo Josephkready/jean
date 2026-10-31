@@ -26,6 +26,7 @@ import { useSessionArchive } from '@/components/chat/hooks/useSessionArchive'
 import { middleClickClose } from '@/lib/middle-click'
 import { hasCloseConfirmBypassModifier } from '@/lib/confirm-bypass'
 import {
+  closeRequiresConfirmation,
   decideWorktreeMiddleClose,
   decideSessionMiddleClose,
   isSessionEmpty,
@@ -659,7 +660,8 @@ export const WorktreeItem = memo(function WorktreeItem({
           hasCloseConfirmBypassModifier(
             e,
             preferences?.close_confirm_bypass_modifier
-          )
+          ),
+          preferences?.removal_behavior
         ) === 'confirm'
       ) {
         setCloseConfirm({ mode: 'worktree' })
@@ -670,6 +672,7 @@ export const WorktreeItem = memo(function WorktreeItem({
     [
       preferences?.confirm_session_close,
       preferences?.close_confirm_bypass_modifier,
+      preferences?.removal_behavior,
       handleArchiveOrClose,
     ]
   )
@@ -689,6 +692,7 @@ export const WorktreeItem = memo(function WorktreeItem({
           useChatStore.getState().inputDrafts
         ),
         confirmSessionClose: preferences?.confirm_session_close,
+        removalBehavior: preferences?.removal_behavior,
         bypassConfirm: hasCloseConfirmBypassModifier(
           e,
           preferences?.close_confirm_bypass_modifier
@@ -704,6 +708,7 @@ export const WorktreeItem = memo(function WorktreeItem({
       sessionsData?.sessions,
       handleDeleteSession,
       preferences?.confirm_session_close,
+      preferences?.removal_behavior,
       preferences?.close_confirm_bypass_modifier,
     ]
   )
@@ -713,8 +718,11 @@ export const WorktreeItem = memo(function WorktreeItem({
   const handleSessionMenuRemove = useCallback(
     (session: Session, { archive }: { archive: boolean }) => {
       const needsConfirm =
-        preferences?.confirm_session_close !== false &&
-        !isSessionEmpty(session, useChatStore.getState().inputDrafts)
+        closeRequiresConfirmation(
+          preferences?.confirm_session_close,
+          preferences?.removal_behavior,
+          archive
+        ) && !isSessionEmpty(session, useChatStore.getState().inputDrafts)
       if (needsConfirm) {
         setCloseConfirm({
           mode: archive ? 'session-archive' : 'session',
@@ -728,6 +736,7 @@ export const WorktreeItem = memo(function WorktreeItem({
     },
     [
       preferences?.confirm_session_close,
+      preferences?.removal_behavior,
       handleArchiveSession,
       handleDeleteSession,
     ]

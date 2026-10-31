@@ -36,8 +36,8 @@ pub struct AgentsDb(Mutex<Connection>);
 /// then relevance to the current message, then recency — not a fixed count.
 const PROMPT_MEMORY_CHARS: usize = 8000;
 
-/// Recap format for agent chats. Replaces the general `RECAP_INSTRUCTION`,
-/// which is not sent to agent sessions.
+/// Recap format for agent chats. Agent-session templates are intentionally
+/// unchanged; regular chats no longer request a recap (issue #31).
 const AGENT_RECAP_INSTRUCTION: &str = "
 ## Recap
 - When a reply used tools or did more than one step, end it with a short recap. Do not add a `Recap` heading or any other heading; write only the recap text. Skip it for a one-line answer and for replies to updates.

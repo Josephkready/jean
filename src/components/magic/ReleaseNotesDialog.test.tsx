@@ -132,7 +132,6 @@ describe('ReleaseNotesDialog', () => {
         message: expect.stringContaining(
           'Use the saved release-note voice for v4.2.0.'
         ),
-        includeRecap: false,
       })
     )
     expect(mocks.invoke).not.toHaveBeenCalledWith(

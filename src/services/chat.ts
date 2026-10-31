@@ -58,6 +58,7 @@ import type {
 } from '@/types/projects'
 import { preserveQueryCacheOnError } from '@/lib/query-error'
 import { renameTableKeyMessage } from '@/lib/pinned-table-reveal'
+import { closeRequiresConfirmation } from '@/components/projects/worktree-close-decision'
 import {
   useConsolidatedAllSessions,
   useConsolidatedUnreadSessions,
@@ -1661,7 +1662,10 @@ export function useCloseSessionOrWorktreeKeybinding(
       )
       if (
         !bypassConfirm &&
-        preferences?.confirm_session_close !== false &&
+        closeRequiresConfirmation(
+          preferences?.confirm_session_close,
+          preferences?.removal_behavior
+        ) &&
         onConfirmRequired
       ) {
         // Find branch name and session count for the dialog
@@ -1921,7 +1925,6 @@ export function useSendMessage() {
       chromeEnabled,
       customProfileName,
       backend,
-      includeRecap,
     }: {
       sessionId: string
       worktreeId: string
@@ -1938,8 +1941,6 @@ export function useSendMessage() {
       chromeEnabled?: boolean
       customProfileName?: string
       backend?: string
-      /** When false, skip the end-of-turn recap instruction. */
-      includeRecap?: boolean
     }): Promise<ChatMessage> => {
       if (!isTauri()) {
         throw new Error('Not in Tauri context')
@@ -1966,8 +1967,7 @@ export function useSendMessage() {
         chromeEnabled,
         customProfileName,
         backend,
-        includeRecap,
-      })
+        })
 
       console.log(
         `[SendMutation] mutationFn CALLED sessionId=${sessionId} worktreeId=${worktreeId}`
@@ -2002,8 +2002,7 @@ export function useSendMessage() {
         chromeEnabled,
         customProfileName,
         backend,
-        includeRecap,
-      })
+        })
       logger.info('Chat message sent', { responseId: response.id })
       return response
     },
