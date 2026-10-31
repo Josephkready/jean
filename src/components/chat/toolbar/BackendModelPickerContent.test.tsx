@@ -4,6 +4,7 @@ import { within } from '@testing-library/react'
 import { render, screen } from '@/test/test-utils'
 import { BackendModelPickerContent } from './BackendModelPickerContent'
 import type * as ModelCatalogService from '@/services/model-catalog'
+import type * as ClaudeCliService from '@/services/claude-cli'
 
 class ResizeObserverMock {
   observe() {
@@ -22,7 +23,7 @@ HTMLCanvasElement.prototype.getContext = vi.fn(() => null)
 Element.prototype.scrollIntoView = vi.fn()
 
 vi.mock('@/services/claude-cli', async importOriginal => ({
-  ...(await importOriginal<typeof import('@/services/claude-cli')>()),
+  ...(await importOriginal<typeof ClaudeCliService>()),
   useClaudeDefaultAccountLabel: () => ({
     label: 'j60218',
     rowLabel: 'j60218',
