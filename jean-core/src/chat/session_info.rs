@@ -61,14 +61,25 @@ pub(crate) fn backend_session_id(meta: &SessionMetadata) -> Option<String> {
         Backend::Antigravity => &meta.antigravity_session_id,
         Backend::Muse => &meta.muse_session_id,
     };
-    id.as_ref().filter(|s| !s.trim().is_empty()).cloned()
+    id.as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .filter(|s| !s.contains(['/', '\\']) && !s.contains(".."))
+        .cloned()
 }
 
 fn find_file(root: &Path, matches: &dyn Fn(&str) -> bool, depth: usize, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::debug!("Cannot read {}: {e}", root.display());
+            return;
+        }
     };
     for entry in entries.flatten() {
+        // Stop as soon as one match is found; callers only need one transcript.
+        if !out.is_empty() {
+            return;
+        }
         let path = entry.path();
         if path.is_dir() {
             if depth > 0 {
@@ -96,6 +107,10 @@ pub(crate) fn resolve_transcripts(
             let file = format!("{id}.jsonl");
             let slug = claude_project_slug(worktree_path);
             for dir in &roots.claude_config_dirs {
+                // Stop once a config dir yielded a transcript; skip remaining scans.
+                if !found.is_empty() {
+                    break;
+                }
                 let direct = dir.join("projects").join(&slug).join(&file);
                 if direct.is_file() {
                     found.push(direct);
@@ -199,23 +214,55 @@ pub async fn get_session_info(
     session_id: String,
     worktree_path: Option<String>,
 ) -> Result<SessionInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_info_blocking(app, session_id, worktree_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn session_info_blocking(
+    app: AppHandle,
+    session_id: String,
+    worktree_path: Option<String>,
+) -> Result<SessionInfo, String> {
     let meta = super::storage::load_metadata(&app, &session_id)?
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
     // Callers that do not know the path (menus) let the backend resolve it.
-    let worktree_path = worktree_path
-        .filter(|p| !p.trim().is_empty())
-        .or_else(|| {
-            crate::projects::storage::load_projects_data(&app)
-                .ok()
-                .and_then(|data| {
-                    data.find_worktree(&meta.worktree_id)
-                        .map(|w| w.path.clone())
-                })
-        })
-        .unwrap_or_default();
-    let run_log_dir = super::storage::get_session_dir(&app, &session_id).ok();
+    let worktree_path = match worktree_path.filter(|p| !p.trim().is_empty()) {
+        Some(p) => p,
+        None => match crate::projects::storage::load_projects_data(&app) {
+            Ok(data) => data
+                .find_worktree(&meta.worktree_id)
+                .map(|w| w.path.clone())
+                .unwrap_or_default(),
+            Err(e) => {
+                log::warn!("Worktree lookup failed for session {session_id}: {e}");
+                String::new()
+            }
+        },
+    };
+    if worktree_path.is_empty() {
+        log::warn!(
+            "No worktree path for session {session_id}; Claude transcript lookup will be skipped"
+        );
+    }
+    let run_log_dir = match super::storage::get_session_dir(&app, &session_id) {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            log::warn!("Run log dir unavailable for session {session_id}: {e}");
+            None
+        }
+    };
     let roots = default_roots(&meta);
-    Ok(build_info(&meta, &worktree_path, run_log_dir, &roots))
+    let info = build_info(&meta, &worktree_path, run_log_dir, &roots);
+    log::debug!(
+        "Session info for {session_id}: backend={} backend_session_id={:?} transcripts={}",
+        info.backend,
+        info.backend_session_id,
+        info.transcript_paths.len()
+    );
+    Ok(info)
 }
 
 #[cfg(test)]
@@ -279,6 +326,28 @@ mod tests {
             resolve_transcripts(&Backend::Codex, "thr-1", "/w", &roots),
             vec![hit]
         );
+    }
+
+    #[test]
+    fn codex_lookup_does_not_match_unrelated_rollouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hit = tmp
+            .path()
+            .join("sessions/2026/10/30/rollout-2026-10-30T01-02-03-thr-1.jsonl");
+        touch(&hit);
+        touch(
+            &tmp.path()
+                .join("sessions/2026/10/30/rollout-2026-10-30T01-02-04-x-1.jsonl"),
+        );
+        let roots = TranscriptRoots {
+            codex_home: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_transcripts(&Backend::Codex, "thr-1", "/w", &roots),
+            vec![hit]
+        );
+        assert!(resolve_transcripts(&Backend::Codex, "zzz", "/w", &roots).is_empty());
     }
 
     #[test]
