@@ -86,3 +86,36 @@ export function isSessionEmpty(
 ): boolean {
   return !session.message_count && !inputDrafts[session.id]?.trim()
 }
+
+export type SessionTabRemovalDecision =
+  | { confirm: false }
+  | { confirm: true; mode: 'session' }
+
+/**
+ * Decide whether removing a session tab prompts, and which dialog mode to use.
+ * Archive (preference or explicit) and empty sessions skip the dialog, so the
+ * only dialog mode reachable from a session tab is `session` (issue #35).
+ */
+export function decideSessionTabRemoval(params: {
+  confirmSessionClose: boolean | undefined
+  removalBehavior: string | undefined
+  archive: boolean
+  bypassConfirm: boolean
+  sessionIsEmpty: boolean
+}): SessionTabRemovalDecision {
+  const {
+    confirmSessionClose,
+    removalBehavior,
+    archive,
+    bypassConfirm,
+    sessionIsEmpty,
+  } = params
+  if (
+    bypassConfirm ||
+    sessionIsEmpty ||
+    !closeRequiresConfirmation(confirmSessionClose, removalBehavior, archive)
+  ) {
+    return { confirm: false }
+  }
+  return { confirm: true, mode: 'session' }
+}

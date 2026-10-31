@@ -1802,8 +1802,11 @@ export function ProjectCanvasView({
       if (!project) return
       const wt = visibleWorktrees.find(w => w.id === worktreeId)
       if (!wt) return
+      // Unloaded preferences resolve to the documented default ('delete'),
+      // matching the confirmation decision made by the close handler.
+      const removalBehavior = preferences?.removal_behavior ?? 'delete'
       if (isBaseSession(wt)) {
-        if (preferences?.removal_behavior === 'delete') {
+        if (removalBehavior === 'delete') {
           closeBaseSessionClean.mutate({
             worktreeId: wt.id,
             projectId: project.id,
@@ -1814,7 +1817,7 @@ export function ProjectCanvasView({
             projectId: project.id,
           })
         }
-      } else if (preferences?.removal_behavior === 'delete') {
+      } else if (removalBehavior === 'delete') {
         deleteWorktree.mutate({ worktreeId: wt.id, projectId: project.id })
       } else {
         archiveWorktree.mutate({ worktreeId: wt.id, projectId: project.id })
@@ -2905,7 +2908,7 @@ export function ProjectCanvasView({
           bypassConfirm ||
           !closeRequiresConfirmation(
             preferences?.confirm_session_close,
-            preferences?.removal_behavior
+            preferences?.removal_behavior ?? 'delete'
           )
         ) {
           closeWorktreeDirectly(item.worktreeId)

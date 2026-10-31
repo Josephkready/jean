@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   closeRequiresConfirmation,
+  decideSessionTabRemoval,
   decideWorktreeMiddleClose,
   decideSessionMiddleClose,
   isSessionEmpty,
@@ -184,5 +185,50 @@ describe('close confirmation vs removal behavior (issue #35)', () => {
 
   it('respects the confirm_session_close opt-out', () => {
     expect(closeRequiresConfirmation(false, 'delete')).toBe(false)
+  })
+})
+
+describe('decideSessionTabRemoval', () => {
+  const base = {
+    confirmSessionClose: true,
+    removalBehavior: 'delete',
+    archive: false,
+    bypassConfirm: false,
+    sessionIsEmpty: false,
+  }
+
+  it('skips the dialog under archive preference', () => {
+    expect(
+      decideSessionTabRemoval({ ...base, removalBehavior: 'archive' })
+    ).toEqual({ confirm: false })
+    expect(
+      decideSessionTabRemoval({
+        ...base,
+        removalBehavior: 'archive',
+        archive: true,
+      })
+    ).toEqual({ confirm: false })
+  })
+
+  it('asks in session mode for a non-empty delete', () => {
+    expect(decideSessionTabRemoval(base)).toEqual({
+      confirm: true,
+      mode: 'session',
+    })
+  })
+
+  it('skips the dialog for an explicit archive under the delete preference', () => {
+    expect(decideSessionTabRemoval({ ...base, archive: true })).toEqual({
+      confirm: false,
+    })
+  })
+
+  it('skips for empty sessions and bypass', () => {
+    expect(
+      decideSessionTabRemoval({ ...base, sessionIsEmpty: true })
+    ).toEqual({ confirm: false })
+    expect(
+      decideSessionTabRemoval({ ...base, bypassConfirm: true })
+    ).toEqual({ confirm: false })
   })
 })

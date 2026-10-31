@@ -36,6 +36,7 @@ import {
 import { useChatStore } from '@/store/chat-store'
 import {
   closeRequiresConfirmation,
+  decideSessionTabRemoval,
   isSessionEmpty,
 } from '@/components/projects/worktree-close-decision'
 import { useTerminalStore } from '@/store/terminal-store'
@@ -138,15 +139,20 @@ function useOffScreenWaiting(
       return
     }
 
+    // Resolve waiting tab elements once per sortedCards change; scroll/resize
+    // checks only read offsets from the cached elements.
+    const waitingEls = waitingIds.flatMap(id => {
+      const el = viewport.querySelector(
+        `[data-session-id="${id}"]`
+      ) as HTMLElement | null
+      return el ? [el] : []
+    })
+
     const check = () => {
       const { scrollLeft, clientWidth } = viewport
       let left = false
       let right = false
-      for (const id of waitingIds) {
-        const el = viewport.querySelector(
-          `[data-session-id="${id}"]`
-        ) as HTMLElement | null
-        if (!el) continue
+      for (const el of waitingEls) {
         if (el.offsetLeft + el.offsetWidth <= scrollLeft) left = true
         else if (el.offsetLeft >= scrollLeft + clientWidth) right = true
       }
@@ -154,13 +160,22 @@ function useOffScreenWaiting(
       setHasRight(right)
     }
 
+    let frame = 0
+    const scheduleCheck = () => {
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        check()
+      })
+    }
     check()
-    viewport.addEventListener('scroll', check, { passive: true })
-    const ro = new ResizeObserver(check)
+    viewport.addEventListener('scroll', scheduleCheck, { passive: true })
+    const ro = new ResizeObserver(scheduleCheck)
     ro.observe(viewport)
     return () => {
-      viewport.removeEventListener('scroll', check)
+      viewport.removeEventListener('scroll', scheduleCheck)
       ro.disconnect()
+      if (frame) cancelAnimationFrame(frame)
     }
   }, [sortedCards, viewportRef])
 
@@ -268,11 +283,14 @@ export const SessionChatModal = memo(function SessionChatModal({
     visualFeedback: true,
   })
   useEffect(() => {
-    useUIStore.getState().setLeftSidebarSwipe({
-      isDragging: swipe.isSwiping,
-      dragOffset: swipe.translateX,
-      dragTransition: swipe.transitionStyle,
+    const frame = requestAnimationFrame(() => {
+      useUIStore.getState().setLeftSidebarSwipe({
+        isDragging: swipe.isSwiping,
+        dragOffset: swipe.translateX,
+        dragTransition: swipe.transitionStyle,
+      })
     })
+    return () => cancelAnimationFrame(frame)
   }, [swipe.isSwiping, swipe.translateX, swipe.transitionStyle])
   useEffect(() => {
     return () => {
@@ -597,7 +615,9 @@ export const SessionChatModal = memo(function SessionChatModal({
   }, [])
 
   // Close (delete or archive per removal behavior) or explicitly archive a
-  // session tab, asking for confirmation first.
+  // session tab. Confirmation is only required for non-empty sessions that are
+  // permanently deleted while confirm_session_close is on; archive and empty
+  // sessions skip the prompt.
   const removeSessionTab = useCallback(
     (
       session: Session,
@@ -613,14 +633,14 @@ export const SessionChatModal = memo(function SessionChatModal({
       // confirming the last tab allowed held/cascade closes to wipe chats
       // without a prompt (issue #56). Empty sessions (no messages and no
       // unsent draft) close immediately.
-      const needsConfirm =
-        !bypassConfirm &&
-        closeRequiresConfirmation(
-          preferences?.confirm_session_close,
-          preferences?.removal_behavior,
-          archive
-        ) &&
-        !sessionIsEmpty
+      const decision = decideSessionTabRemoval({
+        confirmSessionClose: preferences?.confirm_session_close,
+        removalBehavior: preferences?.removal_behavior,
+        archive,
+        bypassConfirm,
+        sessionIsEmpty,
+      })
+      const needsConfirm = decision.confirm
 
       const action = () => {
         if (activeSessions.length > 1) {
@@ -636,7 +656,7 @@ export const SessionChatModal = memo(function SessionChatModal({
       }
 
       if (needsConfirm) {
-        setCloseConfirmMode(archive ? 'session-archive' : 'session')
+        setCloseConfirmMode('session')
         pendingCloseAction.current = action
         setCloseConfirmOpen(true)
       } else {
