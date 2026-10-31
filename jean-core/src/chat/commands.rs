@@ -3779,7 +3779,16 @@ pub async fn send_chat_message(
     let thread_message = message_for_backend.clone();
     let thread_backend = effective_backend.clone();
     // Agent sessions get their own recap format in the agent prompt.
-    let thread_include_recap = include_recap.unwrap_or(true) && agent_system_prompt.is_none();
+    // The `recap_enabled` preference is a hard off-switch (issue #31).
+    let recap_enabled_pref = crate::load_preferences(app.clone())
+        .await
+        .map(|p| p.recap_enabled)
+        .unwrap_or(true);
+    let thread_include_recap = super::resolve_include_recap(
+        include_recap,
+        recap_enabled_pref,
+        agent_system_prompt.is_some(),
+    );
     let thread_codex_search = codex_search_enabled;
 
     // For OpenCode sessions: create a cancel flag so we can signal the blocking HTTP thread.

@@ -16,6 +16,7 @@ import {
   saveSessionScrollState,
   updateSessionScrollState,
 } from '../session-scroll-state'
+import { scrollToLatestAnswerTop } from '../open-scroll-target'
 
 interface UseScrollManagementOptions {
   /** Messages array for finding findings index */
@@ -120,6 +121,10 @@ export function useScrollManagement({
   isSending,
 }: UseScrollManagementOptions): UseScrollManagementReturn {
   const isMobile = useIsMobile()
+  const isSendingRef = useRef(false)
+  useEffect(() => {
+    isSendingRef.current = !!isSending
+  }, [isSending])
   const scrollViewportRef = useRef<HTMLDivElement>(null)
 
   // State for tracking if user is at the bottom of scroll area
@@ -401,6 +406,29 @@ export function useScrollManagement({
       const saved = sessionId ? getSessionScrollState(sessionId) : undefined
 
       if (!saved || saved.isFollowingTail) {
+        // Issue #26: when opening a finished chat, land on the top of the
+        // latest recap instead of the bottom. Never while streaming.
+        if (!isSendingRef.current) {
+          const top = scrollToLatestAnswerTop(viewport)
+          if (top != null && !isViewportAtBottom(viewport)) {
+            isFollowingTailRef.current = false
+            isAtBottomRef.current = false
+            userScrollUpUntilRef.current = Date.now() + 1000
+            setIsAtBottom(false)
+            lastScrollTopRef.current = top
+            if (sessionId) {
+              lastKnownScrollRef.current = {
+                sessionId,
+                scrollTop: top,
+                isFollowingTail: false,
+              }
+            }
+            pendingRestoreRef.current = false
+            pendingRestoreAttemptsRef.current = 0
+            clearPendingRestoreRetry()
+            return
+          }
+        }
         isFollowingTailRef.current = true
         isAtBottomRef.current = true
         userScrollUpUntilRef.current = 0

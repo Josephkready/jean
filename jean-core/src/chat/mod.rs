@@ -41,6 +41,18 @@ pub use storage::{preserve_base_sessions, restore_base_sessions, with_sessions_m
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Decide whether the end-of-turn recap instruction is appended to the system
+/// prompt. The user preference is a hard off-switch; per-call opt-outs (for
+/// example release notes) and agent sessions (which carry their own recap
+/// format) also disable it. Issue #31.
+pub fn resolve_include_recap(
+    requested: Option<bool>,
+    recap_enabled_pref: bool,
+    is_agent_session: bool,
+) -> bool {
+    recap_enabled_pref && requested.unwrap_or(true) && !is_agent_session
+}
+
 /// End-of-turn recap instruction. Appended to every backend's system prompt so
 /// the assistant terminates multi-step turns with a single `## Recap` markdown
 /// block. The compact view in `CompactMessageList.tsx` extracts that block and
@@ -122,6 +134,18 @@ mod tests {
         assert!(RECAP_INSTRUCTION.contains("smoke test"));
         assert!(RECAP_INSTRUCTION.contains("manual"));
         assert!(RECAP_INSTRUCTION.contains("if it makes sense"));
+    }
+
+    // Issue #31: the preference must override every default-on path.
+    #[test]
+    fn resolve_include_recap_honors_preference_off_switch() {
+        use super::resolve_include_recap;
+        assert!(resolve_include_recap(None, true, false));
+        assert!(resolve_include_recap(Some(true), true, false));
+        assert!(!resolve_include_recap(None, false, false));
+        assert!(!resolve_include_recap(Some(true), false, false));
+        assert!(!resolve_include_recap(Some(false), true, false));
+        assert!(!resolve_include_recap(None, true, true));
     }
 
     #[test]

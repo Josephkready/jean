@@ -449,6 +449,10 @@ pub struct AppPreferences {
     pub expand_tool_calls_by_default: bool, // Expand all tool call collapsibles by default (default: false)
     #[serde(default)]
     pub window_vibrancy: bool, // macOS window vibrancy effect (high GPU cost, default false)
+    /// Append the end-of-turn recap instruction to chat system prompts
+    /// (default true). Issue #31.
+    #[serde(default = "default_recap_enabled")]
+    pub recap_enabled: bool,
     #[serde(default = "default_finished_session_animation_enabled")]
     pub finished_session_animation_enabled: bool, // Soft glow on finished-sessions badge (default true)
     #[serde(default = "default_terminal_background")]
@@ -470,6 +474,10 @@ pub struct AppPreferences {
     /// server uses the same value. Jean MCP is unrelated and stays enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_default_host: Option<String>,
+}
+
+fn default_recap_enabled() -> bool {
+    true
 }
 
 fn default_finished_session_animation_enabled() -> bool {
@@ -1631,6 +1639,24 @@ mod tests {
         assert!(!preferences.pi_auto_steer_enabled);
         assert!(!preferences.claude_auto_steer_enabled);
         assert!(!preferences.grok_auto_steer_enabled);
+    }
+
+    // Issue #31: recaps need a real off-switch that survives old prefs files.
+    #[test]
+    fn app_preferences_recap_enabled_defaults_on_and_honors_explicit_off() {
+        assert!(AppPreferences::default().recap_enabled);
+
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        prefs_json.as_object_mut().unwrap().remove("recap_enabled");
+        let prefs: AppPreferences = serde_json::from_value(prefs_json.clone()).unwrap();
+        assert!(prefs.recap_enabled);
+
+        prefs_json
+            .as_object_mut()
+            .unwrap()
+            .insert("recap_enabled".to_string(), json!(false));
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(!prefs.recap_enabled);
     }
 
     #[test]
@@ -3435,6 +3461,7 @@ impl Default for AppPreferences {
             coderabbit_cli_source: default_cli_source(),
             expand_tool_calls_by_default: false,
             window_vibrancy: false,
+            recap_enabled: default_recap_enabled(),
             finished_session_animation_enabled: default_finished_session_animation_enabled(),
             terminal_background: default_terminal_background(),
             terminal_background_custom: None,
