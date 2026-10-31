@@ -34,7 +34,10 @@ import {
   type CloseConfirmMode,
 } from './CloseWorktreeDialog'
 import { useChatStore } from '@/store/chat-store'
-import { isSessionEmpty } from '@/components/projects/worktree-close-decision'
+import {
+  closeRequiresConfirmation,
+  isSessionEmpty,
+} from '@/components/projects/worktree-close-decision'
 import { useTerminalStore } from '@/store/terminal-store'
 import { useBrowserStore } from '@/store/browser-store'
 import { useUIStore } from '@/store/ui-store'
@@ -612,7 +615,11 @@ export const SessionChatModal = memo(function SessionChatModal({
       // unsent draft) close immediately.
       const needsConfirm =
         !bypassConfirm &&
-        preferences?.confirm_session_close !== false &&
+        closeRequiresConfirmation(
+          preferences?.confirm_session_close,
+          preferences?.removal_behavior,
+          archive
+        ) &&
         !sessionIsEmpty
 
       const action = () => {
@@ -641,6 +648,7 @@ export const SessionChatModal = memo(function SessionChatModal({
       handleArchiveSession,
       handleDeleteSession,
       preferences?.confirm_session_close,
+      preferences?.removal_behavior,
       selectVisualNeighbor,
     ]
   )
@@ -668,7 +676,13 @@ export const SessionChatModal = memo(function SessionChatModal({
           onRequestCloseWorktree()
           onClose()
         }
-        if (bypassConfirm) {
+        if (
+          bypassConfirm ||
+          !closeRequiresConfirmation(
+            preferences?.confirm_session_close,
+            preferences?.removal_behavior
+          )
+        ) {
           closeWorktree()
           return
         }
@@ -693,7 +707,10 @@ export const SessionChatModal = memo(function SessionChatModal({
         isSessionEmpty(currentSession, useChatStore.getState().inputDrafts)
       if (
         !bypassConfirm &&
-        preferences?.confirm_session_close !== false &&
+        closeRequiresConfirmation(
+          preferences?.confirm_session_close,
+          preferences?.removal_behavior
+        ) &&
         !sessionIsEmpty
       ) {
         setCloseConfirmMode('session')
@@ -717,6 +734,7 @@ export const SessionChatModal = memo(function SessionChatModal({
     handleDeleteSession,
     selectVisualNeighbor,
     preferences?.confirm_session_close,
+    preferences?.removal_behavior,
     onRequestCloseWorktree,
     onClose,
   ])

@@ -67,6 +67,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
+import { closeRequiresConfirmation } from '@/components/projects/worktree-close-decision'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -2900,7 +2901,13 @@ export function ProjectCanvasView({
         const section = worktreeSections.find(
           s => s.worktree.id === item.worktreeId
         )
-        if (bypassConfirm || preferences?.confirm_session_close === false) {
+        if (
+          bypassConfirm ||
+          !closeRequiresConfirmation(
+            preferences?.confirm_session_close,
+            preferences?.removal_behavior
+          )
+        ) {
           closeWorktreeDirectly(item.worktreeId)
         } else {
           setCloseWorktreeTarget({
@@ -2930,6 +2937,7 @@ export function ProjectCanvasView({
     flatCards,
     worktreeSections,
     preferences?.confirm_session_close,
+    preferences?.removal_behavior,
     closeWorktreeDirectly,
   ])
 
