@@ -717,7 +717,6 @@ fn build_claude_args(
     mcp_config: Option<&str>,
     chrome_enabled: bool,
     custom_profile_name: Option<&str>,
-    include_recap: bool,
     working_dir: &std::path::Path,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let mut args = Vec::new();
@@ -1045,12 +1044,6 @@ fn build_claude_args(
                 codex_binary.display()
             ));
         }
-    }
-
-    // End-of-turn recap instruction (compact view surfaces this block).
-    // Magic release notes skip this — the recap would cover the actual notes.
-    if include_recap {
-        system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
     }
 
     // Collect all context files (issues and PRs) and concatenate into a single file
@@ -1584,7 +1577,6 @@ pub fn execute_claude_detached(
     mcp_config: Option<&str>,
     chrome_enabled: bool,
     custom_profile_name: Option<&str>,
-    include_recap: bool,
     pid_callback: Option<Box<dyn FnOnce(u32) + Send>>,
 ) -> Result<(u32, ClaudeResponse), String> {
     use super::detached::spawn_detached_claude;
@@ -1630,7 +1622,6 @@ pub fn execute_claude_detached(
         mcp_config,
         chrome_enabled,
         custom_profile_name,
-        include_recap,
         working_dir,
     );
 

@@ -420,20 +420,6 @@ export const AppearancePane: React.FC = () => {
           </InlineField>
 
           <InlineField
-            label="End-of-turn recaps"
-            description="Ask the assistant to finish each multi-step turn with a short recap. Turn off to stop requesting recaps in new messages."
-          >
-            <Switch
-              aria-label="End-of-turn recaps"
-              checked={preferences?.recap_enabled ?? true}
-              onCheckedChange={checked =>
-                patchPreferences.mutate({ recap_enabled: checked })
-              }
-              disabled={patchPreferences.isPending}
-            />
-          </InlineField>
-
-          <InlineField
             label="Expand tool calls by default"
             description="Automatically expand tool call details in chat instead of showing a collapsed summary"
           >

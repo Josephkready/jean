@@ -1605,7 +1605,6 @@ pub async fn dispatch_command(
             let custom_profile_name: Option<String> =
                 field_opt(&args, "customProfileName", "custom_profile_name")?;
             let backend: Option<String> = field_opt(&args, "backend", "backend")?;
-            let include_recap: Option<bool> = field_opt(&args, "includeRecap", "include_recap")?;
             let result = crate::chat::send_chat_message(
                 app.clone(),
                 session_id,
@@ -1623,7 +1622,6 @@ pub async fn dispatch_command(
                 chrome_enabled,
                 custom_profile_name,
                 backend,
-                include_recap,
             )
             .await?;
             to_value(result)
