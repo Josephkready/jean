@@ -32,19 +32,29 @@ describe('useSaveUIState input drafts (#33)', () => {
   let onDisk: Record<string, string>
   let saved: UIState | null
 
+  // Emulates the backend: drafts on disk + this page's changes ('' = cleared).
+  function backend(cmd: string, args: Record<string, unknown>) {
+    if (cmd === 'save_ui_state_with_draft_changes') {
+      const merged = { ...onDisk }
+      for (const [id, text] of Object.entries(
+        args.draftChanges as Record<string, string>
+      )) {
+        if (text === '') Reflect.deleteProperty(merged, id)
+        else merged[id] = text
+      }
+      onDisk = merged
+      saved = { ...(args.uiState as UIState), input_drafts: merged }
+      return merged
+    }
+    return null
+  }
+
   beforeEach(() => {
     resetInputDraftChangesForTests()
     saved = null
     mockInvoke.mockReset()
-    mockInvoke.mockImplementation(
-      async (cmd: string, args: { uiState: UIState }) => {
-        if (cmd === 'load_ui_state') return state(onDisk)
-        if (cmd === 'save_ui_state') {
-          saved = args.uiState
-          onDisk = args.uiState.input_drafts ?? {}
-        }
-        return null
-      }
+    mockInvoke.mockImplementation(async (cmd: string, args: never) =>
+      backend(cmd, args)
     )
   })
 
@@ -52,12 +62,16 @@ describe('useSaveUIState input drafts (#33)', () => {
     // Tab A cleared the draft on send; disk has no draft for s1.
     onDisk = {}
     // This (stale) tab still holds the mid-typing draft it restored at load,
-    // but never changed it.
+    // but never changed it, so it sends no draft changes.
     const { result } = renderHook(() => useSaveUIState(), { wrapper })
     await result.current.mutateAsync(
       state({ s1: 'Can we look at recently opened issues and ' })
     )
     expect(saved?.input_drafts).toEqual({})
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'save_ui_state_with_draft_changes',
+      expect.objectContaining({ draftChanges: {} })
+    )
   })
 
   it('persists drafts this page typed and clears the ones it cleared', async () => {
@@ -66,5 +80,36 @@ describe('useSaveUIState input drafts (#33)', () => {
     const { result } = renderHook(() => useSaveUIState(), { wrapper })
     await result.current.mutateAsync(state({ s2: 'keep', s3: 'new' }))
     expect(saved?.input_drafts).toEqual({ s2: 'keep', s3: 'new' })
+  })
+
+  it('requeues draft changes when the save fails so a later save retries them', async () => {
+    onDisk = {}
+    trackInputDraftChanges({}, { s1: 'typed' })
+    mockInvoke.mockRejectedValueOnce(new Error('write failed'))
+    const { result } = renderHook(() => useSaveUIState(), { wrapper })
+    await expect(
+      result.current.mutateAsync(state({ s1: 'typed' }))
+    ).rejects.toThrow('write failed')
+    await result.current.mutateAsync(state({ s1: 'typed' }))
+    expect(saved?.input_drafts).toEqual({ s1: 'typed' })
+  })
+
+  it('times out a hung save, requeues its draft changes, and lets the next save retry', async () => {
+    onDisk = {}
+    trackInputDraftChanges({}, { s1: 'typed' })
+    mockInvoke.mockImplementationOnce(() => new Promise(() => undefined))
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => useSaveUIState(), { wrapper })
+      const hung = result.current.mutateAsync(state({ s1: 'typed' }))
+      const assertion = expect(hung).rejects.toThrow('timed out')
+      await vi.advanceTimersByTimeAsync(10_000)
+      await assertion
+    } finally {
+      vi.useRealTimers()
+    }
+    const { result } = renderHook(() => useSaveUIState(), { wrapper })
+    await result.current.mutateAsync(state({ s1: 'typed' }))
+    expect(saved?.input_drafts).toEqual({ s1: 'typed' })
   })
 })
