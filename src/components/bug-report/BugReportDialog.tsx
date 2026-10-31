@@ -17,6 +17,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { toast } from 'sonner'
+import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { ChevronRight, Paperclip, X } from '@/components/icons/reicon'
 import { useUIStore } from '@/store/ui-store'
@@ -26,7 +28,6 @@ import { useProjects, useWorktree } from '@/services/projects'
 import { useTheme } from '@/hooks/use-theme'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { isNativeApp } from '@/lib/environment'
-import { openExternal } from '@/lib/platform'
 import { CLIENT_BUILD_INFO } from '@/lib/build-info'
 import { generateId } from '@/lib/uuid'
 import { cn } from '@/lib/utils'
@@ -47,17 +48,12 @@ import {
   BUG_REPORT_MIN_LENGTH,
   buildBugReportContext,
   bugReportStatusMessage,
-  getBugReportStatus,
-  isFinalBugReportState,
-  safeIssueUrl,
   submitBugReport,
-  type BugReportStatus,
 } from '@/services/bug-report'
 
+type SubmitMode = 'again' | 'done'
+
 const DRAFT_KEY = 'jean:bug-report-draft'
-const POLL_INTERVAL_MS = 3000
-/** Stop polling after this; the issue-queue worker keeps going on its own. */
-const POLL_LIMIT_MS = 2 * 60 * 1000
 
 /** Status query roots of the CLIs Jean manages, for the `cliVersions` field. */
 const CLI_STATUS_KEYS: [string, string][] = [
@@ -124,11 +120,10 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
   const [description, setDescription] = useState(readDraft)
   const [screenshots, setScreenshots] = useState<StagedScreenshot[]>([])
   const [attachError, setAttachError] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
+  const [submitting, setSubmitting] = useState<SubmitMode | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [report, setReport] = useState<BugReportStatus | null>(null)
-  const [pollTimedOut, setPollTimedOut] = useState(false)
   const [tauriVersion, setTauriVersion] = useState<string | null>(null)
+  const descriptionRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const screenshotsRef = useRef(screenshots)
   screenshotsRef.current = screenshots
@@ -143,6 +138,9 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
   const { data: worktree } = useWorktree(activeWorktreeId)
   const { theme } = useTheme()
   const isMobile = useIsMobile()
+  // Keyboard hints are native-desktop only (see CLAUDE.md).
+  const showKbd = isNativeApp() && !isMobile
+  const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+'
 
   useEffect(() => {
     if (!isNativeApp()) return
@@ -254,9 +252,9 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
     void addFiles(files)
   }
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (mode: SubmitMode) => {
     if (!canSubmit) return
-    setSubmitting(true)
+    setSubmitting(mode)
     setError(null)
     try {
       const attachments = await Promise.all(
@@ -274,77 +272,33 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
       // The report is now saved on the server, so the draft can go.
       writeDraft('')
       setDescription('')
-      setReport(saved)
+      setScreenshots([])
+      setAttachError(null)
+      toast.success('Bug report saved', {
+        description:
+          saved.status === 'filed'
+            ? bugReportStatusMessage(saved.status)
+            : 'It will be filed as a GitHub issue shortly.',
+      })
+      if (mode === 'done') {
+        onClose()
+      } else {
+        // Fresh empty report, ready for the next one.
+        descriptionRef.current?.focus()
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setSubmitting(false)
+      setSubmitting(null)
     }
   }
-
-  // Poll the saved report until it is filed or needs attention.
-  const reportId = report?.id
-  const reportFinal = report ? isFinalBugReportState(report.status) : true
-  useEffect(() => {
-    if (!reportId || reportFinal) return
-    const startedAt = Date.now()
-    let inFlight = false
-    let cancelled = false
-    const timer = window.setInterval(async () => {
-      if (inFlight || cancelled) return
-      if (Date.now() - startedAt > POLL_LIMIT_MS) {
-        window.clearInterval(timer)
-        setPollTimedOut(true)
-        return
-      }
-      inFlight = true
-      try {
-        const next = await getBugReportStatus(reportId)
-        if (!cancelled) setReport(next)
-      } catch {
-        // A failed status check never means the saved report was lost.
-      } finally {
-        inFlight = false
-      }
-    }, POLL_INTERVAL_MS)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [reportId, reportFinal])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault()
-      void handleSubmit()
+      // Cmd/Ctrl+Enter = Send & done; add Shift for Send (keep writing).
+      void handleSubmit(event.shiftKey ? 'again' : 'done')
     }
-  }
-
-  if (report) {
-    const issueUrl =
-      report.status === 'filed' ? safeIssueUrl(report.issueUrl) : null
-    return (
-      <>
-        <DialogHeader>
-          <DialogTitle>Report a bug</DialogTitle>
-          <DialogDescription data-testid="bug-report-status">
-            {bugReportStatusMessage(report.status)}
-            {pollTimedOut &&
-              !isFinalBugReportState(report.status) &&
-              ' The issue queue continues in the background.'}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          {issueUrl && (
-            <Button variant="outline" onClick={() => openExternal(issueUrl)}>
-              View issue
-              {report.issueNumber ? ` #${report.issueNumber}` : ''}
-            </Button>
-          )}
-          <Button onClick={onClose}>Done</Button>
-        </DialogFooter>
-      </>
-    )
   }
 
   const detailEntries = Object.entries(details)
@@ -353,7 +307,7 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
     <form
       onSubmit={event => {
         event.preventDefault()
-        void handleSubmit()
+        void handleSubmit('done')
       }}
       onPaste={handlePaste}
       onDragOver={event => event.preventDefault()}
@@ -367,6 +321,7 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
         </DialogDescription>
       </DialogHeader>
       <Textarea
+        ref={descriptionRef}
         autoFocus
         value={description}
         onChange={event => handleChange(event.target.value)}
@@ -464,8 +419,23 @@ function BugReportForm({ onClose }: { onClose: () => void }) {
         <Button type="button" variant="ghost" onClick={onClose}>
           Cancel
         </Button>
-        <Button type="submit" disabled={!canSubmit}>
-          {submitting ? 'Saving…' : 'Send report'}
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!canSubmit}
+          onClick={() => void handleSubmit('again')}
+          data-testid="bug-report-send"
+        >
+          {submitting === 'again' ? 'Saving…' : 'Send'}
+          {showKbd && <Kbd>⇧{modKey}↵</Kbd>}
+        </Button>
+        <Button
+          type="submit"
+          disabled={!canSubmit}
+          data-testid="bug-report-send-done"
+        >
+          {submitting === 'done' ? 'Saving…' : 'Send & done'}
+          {showKbd && <Kbd>{modKey}↵</Kbd>}
         </Button>
       </DialogFooter>
     </form>

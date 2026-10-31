@@ -1,3 +1,4 @@
+import { focusChatInputUnlessBusy } from '@/lib/focus-chat-input'
 import { useCallback, type RefObject } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { invoke } from '@/lib/transport'
@@ -563,7 +564,7 @@ export function useInvestigateHandlers({
           aiLanguage: preferences?.ai_language,
           backend: investigateBackend,
         },
-        { onSettled: () => inputRef.current?.focus() }
+        { onSettled: () => focusChatInputUnlessBusy(inputRef) }
       )
     },
     [
@@ -837,7 +838,7 @@ export function useInvestigateHandlers({
             aiLanguage: preferences?.ai_language,
             backend: investigateBackend,
           },
-          { onSettled: () => inputRef.current?.focus() }
+          { onSettled: () => focusChatInputUnlessBusy(inputRef) }
         )
       }
 
@@ -1059,7 +1060,7 @@ export function useInvestigateHandlers({
             aiLanguage: preferences?.ai_language,
             backend: reviewCommentsBackend,
           },
-          { onSettled: () => inputRef.current?.focus() }
+          { onSettled: () => focusChatInputUnlessBusy(inputRef) }
         )
       }
 

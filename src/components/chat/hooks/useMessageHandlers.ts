@@ -1,3 +1,4 @@
+import { focusChatInputUnlessBusy } from '@/lib/focus-chat-input'
 import { useCallback, type RefObject } from 'react'
 import type { QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -517,9 +518,7 @@ export function useMessageHandlers({
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -801,9 +800,7 @@ export function useMessageHandlers({
               customProfileName: getCustomProfileName(),
             },
             {
-              onSettled: () => {
-                inputRef.current?.focus()
-              },
+              onSettled: () => focusChatInputUnlessBusy(inputRef),
             }
           )
         })
@@ -973,9 +970,7 @@ export function useMessageHandlers({
               customProfileName: getCustomProfileName(),
             },
             {
-              onSettled: () => {
-                inputRef.current?.focus()
-              },
+              onSettled: () => focusChatInputUnlessBusy(inputRef),
             }
           )
         })
@@ -1087,9 +1082,7 @@ export function useMessageHandlers({
         customProfileName: getCustomProfileName(),
       },
       {
-        onSettled: () => {
-          inputRef.current?.focus()
-        },
+        onSettled: () => focusChatInputUnlessBusy(inputRef),
       }
     )
   }, [
@@ -1187,9 +1180,7 @@ export function useMessageHandlers({
         customProfileName: getCustomProfileName(),
       },
       {
-        onSettled: () => {
-          inputRef.current?.focus()
-        },
+        onSettled: () => focusChatInputUnlessBusy(inputRef),
       }
     )
   }, [
@@ -2504,9 +2495,7 @@ export function useMessageHandlers({
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -2704,9 +2693,7 @@ export function useMessageHandlers({
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -3336,9 +3323,7 @@ Please apply this fix to the file.`
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -3477,9 +3462,7 @@ Please apply all these fixes to the respective files.`
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
