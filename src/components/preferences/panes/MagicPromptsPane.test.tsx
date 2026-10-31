@@ -921,7 +921,7 @@ describe('MagicPromptsPane', () => {
         {
           backend: 'codex',
           model: 'gpt-5.6-sol',
-          reasoning_effort: 'low',
+          reasoning_effort: 'high',
         },
         {
           backend: 'claude',
@@ -940,7 +940,7 @@ describe('MagicPromptsPane', () => {
     expect(mutateMock).toHaveBeenCalledWith(
       expect.objectContaining({
         magic_code_review_configs: [
-          expect.objectContaining({ reasoning_effort: 'low' }),
+          expect.objectContaining({ reasoning_effort: 'high' }),
           expect.objectContaining({ reasoning_effort: 'high' }),
         ],
       })

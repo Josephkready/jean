@@ -1345,17 +1345,21 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
         : undefined
       const reviewConfigs =
         selectedKey === 'code_review'
-          ? codeReviewConfigs.map(config => ({
-              ...config,
-              reasoning_effort:
-                getMagicPromptModelReasoning(
-                  modelCatalog,
-                  config.backend as CliBackend,
-                  config.model,
-                  config.backend === 'claude' ? selectedProvider : null,
-                  profiles
-                )?.default ?? null,
-            }))
+          ? codeReviewConfigs.map(config =>
+              config.backend !== 'claude'
+                ? config
+                : {
+                    ...config,
+                    reasoning_effort:
+                      getMagicPromptModelReasoning(
+                        modelCatalog,
+                        config.backend as CliBackend,
+                        config.model,
+                        selectedProvider,
+                        profiles
+                      )?.default ?? null,
+                  }
+            )
           : undefined
       patchPreferences.mutate({
         magic_prompt_providers: {
