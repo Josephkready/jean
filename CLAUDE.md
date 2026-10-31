@@ -480,7 +480,7 @@ When adding a backend like Claude, Codex, OpenCode, Cursor, Pi, Command Code, or
 
 **System prompts, modes, and context:**
 
-- [ ] Assemble prompts with project custom prompt, global system prompt, execution-mode instruction, `RECAP_INSTRUCTION`, language preference, and parallel-execution prompt (always on)
+- [ ] Assemble prompts with project custom prompt, global system prompt, execution-mode instruction, language preference, and parallel-execution prompt (always on)
 - [ ] Use the backend-native system prompt mechanism when available; otherwise use a safe fallback
 - [ ] Map Jean execution modes (`plan`, `build`, `yolo`) to backend-native sandbox/approval controls
 - [ ] Update `getSupportedExecutionModes`, `isExecutionModeSupported`, and `normalizeExecutionModeForBackend`

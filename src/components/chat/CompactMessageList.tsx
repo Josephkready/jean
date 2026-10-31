@@ -83,6 +83,7 @@ import {
   extractRecapSection,
   stripRecapFromMessage,
 } from './recap-utils'
+import { OPEN_SCROLL_ANCHOR_ATTR } from './open-scroll-target'
 
 const SCROLL_THRESHOLD = 300
 const EMPTY_TOOL_CALLS: ToolCall[] = []
@@ -1388,7 +1389,12 @@ export const CompactMessageList = memo(
                   }
                 />
                 {(showLatestText || surfacedLatestToolCalls.length > 0) && (
-                  <div className="pb-4">
+                  <div
+                    className="pb-4"
+                    {...(showLatestText && !isSending
+                      ? { [OPEN_SCROLL_ANCHOR_ATTR]: '' }
+                      : {})}
+                  >
                     {showLatestText && (
                       <Markdown
                         streaming={false}

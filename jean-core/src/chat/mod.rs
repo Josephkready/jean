@@ -41,42 +41,6 @@ pub use storage::{preserve_base_sessions, restore_base_sessions, with_sessions_m
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// End-of-turn recap instruction. Appended to every backend's system prompt so
-/// the assistant terminates multi-step turns with a single `## Recap` markdown
-/// block. The compact view in `CompactMessageList.tsx` extracts that block and
-/// renders it as the visible summary instead of the full latest assistant text.
-pub const RECAP_INSTRUCTION: &str = "## End-of-turn recap
-
-When you finish a turn that involved tool calls, edits, or multi-step work, end your response with a final markdown section like this:
-
-## Recap
-
-[If the user asked a question or requested a specific output, restate the actual answer/result here so the recap stands alone as the deliverable. Use a short paragraph or bulleted list. Keep the recap easy to read on a phone; do not use Markdown tables.]
-
-- 2-4 short bullets for context that doesn't fit above: caveats, follow-ups, unresolved questions, or files the user should review.
-
-Tested against local dev env: Yes/No
-
-[Optional `### Possible regressions` bulleted list — include ONLY when the rules below say to.]
-
-[Optional `### How to test` subsection — include ONLY when the rules below say to.]
-
-Rules:
-- Heading must be the literal string `## Recap` on its own line.
-- Place it as the LAST block of the message, after any prose.
-- The recap is the user-facing deliverable — it must be self-contained. Include the actual answer/result inline. Do NOT write things like \"I looked it up\" or \"see above\" — restate the answer.
-- Keep links in the recap. When the recap names an issue, PR, commit, security advisory, Linear issue, Sentry issue, URL, or other external resource that has a known link, write it as a Markdown link (for example `[GHSA-xxxx-xxxx-xxxx](https://github.com/owner/repo/security/advisories/GHSA-xxxx-xxxx-xxxx)` or `[#123](https://github.com/owner/repo/pull/123)`). If the same item is a link earlier in the message, it must also be a link in the recap. Do not invent URLs.
-- If the turn found issues, gaps, risks, or recommended fixes, use short bulleted lists. For each finding, include its location, impact, and recommended fix. Do not use Markdown tables anywhere in the recap, including findings and regressions, even when earlier general formatting guidance requests tables.
-- Add a `### How to test` subsection ONLY when the turn produced code, config, or behavior changes the user can verify. Make it actionable and specific (commands to run, UI flows to click through, files to inspect); if it makes sense, always include a smoke test that explains how the user can manually verify the main behavior. OMIT the subsection entirely on read-only turns — questions, explanations, research, planning, code review without edits, or any turn where there is nothing meaningful to test. Do NOT include placeholder content like \"N/A\", \"Nothing to test\", \"No tests needed\", or an empty bullet list. If in doubt, leave it out.
-- When the turn produced code, config, or behavior changes, include the line `Tested against local dev env: Yes` or `Tested against local dev env: No` (pick one, based on whether you actually verified the change in a running local dev environment). Omit this line on read-only turns.
-- When the turn produced code, config, or behavior changes, add a `### Possible regressions` subsection with a bulleted list of every existing behavior the change could break. Each bullet must name the area, what could break, likelihood (Low/Medium/High), and verification evidence (test name, typecheck, callers read, local dev env run), or say `Not verified`. Look beyond the diff: callers, shared types, persistence, other backends, web access, and mobile. If you found none, write the single line `No possible regressions found` and the reason, not an empty list. Omit this subsection on read-only turns.
-- In plan mode, when a plan is ready, you MUST still call the native plan tool (Claude ExitPlanMode, Codex `<proposed_plan>` / plan item, Cursor/OpenCode equivalent) to present it. The recap does NOT replace the plan tool — never end a plan-mode turn with only a `## Recap` block in place of the plan tool call.
-- Skip the recap entirely if the turn was a single one-line answer with no tool calls.
-- If the turn ends with a question for the user, put the question at the end of the recap, in this format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options. Jean shows the options as buttons below the recap. Do not also ask the question outside the recap.
-- Preserve pending UI screenshot review links in every recap until the user approves them, including links from earlier turns or an existing PR body. Include the annotated before-and-after review link as a clickable Markdown link and state that approval is pending. Do not invent a missing link; say when the review image is unavailable. A PR link alone does not replace the screenshot review link.
-- If you took screenshots or made images the user should see (for example browser screenshots of a UI change), show them in the recap in a fenced code block with the language `screenshots`, one absolute image file path or image URL per line, in the order to view them. Jean shows this block as an image gallery. Keep the clickable pending UI review link even when its image also appears in the gallery. For other images, do not repeat the gallery entries as links or markdown images.
-- Do NOT repeat tool inputs, file diffs, or raw command output verbatim. Summarize.";
-
 /// Injected when the parallel-execution magic prompt is cleared. Omitting the
 /// fan-out prompt is not enough: the model still spawns Task sub-agents unless
 /// it is told not to.
@@ -115,52 +79,16 @@ pub(crate) fn push_subagent_policy_before_global(
 
 #[cfg(test)]
 mod tests {
-    use super::RECAP_INSTRUCTION;
-
+    // Issue #31: chat system prompts no longer request an end-of-turn recap.
+    // The instruction constant is gone; this guards the shared prompt pieces
+    // Jean assembles for every backend from reintroducing it.
     #[test]
-    fn recap_how_to_test_rule_requests_manual_smoke_test_when_useful() {
-        assert!(RECAP_INSTRUCTION.contains("smoke test"));
-        assert!(RECAP_INSTRUCTION.contains("manual"));
-        assert!(RECAP_INSTRUCTION.contains("if it makes sense"));
-    }
-
-    #[test]
-    fn recap_holds_inline_question() {
-        assert!(RECAP_INSTRUCTION.contains("put the question at the end of the recap"));
-        assert!(RECAP_INSTRUCTION.contains("`Reply with a number:`"));
-    }
-
-    #[test]
-    fn recap_shows_screenshots_as_gallery_block() {
-        assert!(RECAP_INSTRUCTION.contains("fenced code block with the language `screenshots`"));
-    }
-
-    // Regression guard for https://github.com/Josephkready/jean/issues/22:
-    // compact recap views otherwise omit the image the user must approve.
-    #[test]
-    fn recap_preserves_pending_screenshot_review_links_issue_22() {
-        assert!(RECAP_INSTRUCTION
-            .contains("Preserve pending UI screenshot review links in every recap"));
-        assert!(
-            RECAP_INSTRUCTION.contains("including links from earlier turns or an existing PR body")
-        );
-        assert!(RECAP_INSTRUCTION.contains("Keep the clickable pending UI review link"));
-    }
-
-    #[test]
-    fn recap_requests_local_dev_env_tested_line() {
-        assert!(RECAP_INSTRUCTION.contains("Tested against local dev env: Yes"));
-        assert!(RECAP_INSTRUCTION.contains("Tested against local dev env: No"));
-    }
-
-    // Regression guard for https://github.com/Josephkready/jean/issues/23.
-    #[test]
-    fn recap_uses_mobile_readable_lists_issue_23() {
-        assert!(RECAP_INSTRUCTION.contains("### Possible regressions"));
-        assert!(RECAP_INSTRUCTION.contains("Do not use Markdown tables anywhere in the recap"));
-        assert!(RECAP_INSTRUCTION.contains("subsection with a bulleted list"));
-        assert!(RECAP_INSTRUCTION.contains("verification evidence"));
-        assert!(RECAP_INSTRUCTION.contains("No possible regressions found"));
+    fn shared_system_prompt_pieces_do_not_request_a_recap_issue_31() {
+        let mut parts = Vec::new();
+        super::push_subagent_policy_before_global(&mut parts, None, "Global rule.".to_string());
+        let text = parts.join("\n\n");
+        assert!(!text.contains("End-of-turn recap"));
+        assert!(!text.contains("end your response with a final markdown section"));
     }
 
     #[test]

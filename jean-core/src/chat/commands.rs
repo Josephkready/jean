@@ -551,7 +551,6 @@ fn build_kimi_system_prompt(
     ai_language: Option<&str>,
     parallel_prompt: Option<&str>,
     agent_prompt: Option<&str>,
-    include_recap: bool,
     local_files_available: bool,
 ) -> Option<String> {
     let mut parts = Vec::new();
@@ -594,9 +593,6 @@ fn build_kimi_system_prompt(
         }
     }
     crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, app);
-    if include_recap {
-        parts.push(super::RECAP_INSTRUCTION.to_string());
-    }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
@@ -1324,7 +1320,6 @@ async fn drain_backend_queue(
             request.chrome_enabled,
             request.custom_profile_name,
             request.backend,
-            None,
         )
         .await
         {
@@ -2976,7 +2971,6 @@ pub async fn send_chat_message(
     chrome_enabled: Option<bool>,
     custom_profile_name: Option<String>,
     backend: Option<String>,
-    include_recap: Option<bool>,
 ) -> Result<ChatMessage, String> {
     log::info!("[SendChat] ENTRY session={session_id} worktree={worktree_id} model={model:?} execution_mode={execution_mode:?}");
     log::trace!("Sending chat message for session: {session_id}, worktree: {worktree_id}, model: {model:?}, execution_mode: {execution_mode:?}, thinking: {thinking_level:?}, effort: {effort_level:?}, allowed_tools: {allowed_tools:?}");
@@ -3778,8 +3772,6 @@ pub async fn send_chat_message(
     };
     let thread_message = message_for_backend.clone();
     let thread_backend = effective_backend.clone();
-    // Agent sessions get their own recap format in the agent prompt.
-    let thread_include_recap = include_recap.unwrap_or(true) && agent_system_prompt.is_none();
     let thread_codex_search = codex_search_enabled;
 
     // For OpenCode sessions: create a cancel flag so we can signal the blocking HTTP thread.
@@ -3859,7 +3851,6 @@ pub async fn send_chat_message(
                         thread_mcp_config.as_deref(),
                         chrome,
                         thread_custom_profile.as_deref(),
-                        thread_include_recap,
                         Some(make_pid_callback()),
                     ) {
                         Ok((pid, mut response)) => {
@@ -4168,11 +4159,6 @@ pub async fn send_chat_message(
                                 codex_binary.display()
                             ));
                         }
-                    }
-
-                    // End-of-turn recap instruction (compact view surfaces this block)
-                    if thread_include_recap {
-                        system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
                     // Keep the current Codex execution mode as the final authoritative
@@ -4564,11 +4550,6 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    // End-of-turn recap instruction (compact view surfaces this block)
-                    if thread_include_recap {
-                        system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
-                    }
-
                     // Collect and inline context files (issues, PRs, saved contexts)
                     let mut context_content = String::new();
 
@@ -4894,11 +4875,6 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    // End-of-turn recap instruction (compact view surfaces this block)
-                    if thread_include_recap {
-                        parts.push(super::RECAP_INSTRUCTION.to_string());
-                    }
-
                     if parts.is_empty() {
                         None
                     } else {
@@ -4946,7 +4922,6 @@ pub async fn send_chat_message(
                         &thread_app,
                         &thread_session_id,
                         &thread_worktree_id,
-                        thread_include_recap,
                     );
                 match super::commandcode::execute_commandcode_headless(
                     &thread_app,
@@ -5062,10 +5037,6 @@ pub async fn send_chat_message(
                                 codex_binary.display()
                             ));
                         }
-                    }
-
-                    if thread_include_recap {
-                        parts.push(super::RECAP_INSTRUCTION.to_string());
                     }
 
                     if parts.is_empty() {
@@ -5188,10 +5159,6 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    if thread_include_recap {
-                        parts.push(super::RECAP_INSTRUCTION.to_string());
-                    }
-
                     let loaded_context = super::context_instructions::build_loaded_context_content(
                         &thread_app,
                         &thread_session_id,
@@ -5266,7 +5233,6 @@ pub async fn send_chat_message(
                     thread_ai_language.as_deref(),
                     thread_parallel_prompt.as_deref(),
                     thread_agent_prompt.as_deref(),
-                    thread_include_recap,
                     true,
                 );
                 let effort = thread_effort_level
@@ -5310,7 +5276,6 @@ pub async fn send_chat_message(
                     thread_ai_language.as_deref(),
                     thread_parallel_prompt.as_deref(),
                     thread_agent_prompt.as_deref(),
-                    thread_include_recap,
                     devin_location == super::types::DevinLocation::Local,
                 );
                 let loaded_context = super::context_instructions::build_loaded_context_content(
@@ -5365,7 +5330,6 @@ pub async fn send_chat_message(
                     thread_ai_language.as_deref(),
                     thread_parallel_prompt.as_deref(),
                     thread_agent_prompt.as_deref(),
-                    thread_include_recap,
                     true,
                 );
                 let effort = thread_effort_level
@@ -5411,7 +5375,6 @@ pub async fn send_chat_message(
                     thread_ai_language.as_deref(),
                     thread_parallel_prompt.as_deref(),
                     thread_agent_prompt.as_deref(),
-                    thread_include_recap,
                     true,
                 );
                 let effort = thread_effort_level
@@ -12112,7 +12075,7 @@ mod tests {
         let mut parts = vec![
             "Custom prompt still says Every Codex plan-mode response must use STALE_PLAN_MARKER."
                 .to_string(),
-            crate::chat::RECAP_INSTRUCTION.to_string(),
+            "Jean base instruction.".to_string(),
         ];
 
         append_codex_execution_mode_instruction(&mut parts, Some("yolo"));
