@@ -28,6 +28,7 @@ pub(crate) mod pi;
 pub mod registry;
 pub mod run_log;
 pub mod search;
+mod session_info;
 pub mod storage;
 pub mod tail;
 pub mod types;
@@ -37,6 +38,7 @@ pub(crate) use commands::default_model_for_backend;
 pub use commands::*;
 pub use mcp_auth::*;
 pub use native_history::*;
+pub use session_info::get_session_info;
 pub use storage::{preserve_base_sessions, restore_base_sessions, with_sessions_mut};
 
 use std::sync::atomic::{AtomicUsize, Ordering};

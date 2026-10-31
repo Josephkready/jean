@@ -34,6 +34,7 @@ import {
   type SessionCardProps,
 } from './session-card-utils'
 import { canReconnectSession } from '@/services/chat'
+import { copySessionInfo } from '@/lib/session-info'
 import { useChatStore } from '@/store/chat-store'
 
 export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
@@ -272,6 +273,12 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
           >
             <Copy className="mr-2 h-4 w-4" />
             Copy Session ID
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => void copySessionInfo(card.session.id)}
+          >
+            <Copy className="mr-2 h-4 w-4" />
+            Copy Session Info
           </ContextMenuItem>
           {resumeCommand && (
             <ContextMenuItem

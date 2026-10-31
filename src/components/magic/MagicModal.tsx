@@ -1,3 +1,4 @@
+import { copyActiveSessionInfo } from '@/lib/session-info'
 import { useCallback, useState, useRef, useEffect, useMemo } from 'react'
 import { Wand2, Loader2 } from '@/components/icons/reicon'
 import {
@@ -152,6 +153,7 @@ const CANVAS_ALLOWED_OPTIONS = new Set<MagicOption>([
   'merge-pr',
   'resolve-conflicts',
   'linked-projects',
+  'copy-session-info',
 ])
 
 /** Canvas options that navigate to worktree chat and dispatch a magic-command event */
@@ -207,6 +209,7 @@ const KEY_TO_OPTION: Record<string, MagicOption> = {
   j: 'inject-session',
   k: 'linked-projects',
   w: 'fork-session',
+  '1': 'copy-session-info',
   q: 'check-github-issues',
   c: 'commit',
   p: 'commit-and-push',
@@ -1963,6 +1966,12 @@ ${resolveInstructions}`
     async (option: MagicOption) => {
       // Block disabled options on canvas
       if (isOnCanvas && !CANVAS_ALLOWED_OPTIONS.has(option)) {
+        return
+      }
+
+      if (option === 'copy-session-info') {
+        setMagicModalOpen(false)
+        void copyActiveSessionInfo(selectedWorktreeId)
         return
       }
 

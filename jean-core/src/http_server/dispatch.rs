@@ -1392,6 +1392,13 @@ pub async fn dispatch_command(
             .await?;
             to_value(result)
         }
+        "get_session_info" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
+            let result =
+                crate::chat::get_session_info(app.clone(), session_id, worktree_path).await?;
+            to_value(result)
+        }
         "list_native_cli_sessions" => {
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
             let backend: String = from_field(&args, "backend")?;

@@ -74,6 +74,7 @@ describe('SessionContextMenuItems', () => {
       'Rename',
       'Add Label',
       'Copy Session ID',
+      'Copy Session Info',
       'Archive Session',
       'Delete Session',
     ])
@@ -96,6 +97,7 @@ describe('SessionContextMenuItems', () => {
       'Native Resume Command',
       'Reconnect',
       'Copy Session ID',
+      'Copy Session Info',
       'Archive Session',
       'Delete Session',
     ])
