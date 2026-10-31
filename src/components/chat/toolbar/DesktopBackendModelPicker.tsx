@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import { ChevronsUpDown, Zap } from '@/components/icons/reicon'
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import {
@@ -39,10 +40,7 @@ import { useToolbarDerivedState } from '@/components/chat/toolbar/useToolbarDeri
 import { useToolbarDropdownShortcuts } from '@/components/chat/toolbar/useToolbarDropdownShortcuts'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { isNativeApp } from '@/lib/environment'
-import {
-  DEFAULT_ACCOUNT_LABEL,
-  getClaudeAccountNames,
-} from '@/components/chat/toolbar/model-picker-rows'
+import { getClaudeAccountNames } from '@/components/chat/toolbar/model-picker-rows'
 
 interface DesktopBackendModelPickerProps {
   disabled?: boolean
@@ -225,6 +223,8 @@ export function DesktopBackendModelPicker({
   // useToolbarDerivedState resolves Antigravity labels from the static option
   // list only — prefer the CLI-reported label for the trigger when available.
   // With account profiles, show which Claude login the session uses.
+  const { label: defaultAccountLabel, rowLabel: defaultRowLabel } =
+    useClaudeDefaultAccountLabel()
   const selectedAccountLabel = useMemo(() => {
     if (!onClaudeAccountSelect || selectedBackend !== 'claude') return null
     const accountNames = getClaudeAccountNames(customCliProfiles)
@@ -233,9 +233,10 @@ export function DesktopBackendModelPicker({
       return selectedProvider
     }
     return !selectedProvider || selectedProvider === '__anthropic__'
-      ? DEFAULT_ACCOUNT_LABEL
+      ? defaultRowLabel
       : null
   }, [
+    defaultRowLabel,
     customCliProfiles,
     onClaudeAccountSelect,
     selectedBackend,
@@ -308,7 +309,12 @@ export function DesktopBackendModelPicker({
                   <span className="truncate">· {selectedModelLabel}</span>
                   {onProviderChange && selectedBackend === 'claude' && (
                     <span className="truncate text-muted-foreground">
-                      · {getProviderDisplayName(selectedProvider)}
+                      ·{' '}
+                      {getProviderDisplayName(
+                        selectedProvider,
+                        'claude',
+                        defaultAccountLabel
+                      )}
                     </span>
                   )}
                   {getModelFastInfo(selectedBackend, selectedModel).isFast && (

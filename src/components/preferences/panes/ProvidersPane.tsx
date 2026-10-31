@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import React, { useState } from 'react'
 import { invoke } from '@/lib/transport'
 import { Pencil, Plus, Trash2 } from '@/components/icons/reicon'
@@ -24,6 +25,7 @@ import {
 import { SettingsSection } from '../SettingsSection'
 
 export const ProvidersPane: React.FC = () => {
+  const { label: defaultAccountLabel } = useClaudeDefaultAccountLabel()
   const { data: preferences } = usePreferences()
   const patchPreferences = usePatchPreferences()
 
@@ -83,7 +85,7 @@ export const ProvidersPane: React.FC = () => {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="default">Anthropic</SelectItem>
+                <SelectItem value="default">{defaultAccountLabel}</SelectItem>
                 {profiles.map(p => (
                   <SelectItem key={p.name} value={p.name}>
                     {p.name}
@@ -161,6 +163,7 @@ const CliProfilesEditor: React.FC<{
   const [editJson, setEditJson] = useState('')
   const [editSupportsThinking, setEditSupportsThinking] = useState(true)
   const [jsonError, setJsonError] = useState<string | null>(null)
+  const deletingRef = React.useRef(false)
 
   const existingNames = new Set(profiles.map(p => p.name))
   const availableTemplates = PREDEFINED_CLI_PROFILES.filter(
@@ -243,16 +246,22 @@ const CliProfilesEditor: React.FC<{
   }
 
   const deleteProfile = async (index: number) => {
-    const profile = profiles[index]
-    if (profile) {
-      try {
-        await invoke('delete_cli_profile', { name: profile.name })
-      } catch (e) {
-        console.error('Failed to delete CLI profile file:', e)
+    if (deletingRef.current) return
+    deletingRef.current = true
+    try {
+      const profile = profiles[index]
+      if (profile) {
+        try {
+          await invoke('delete_cli_profile', { name: profile.name })
+        } catch (e) {
+          console.error('Failed to delete CLI profile file:', e)
+        }
       }
+      onSave(profiles.filter((_, i) => i !== index))
+      if (editingIndex === index) cancelEdit()
+    } finally {
+      deletingRef.current = false
     }
-    onSave(profiles.filter((_, i) => i !== index))
-    if (editingIndex === index) cancelEdit()
   }
 
   return (
@@ -580,6 +589,7 @@ const PiProvidersEditor: React.FC<{
   const [editModels, setEditModels] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const deletingRef = React.useRef(false)
 
   const existingNames = new Set(providers.map(p => p.name))
   const availableTemplates = PREDEFINED_PI_PROVIDERS.filter(
@@ -705,16 +715,22 @@ const PiProvidersEditor: React.FC<{
   }
 
   const deleteProvider = async (index: number) => {
-    const provider = providers[index]
-    if (provider) {
-      try {
-        await invoke('delete_pi_provider', { name: provider.name })
-      } catch (e) {
-        console.error('Failed to delete PI provider from models.json:', e)
+    if (deletingRef.current) return
+    deletingRef.current = true
+    try {
+      const provider = providers[index]
+      if (provider) {
+        try {
+          await invoke('delete_pi_provider', { name: provider.name })
+        } catch (e) {
+          console.error('Failed to delete PI provider from models.json:', e)
+        }
       }
+      onSave(providers.filter((_, i) => i !== index))
+      if (editingIndex === index) cancelEdit()
+    } finally {
+      deletingRef.current = false
     }
-    onSave(providers.filter((_, i) => i !== index))
-    if (editingIndex === index) cancelEdit()
   }
 
   return (

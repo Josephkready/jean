@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import {
   useCallback,
   useEffect,
@@ -377,9 +378,12 @@ export function MobileSettingsMenu({
   const keepMenuOpenOnSelect = useCallback((event: Event) => {
     event.preventDefault()
   }, [])
+  const { label: defaultAccountLabel, email: defaultAccountEmail } =
+    useClaudeDefaultAccountLabel()
   const providerDisplayName = getProviderDisplayName(
     selectedProvider,
-    selectedBackend
+    selectedBackend,
+    defaultAccountLabel
   )
   const showClaudeProviders =
     customCliProfiles.length > 0 && selectedBackend === 'claude'
@@ -629,8 +633,9 @@ export function MobileSettingsMenu({
                     <DropdownMenuRadioItem
                       value="__anthropic__"
                       onSelect={keepMenuOpenOnSelect}
+                      title={defaultAccountEmail ?? undefined}
                     >
-                      Anthropic
+                      {defaultAccountLabel}
                     </DropdownMenuRadioItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuLabel className="text-xs text-muted-foreground">

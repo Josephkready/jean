@@ -2748,6 +2748,10 @@ pub async fn dispatch_command(
             let result = crate::claude_cli::get_claude_usage(account).await?;
             to_value(result)
         }
+        "get_claude_default_account_email" => {
+            let result = crate::claude_cli::get_claude_default_account_email().await;
+            to_value(result)
+        }
         "get_available_cli_versions" => {
             let result = crate::claude_cli::get_available_cli_versions().await?;
             to_value(result)

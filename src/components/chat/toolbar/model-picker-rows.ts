@@ -20,6 +20,20 @@ export interface PickerRow extends ModelOption {
 }
 
 export const DEFAULT_ACCOUNT_LABEL = 'Default'
+/** Provider-list label for the default Claude login when its account is unknown. */
+export const ANTHROPIC_PROVIDER_LABEL = 'Anthropic'
+
+/**
+ * Short name of the default Claude login: the local part of its email
+ * (`j60218@gmail.com` -> `j60218`), or `fallback` when the email is unknown.
+ */
+export function defaultAccountShortName(
+  email: string | null | undefined,
+  fallback: string = ANTHROPIC_PROVIDER_LABEL
+): string {
+  const local = email?.split('@')[0]?.trim()
+  return local ? local : fallback
+}
 
 /** Favorite / row key: `backend:model`, or `backend@account:model` for accounts. */
 export function modelKey(
@@ -81,20 +95,25 @@ export function getClaudeCatalogOptions(
   }))
 }
 
-export function accountRowLabel(account: string | null, label: string): string {
-  return `${account ?? DEFAULT_ACCOUNT_LABEL} · ${label}`
+export function accountRowLabel(
+  account: string | null,
+  label: string,
+  defaultAccountLabel: string = DEFAULT_ACCOUNT_LABEL
+): string {
+  return `${account ?? defaultAccountLabel} · ${label}`
 }
 
 /** One row per Claude model and account, accounts side by side per model. */
 export function buildClaudeAccountRows(
   options: ModelOption[],
-  accountNames: string[]
+  accountNames: string[],
+  defaultAccountLabel: string = DEFAULT_ACCOUNT_LABEL
 ): PickerRow[] {
   return options.flatMap(option =>
     [null, ...accountNames].map(account => ({
       backend: 'claude' as CliBackend,
       value: option.value,
-      label: accountRowLabel(account, option.label),
+      label: accountRowLabel(account, option.label, defaultAccountLabel),
       account,
     }))
   )
@@ -108,7 +127,8 @@ export function buildFavoriteRows(
   favoriteKeys: string[],
   sections: { backend: CliBackend; options: ModelOption[] }[],
   accountNames: string[],
-  claudeOptions: ModelOption[]
+  claudeOptions: ModelOption[],
+  defaultAccountLabel: string = DEFAULT_ACCOUNT_LABEL
 ): PickerRow[] {
   const showAccounts = accountNames.length > 0
   const rows: PickerRow[] = []
@@ -127,7 +147,7 @@ export function buildFavoriteRows(
         ? {
             backend,
             value: model,
-            label: accountRowLabel(account, label),
+            label: accountRowLabel(account, label, defaultAccountLabel),
             account,
           }
         : { backend, value: model, label }

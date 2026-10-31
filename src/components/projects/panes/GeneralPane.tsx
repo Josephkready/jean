@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import { SettingsSection } from '@/components/preferences/SettingsSection'
 import React, { useState, useCallback, useMemo, useRef } from 'react'
 import {
@@ -84,6 +85,7 @@ export function GeneralPane({
 }) {
   const { data: projects = [] } = useProjects()
   const project = projects.find(p => p.id === projectId)
+  const { label: defaultAccountLabel } = useClaudeDefaultAccountLabel()
 
   const {
     data: branches = [],
@@ -445,7 +447,9 @@ export function GeneralPane({
                   <SelectItem value="global-default">
                     Use global default
                   </SelectItem>
-                  <SelectItem value="__anthropic__">Anthropic</SelectItem>
+                  <SelectItem value="__anthropic__">
+                    {defaultAccountLabel}
+                  </SelectItem>
                   {profiles.map(p => (
                     <SelectItem key={p.name} value={p.name}>
                       {p.name}

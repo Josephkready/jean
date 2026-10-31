@@ -1,3 +1,4 @@
+import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import { Check, RefreshCw, Star, Zap } from '@/components/icons/reicon'
 import {
   useCallback,
@@ -351,6 +352,8 @@ export function BackendModelPickerContent({
     [backendModelSections, installedBackendsSet]
   )
 
+  const { label: defaultAccountLabel, rowLabel: defaultRowLabel } =
+    useClaudeDefaultAccountLabel()
   const accountNames = useMemo(
     () =>
       onClaudeAccountSelect && installedBackendsSet.has('claude')
@@ -371,9 +374,11 @@ export function BackendModelPickerContent({
           installedBackendsSet.has(section.backend)
         ),
         accountNames,
-        claudeCatalogOptions
+        claudeCatalogOptions,
+        defaultRowLabel
       ),
     [
+      defaultRowLabel,
       accountNames,
       backendModelSections,
       claudeCatalogOptions,
@@ -430,7 +435,11 @@ export function BackendModelPickerContent({
     if (activeTab === FAVORITES_TAB) {
       rows = favoriteRows
     } else if (activeTab === 'claude' && accountNames.length > 0) {
-      rows = buildClaudeAccountRows(claudeCatalogOptions, accountNames)
+      rows = buildClaudeAccountRows(
+        claudeCatalogOptions,
+        accountNames,
+        defaultRowLabel
+      )
     } else if (activeSection) {
       rows = activeSection.options.map(option => ({
         ...option,
@@ -478,6 +487,7 @@ export function BackendModelPickerContent({
     activeSection,
     activeTab,
     claudeCatalogOptions,
+    defaultRowLabel,
     favoriteRows,
     favoriteSet,
     search,
@@ -755,7 +765,9 @@ export function BackendModelPickerContent({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__anthropic__">Anthropic</SelectItem>
+                  <SelectItem value="__anthropic__">
+                    {defaultAccountLabel}
+                  </SelectItem>
                   {customCliProfiles.map(profile => (
                     <SelectItem key={profile.name} value={profile.name}>
                       {profile.name}
@@ -767,7 +779,12 @@ export function BackendModelPickerContent({
           ) : (
             showProviderHint && (
               <div className="px-4 pt-2 text-xs text-muted-foreground">
-                Provider: {getProviderDisplayName(selectedProvider)}
+                Provider:{' '}
+                {getProviderDisplayName(
+                  selectedProvider,
+                  'claude',
+                  defaultAccountLabel
+                )}
               </div>
             )
           )}
