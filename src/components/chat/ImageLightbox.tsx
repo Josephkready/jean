@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { MessageThreadContextMenu } from './message-thread-context-menu'
+import { ZoomableImage } from '@/components/ui/zoomable-image'
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden'
 
 interface ImageLightboxProps {
@@ -73,11 +74,14 @@ export function ImageLightbox({
             <DialogDescription>Preview of image: {alt}</DialogDescription>
           </VisuallyHidden>
           <MessageThreadContextMenu>
-            <img
-              src={assetSrc}
-              alt={alt}
-              className="max-w-full max-h-[calc(85vh-4rem)] object-contain rounded-md mx-auto"
-            />
+            <ZoomableImage className="h-[calc(100dvh-4rem)] w-full sm:h-[calc(85vh-4rem)]">
+              <img
+                src={assetSrc}
+                alt={alt}
+                draggable={false}
+                className="max-w-full max-h-full object-contain rounded-md mx-auto"
+              />
+            </ZoomableImage>
           </MessageThreadContextMenu>
         </DialogContent>
       </Dialog>
