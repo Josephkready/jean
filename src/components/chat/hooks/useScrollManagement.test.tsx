@@ -53,6 +53,8 @@ interface SetupHookOptions {
   contentReady?: boolean
   messages?: ChatMessage[]
   scrollHeight?: number
+  /** Render a latest-answer anchor this many px below the viewport top. */
+  anchorOffset?: number
 }
 
 function makeMessages(count: number): ChatMessage[] {
@@ -82,6 +84,7 @@ function setupHook({
   contentReady = true,
   messages = [],
   scrollHeight = 2000,
+  anchorOffset,
 }: SetupHookOptions = {}) {
   const virtualizedListRef = { current: null }
   // Keep latest values for rerenderSession defaults
@@ -132,6 +135,17 @@ function setupHook({
         <button data-testid="scroll-bottom" onClick={() => scrollToBottom()} />
         <div data-testid="content">
           <div data-plan-display data-testid="plan" />
+          {anchorOffset != null && (
+            <div
+              data-open-scroll-anchor
+              data-testid="anchor"
+              ref={el => {
+                if (el)
+                  el.getBoundingClientRect = () =>
+                    ({ top: anchorOffset }) as DOMRect
+              }}
+            />
+          )}
         </div>
       </div>
     )
@@ -730,5 +744,59 @@ describe('useScrollManagement session scroll retention (issue #594)', () => {
 
     expect(viewport.scrollTop).toBe(2000)
     expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+  })
+
+  describe('opening a finished chat lands on the latest answer (issue #26)', () => {
+    it('scrolls to the top of the latest answer and stops following the tail', () => {
+      const { viewport, getByTestId } = setupHook({
+        isSending: false,
+        activeSessionId: 'open-a',
+        messages: makeMessages(3),
+        anchorOffset: 308,
+      })
+
+      // anchor offset 308 minus 8px padding
+      expect(viewport.scrollTop).toBe(300)
+      expect(getByTestId('is-at-bottom')).toHaveTextContent('false')
+    })
+
+    it('stays at the tail while a response is streaming', () => {
+      const { viewport, getByTestId } = setupHook({
+        isSending: true,
+        activeSessionId: 'open-b',
+        messages: makeMessages(3),
+        anchorOffset: 308,
+      })
+
+      expect(viewport.scrollTop).toBe(2000)
+      expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+    })
+
+    it('falls back to the tail when there is no latest answer', () => {
+      const { viewport, getByTestId } = setupHook({
+        isSending: false,
+        activeSessionId: 'open-c',
+        messages: makeMessages(3),
+      })
+
+      expect(viewport.scrollTop).toBe(2000)
+      expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+    })
+
+    it('prefers a saved non-tail position over the latest answer', () => {
+      saveSessionScrollState('open-d', {
+        scrollTop: 777,
+        isFollowingTail: false,
+        visibleCount: 50,
+      })
+      const { viewport } = setupHook({
+        isSending: false,
+        activeSessionId: 'open-d',
+        messages: makeMessages(3),
+        anchorOffset: 308,
+      })
+
+      expect(viewport.scrollTop).toBe(777)
+    })
   })
 })

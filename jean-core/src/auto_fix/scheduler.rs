@@ -1292,9 +1292,16 @@ async fn try_start_auto_yolo_if_ready(app: &AppHandle, session_id: &str) {
         return;
     };
 
-    let Ok(status) = crate::chat::get_session_status(app.clone(), entry.session_id.clone()).await
-    else {
-        return;
+    let status = match crate::chat::get_session_status(app.clone(), entry.session_id.clone()).await
+    {
+        Ok(status) => status,
+        Err(err) => {
+            log::warn!(
+                "Mr. Robot: failed to read status for session {} : {err}",
+                entry.session_id
+            );
+            return;
+        }
     };
     if status
         .get("waitingForInputType")

@@ -121,8 +121,10 @@ export function useScrollManagement({
   isSending,
 }: UseScrollManagementOptions): UseScrollManagementReturn {
   const isMobile = useIsMobile()
-  const isSendingRef = useRef(false)
-  useEffect(() => {
+  const isSendingRef = useRef(!!isSending)
+  // Layout effect (declared before the scroll layout effects) so the ref is
+  // current on mount: opening a streaming chat must stay at the tail.
+  useLayoutEffect(() => {
     isSendingRef.current = !!isSending
   }, [isSending])
   const scrollViewportRef = useRef<HTMLDivElement>(null)
@@ -407,7 +409,7 @@ export function useScrollManagement({
 
       if (!saved || saved.isFollowingTail) {
         // Issue #26: when opening a finished chat, land on the top of the
-        // latest recap instead of the bottom. Never while streaming.
+        // latest finished answer instead of the bottom. Never while streaming.
         if (!isSendingRef.current) {
           const top = scrollToLatestAnswerTop(viewport)
           if (top != null && !isViewportAtBottom(viewport)) {
@@ -492,10 +494,12 @@ export function useScrollManagement({
             scrollTop: viewport.scrollTop,
             isFollowingTail: true,
           }
-          updateSessionScrollState(sessionId ?? '', {
-            scrollTop: viewport.scrollTop,
-            isFollowingTail: true,
-          })
+          if (sessionId) {
+            updateSessionScrollState(sessionId, {
+              scrollTop: viewport.scrollTop,
+              isFollowingTail: true,
+            })
+          }
         }
       }
     },
