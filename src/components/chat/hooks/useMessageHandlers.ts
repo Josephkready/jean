@@ -1,3 +1,4 @@
+import { focusChatInputUnlessBusy } from '@/lib/focus-chat-input'
 import { useCallback, type RefObject } from 'react'
 import type { QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -310,11 +311,6 @@ function asSessionBackend(
 }
 
 /**
- * Hook that extracts message-related handlers from ChatWindow.
- *
- * PERFORMANCE: Uses refs for session/worktree IDs to keep callbacks stable across session switches.
- */
-/**
  * Answer live Claude permission requests (Supervised): the run waits on Jean
  * MCP for this answer and continues in place. Returns false when none exist.
  */
@@ -345,6 +341,90 @@ function respondLiveClaudePermissions(
   return true
 }
 
+class WorktreeCreateInvokeError extends Error {
+  constructor(readonly reason: unknown) {
+    super(String(reason))
+  }
+}
+
+/**
+ * Create a worktree and wait until the backend reports it ready. The
+ * worktree:created / worktree:error listeners are attached before invoking
+ * create_worktree (events are buffered until the pending id is known), so a
+ * fast event is never dropped.
+ */
+async function createWorktreeAndWait(projectId: string): Promise<Worktree> {
+  let pendingId: string | null = null
+  let settled = false
+  let settle:
+    | ((r: { worktree: Worktree } | { error: string }) => void)
+    | undefined
+  const buffered: ({ worktree: Worktree } | { error: string; id: string })[] =
+    []
+  const result = new Promise<{ worktree: Worktree } | { error: string }>(
+    resolve => {
+      settle = resolve
+    }
+  )
+  const handle = (
+    id: string,
+    r: { worktree: Worktree } | { error: string }
+  ) => {
+    if (settled) return
+    if (pendingId === null) {
+      buffered.push('error' in r ? { ...r, id } : r)
+      return
+    }
+    if (id !== pendingId) return
+    settled = true
+    settle?.(r)
+  }
+
+  const unlistenCreated = await listen<WorktreeCreatedEvent>(
+    'worktree:created',
+    event =>
+      handle(event.payload.worktree.id, { worktree: event.payload.worktree })
+  )
+  let unlistenError: (() => void) | undefined
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    unlistenError = await listen<WorktreeCreateErrorEvent>(
+      'worktree:error',
+      event => handle(event.payload.id, { error: event.payload.error })
+    )
+    let pending: Worktree
+    try {
+      pending = await invoke<Worktree>('create_worktree', { projectId })
+    } catch (err) {
+      throw new WorktreeCreateInvokeError(err)
+    }
+    pendingId = pending.id
+    for (const b of buffered) {
+      const id = 'worktree' in b ? b.worktree.id : b.id
+      if (id === pendingId) {
+        handle(id, 'worktree' in b ? b : { error: b.error })
+      }
+    }
+    timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      settle?.({ error: 'Worktree creation timed out' })
+    }, 120_000)
+    const outcome = await result
+    if ('error' in outcome) throw new Error(outcome.error)
+    return outcome.worktree
+  } finally {
+    if (timeout) clearTimeout(timeout)
+    unlistenCreated()
+    unlistenError?.()
+  }
+}
+
+/**
+ * Hook that extracts message-related handlers from ChatWindow.
+ *
+ * PERFORMANCE: Uses refs for session/worktree IDs to keep callbacks stable across session switches.
+ */
 export function useMessageHandlers({
   activeSessionIdRef,
   activeWorktreeIdRef,
@@ -517,9 +597,7 @@ export function useMessageHandlers({
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -801,9 +879,7 @@ export function useMessageHandlers({
               customProfileName: getCustomProfileName(),
             },
             {
-              onSettled: () => {
-                inputRef.current?.focus()
-              },
+              onSettled: () => focusChatInputUnlessBusy(inputRef),
             }
           )
         })
@@ -973,9 +1049,7 @@ export function useMessageHandlers({
               customProfileName: getCustomProfileName(),
             },
             {
-              onSettled: () => {
-                inputRef.current?.focus()
-              },
+              onSettled: () => focusChatInputUnlessBusy(inputRef),
             }
           )
         })
@@ -1087,9 +1161,7 @@ export function useMessageHandlers({
         customProfileName: getCustomProfileName(),
       },
       {
-        onSettled: () => {
-          inputRef.current?.focus()
-        },
+        onSettled: () => focusChatInputUnlessBusy(inputRef),
       }
     )
   }, [
@@ -1187,9 +1259,7 @@ export function useMessageHandlers({
         customProfileName: getCustomProfileName(),
       },
       {
-        onSettled: () => {
-          inputRef.current?.focus()
-        },
+        onSettled: () => focusChatInputUnlessBusy(inputRef),
       }
     )
   }, [
@@ -1261,7 +1331,14 @@ export function useMessageHandlers({
       }
 
       // Mark plan approved on original session
-      markPlanApprovedService(worktreeId, worktreePath, sessionId, messageId)
+      markPlanApprovedService(
+        worktreeId,
+        worktreePath,
+        sessionId,
+        messageId
+      ).catch(err => {
+        console.error('[useMessageHandlers] markPlanApproved failed:', err)
+      })
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(sessionId),
         old => {
@@ -1366,24 +1443,26 @@ export function useMessageHandlers({
 
       // Persist model and backend to Rust session BEFORE sending so send_chat_message
       // reads the updated session state (both use with_sessions_mut, so ordering matters)
-      await invoke('set_session_model', {
-        worktreeId,
-        worktreePath,
-        sessionId: newSession.id,
-        model: resolvedModel,
-      }).catch(err =>
-        console.error('[clearContext] Failed to persist model:', err)
-      )
-      if (resolvedBackend) {
-        await invoke('set_session_backend', {
+      await Promise.all([
+        invoke('set_session_model', {
           worktreeId,
           worktreePath,
           sessionId: newSession.id,
-          backend: resolvedBackend,
+          model: resolvedModel,
         }).catch(err =>
-          console.error('[clearContext] Failed to persist backend:', err)
-        )
-      }
+          console.error('[clearContext] Failed to persist model:', err)
+        ),
+        resolvedBackend
+          ? invoke('set_session_backend', {
+              worktreeId,
+              worktreePath,
+              sessionId: newSession.id,
+              backend: resolvedBackend,
+            }).catch(err =>
+              console.error('[clearContext] Failed to persist backend:', err)
+            )
+          : Promise.resolve(),
+      ])
 
       const effectiveBackend = resolvedBackend ?? currentSessionBackend
       let resolvedThinkingLevel: ThinkingLevel =
@@ -1578,27 +1657,29 @@ export function useMessageHandlers({
 
       // Persist model and backend to Rust session BEFORE sending so send_chat_message
       // reads the updated session state (both use with_sessions_mut, so ordering matters)
-      await invoke('set_session_model', {
-        worktreeId,
-        worktreePath,
-        sessionId: newSession.id,
-        model: resolvedModel,
-      }).catch(err =>
-        console.error('[streamingClearContext] Failed to persist model:', err)
-      )
-      if (resolvedBackend) {
-        await invoke('set_session_backend', {
+      await Promise.all([
+        invoke('set_session_model', {
           worktreeId,
           worktreePath,
           sessionId: newSession.id,
-          backend: resolvedBackend,
+          model: resolvedModel,
         }).catch(err =>
-          console.error(
-            '[streamingClearContext] Failed to persist backend:',
-            err
-          )
-        )
-      }
+          console.error('[streamingClearContext] Failed to persist model:', err)
+        ),
+        resolvedBackend
+          ? invoke('set_session_backend', {
+              worktreeId,
+              worktreePath,
+              sessionId: newSession.id,
+              backend: resolvedBackend,
+            }).catch(err =>
+              console.error(
+                '[streamingClearContext] Failed to persist backend:',
+                err
+              )
+            )
+          : Promise.resolve(),
+      ])
 
       const effectiveBackend = resolvedBackend ?? currentSessionBackend
       let resolvedThinkingLevel: ThinkingLevel =
@@ -1725,7 +1806,14 @@ export function useMessageHandlers({
       }
 
       // Mark plan approved on original session
-      markPlanApprovedService(worktreeId, worktreePath, sessionId, messageId)
+      markPlanApprovedService(
+        worktreeId,
+        worktreePath,
+        sessionId,
+        messageId
+      ).catch(err => {
+        console.error('[useMessageHandlers] markPlanApproved failed:', err)
+      })
       queryClient.setQueryData<Session>(
         chatQueryKeys.session(sessionId),
         old => {
@@ -1752,52 +1840,17 @@ export function useMessageHandlers({
       store.setSessionReviewing(sessionId, false)
       store.setWaitingForInput(sessionId, false)
 
-      // Create new worktree
-      let pendingWorktree: Worktree
-      try {
-        pendingWorktree = await invoke<Worktree>('create_worktree', {
-          projectId,
-        })
-      } catch (err) {
-        toast.error(`Failed to create worktree: ${err}`)
-        return
-      }
-      // Wait for worktree to be ready
+      // Create new worktree. Listeners attach before create_worktree so a fast
+      // worktree:created / worktree:error event cannot be missed.
       let readyWorktree: Worktree
       try {
-        readyWorktree = await new Promise<Worktree>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            void unlistenCreated.then(fn => fn())
-            void unlistenError.then(fn => fn())
-            reject(new Error('Worktree creation timed out'))
-          }, 120_000)
-
-          const unlistenCreated = listen<WorktreeCreatedEvent>(
-            'worktree:created',
-            event => {
-              if (event.payload.worktree.id === pendingWorktree.id) {
-                clearTimeout(timeout)
-                void unlistenCreated.then(fn => fn())
-                void unlistenError.then(fn => fn())
-                resolve(event.payload.worktree)
-              }
-            }
-          )
-
-          const unlistenError = listen<WorktreeCreateErrorEvent>(
-            'worktree:error',
-            event => {
-              if (event.payload.id === pendingWorktree.id) {
-                clearTimeout(timeout)
-                void unlistenCreated.then(fn => fn())
-                void unlistenError.then(fn => fn())
-                reject(new Error(event.payload.error))
-              }
-            }
-          )
-        })
+        readyWorktree = await createWorktreeAndWait(projectId)
       } catch (err) {
-        toast.error(`Worktree creation failed: ${err}`)
+        if (err instanceof WorktreeCreateInvokeError) {
+          toast.error(`Failed to create worktree: ${err.reason}`)
+        } else {
+          toast.error(`Worktree creation failed: ${err}`)
+        }
         return
       }
 
@@ -1904,24 +1957,29 @@ export function useMessageHandlers({
             : old
       )
 
-      await invoke('set_session_model', {
-        worktreeId: readyWorktree.id,
-        worktreePath: readyWorktree.path,
-        sessionId: newSession.id,
-        model: resolvedModel,
-      }).catch(err =>
-        console.error('[worktreeApproval] Failed to persist model:', err)
-      )
-      if (resolvedBackend) {
-        await invoke('set_session_backend', {
+      await Promise.all([
+        invoke('set_session_model', {
           worktreeId: readyWorktree.id,
           worktreePath: readyWorktree.path,
           sessionId: newSession.id,
-          backend: resolvedBackend,
+          model: resolvedModel,
         }).catch(err =>
-          console.error('[worktreeApproval] Failed to persist backend:', err)
-        )
-      }
+          console.error('[worktreeApproval] Failed to persist model:', err)
+        ),
+        resolvedBackend
+          ? invoke('set_session_backend', {
+              worktreeId: readyWorktree.id,
+              worktreePath: readyWorktree.path,
+              sessionId: newSession.id,
+              backend: resolvedBackend,
+            }).catch(err =>
+              console.error(
+                '[worktreeApproval] Failed to persist backend:',
+                err
+              )
+            )
+          : Promise.resolve(),
+      ])
 
       const effectiveBackend = resolvedBackend ?? currentSessionBackend
       let resolvedThinkingLevel: ThinkingLevel =
@@ -2043,52 +2101,17 @@ export function useMessageHandlers({
       store.setSessionReviewing(sessionId, false)
       store.setWaitingForInput(sessionId, false)
 
-      // Create new worktree
-      let pendingWorktree: Worktree
-      try {
-        pendingWorktree = await invoke<Worktree>('create_worktree', {
-          projectId,
-        })
-      } catch (err) {
-        toast.error(`Failed to create worktree: ${err}`)
-        return
-      }
-      // Wait for worktree to be ready
+      // Create new worktree. Listeners attach before create_worktree so a fast
+      // worktree:created / worktree:error event cannot be missed.
       let readyWorktree: Worktree
       try {
-        readyWorktree = await new Promise<Worktree>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            void unlistenCreated.then(fn => fn())
-            void unlistenError.then(fn => fn())
-            reject(new Error('Worktree creation timed out'))
-          }, 120_000)
-
-          const unlistenCreated = listen<WorktreeCreatedEvent>(
-            'worktree:created',
-            event => {
-              if (event.payload.worktree.id === pendingWorktree.id) {
-                clearTimeout(timeout)
-                void unlistenCreated.then(fn => fn())
-                void unlistenError.then(fn => fn())
-                resolve(event.payload.worktree)
-              }
-            }
-          )
-
-          const unlistenError = listen<WorktreeCreateErrorEvent>(
-            'worktree:error',
-            event => {
-              if (event.payload.id === pendingWorktree.id) {
-                clearTimeout(timeout)
-                void unlistenCreated.then(fn => fn())
-                void unlistenError.then(fn => fn())
-                reject(new Error(event.payload.error))
-              }
-            }
-          )
-        })
+        readyWorktree = await createWorktreeAndWait(projectId)
       } catch (err) {
-        toast.error(`Worktree creation failed: ${err}`)
+        if (err instanceof WorktreeCreateInvokeError) {
+          toast.error(`Failed to create worktree: ${err.reason}`)
+        } else {
+          toast.error(`Worktree creation failed: ${err}`)
+        }
         return
       }
 
@@ -2190,30 +2213,32 @@ export function useMessageHandlers({
             : old
       )
 
-      await invoke('set_session_model', {
-        worktreeId: readyWorktree.id,
-        worktreePath: readyWorktree.path,
-        sessionId: newSession.id,
-        model: resolvedModel,
-      }).catch(err =>
-        console.error(
-          '[streamingWorktreeApproval] Failed to persist model:',
-          err
-        )
-      )
-      if (resolvedBackend) {
-        await invoke('set_session_backend', {
+      await Promise.all([
+        invoke('set_session_model', {
           worktreeId: readyWorktree.id,
           worktreePath: readyWorktree.path,
           sessionId: newSession.id,
-          backend: resolvedBackend,
+          model: resolvedModel,
         }).catch(err =>
           console.error(
-            '[streamingWorktreeApproval] Failed to persist backend:',
+            '[streamingWorktreeApproval] Failed to persist model:',
             err
           )
-        )
-      }
+        ),
+        resolvedBackend
+          ? invoke('set_session_backend', {
+              worktreeId: readyWorktree.id,
+              worktreePath: readyWorktree.path,
+              sessionId: newSession.id,
+              backend: resolvedBackend,
+            }).catch(err =>
+              console.error(
+                '[streamingWorktreeApproval] Failed to persist backend:',
+                err
+              )
+            )
+          : Promise.resolve(),
+      ])
 
       const effectiveBackend = resolvedBackend ?? currentSessionBackend
       let resolvedThinkingLevel: ThinkingLevel =
@@ -2308,11 +2333,6 @@ export function useMessageHandlers({
   // PERFORMANCE: Uses refs for session/worktree IDs to keep callback stable across session switches
   const handlePermissionApproval = useCallback(
     (sessionId: string, approvedPatterns: string[]) => {
-      console.warn(
-        '[useMessageHandlers] handlePermissionApproval CALLED',
-        sessionId,
-        approvedPatterns
-      )
       const worktreeId = activeWorktreeIdRef.current
       const worktreePath = activeWorktreePathRef.current
       if (!worktreeId || !worktreePath) return
@@ -2348,33 +2368,27 @@ export function useMessageHandlers({
         setWaitingForInput(sessionId, false)
         if (nextMode !== currentMode) {
           setExecutionMode(sessionId, nextMode)
-          console.log(
-            '[useMessageHandlers] Codex path: Broadcasting executionMode for session',
-            sessionId,
-            nextMode
-          )
           invoke('broadcast_session_setting', {
             sessionId,
             key: 'executionMode',
             value: nextMode,
+          }).catch(err => {
+            console.error(
+              '[useMessageHandlers] Codex broadcast executionMode failed:',
+              err
+            )
           })
-            .then(() => {
-              console.log(
-                '[useMessageHandlers] Codex broadcast executionMode succeeded'
-              )
-            })
-            .catch(err => {
-              console.error(
-                '[useMessageHandlers] Codex broadcast executionMode failed:',
-                err
-              )
-            })
           invoke('update_session_state', {
             worktreeId,
             worktreePath,
             sessionId,
             selectedExecutionMode: nextMode,
-          }).catch(() => undefined)
+          }).catch(err => {
+            console.warn(
+              '[useMessageHandlers] Failed to persist session state:',
+              err
+            )
+          })
         }
 
         requestAnimationFrame(() => {
@@ -2423,32 +2437,27 @@ export function useMessageHandlers({
       clearDeniedMessageContext(sessionId)
       setWaitingForInput(sessionId, false)
       setExecutionMode(sessionId, 'build')
-      console.log(
-        '[useMessageHandlers] Claude path: Broadcasting executionMode=build for session',
-        sessionId
-      )
       invoke('broadcast_session_setting', {
         sessionId,
         key: 'executionMode',
         value: 'build',
+      }).catch(err => {
+        console.error(
+          '[useMessageHandlers] Claude broadcast executionMode=build failed:',
+          err
+        )
       })
-        .then(() => {
-          console.log(
-            '[useMessageHandlers] Claude broadcast executionMode=build succeeded'
-          )
-        })
-        .catch(err => {
-          console.error(
-            '[useMessageHandlers] Claude broadcast executionMode=build failed:',
-            err
-          )
-        })
       invoke('update_session_state', {
         worktreeId,
         worktreePath,
         sessionId,
         selectedExecutionMode: 'build',
-      }).catch(() => undefined)
+      }).catch(err => {
+        console.warn(
+          '[useMessageHandlers] Failed to persist session state:',
+          err
+        )
+      })
 
       requestAnimationFrame(() => {
         scrollToBottom(true)
@@ -2504,9 +2513,7 @@ export function useMessageHandlers({
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -2578,7 +2585,12 @@ export function useMessageHandlers({
           worktreePath,
           sessionId,
           selectedExecutionMode: nextMode,
-        }).catch(() => undefined)
+        }).catch(err => {
+          console.warn(
+            '[useMessageHandlers] Failed to persist session state:',
+            err
+          )
+        })
 
         requestAnimationFrame(() => {
           scrollToBottom(true)
@@ -2624,7 +2636,12 @@ export function useMessageHandlers({
           worktreePath,
           sessionId,
           selectedExecutionMode: 'yolo',
-        }).catch(() => undefined)
+        }).catch(err => {
+          console.warn(
+            '[useMessageHandlers] Failed to persist session state:',
+            err
+          )
+        })
         return
       }
 
@@ -2704,9 +2721,7 @@ export function useMessageHandlers({
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -2937,7 +2952,12 @@ export function useMessageHandlers({
           worktreePath,
           sessionId,
           selectedExecutionMode: 'yolo',
-        }).catch(() => undefined)
+        }).catch(err => {
+          console.warn(
+            '[useMessageHandlers] Failed to persist session state:',
+            err
+          )
+        })
       }
 
       requestAnimationFrame(() => {
@@ -3336,9 +3356,7 @@ Please apply this fix to the file.`
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -3477,9 +3495,7 @@ Please apply all these fixes to the respective files.`
           customProfileName: getCustomProfileName(),
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },

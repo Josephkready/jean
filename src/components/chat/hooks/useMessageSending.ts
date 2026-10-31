@@ -1,3 +1,4 @@
+import { focusChatInputUnlessBusy } from '@/lib/focus-chat-input'
 import { useCallback, type RefObject } from 'react'
 import { generateId } from '@/lib/uuid'
 import { toast } from 'sonner'
@@ -265,9 +266,7 @@ export function useMessageSending({
           backend: queuedMsg.backend,
         },
         {
-          onSettled: () => {
-            inputRef.current?.focus()
-          },
+          onSettled: () => focusChatInputUnlessBusy(inputRef),
         }
       )
     },
@@ -621,6 +620,15 @@ export function useMessageSending({
         }
       }
 
+      if (options?.beforeSend) {
+        try {
+          await options.beforeSend()
+        } catch {
+          useChatStore.getState().setInputDraft(activeSessionId, textMessage)
+          return
+        }
+      }
+
       if (
         images.length > 0 ||
         files.length > 0 ||
@@ -681,15 +689,6 @@ export function useMessageSending({
         ),
         backend: selectedBackend,
         queuedAt: Date.now(),
-      }
-
-      if (options?.beforeSend) {
-        try {
-          await options.beforeSend()
-        } catch {
-          useChatStore.getState().setInputDraft(activeSessionId, textMessage)
-          return
-        }
       }
 
       markAtBottom()
