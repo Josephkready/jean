@@ -108,6 +108,30 @@ describe('buildFavoriteRows', () => {
     ])
   })
 
+  it('labels the default Claude favorite with the short account name', () => {
+    const rows = buildFavoriteRows(
+      ['claude:opus', 'claude@work:opus'],
+      sections,
+      ['work'],
+      claudeOptions,
+      'j60218'
+    )
+    expect(rows).toEqual([
+      {
+        backend: 'claude',
+        value: 'opus',
+        label: 'j60218 · Opus 5.5',
+        account: null,
+      },
+      {
+        backend: 'claude',
+        value: 'opus',
+        label: 'work · Opus 5.5',
+        account: 'work',
+      },
+    ])
+  })
+
   it('shows plain Claude favorites without accounts and drops account ones', () => {
     const rows = buildFavoriteRows(
       ['claude:opus', 'claude@Work:opus', 'codex:unknown-model'],

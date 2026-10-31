@@ -21,6 +21,14 @@ vi.stubGlobal('ResizeObserver', ResizeObserverMock)
 HTMLCanvasElement.prototype.getContext = vi.fn(() => null)
 Element.prototype.scrollIntoView = vi.fn()
 
+vi.mock('@/services/claude-cli', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/services/claude-cli')>()),
+  useClaudeDefaultAccountLabel: () => ({
+    label: 'j60218',
+    rowLabel: 'j60218',
+  }),
+}))
+
 const refreshOpencodeModelsMutateAsync = vi.fn()
 
 vi.mock('@/services/opencode-cli', () => ({
@@ -1068,7 +1076,7 @@ describe('BackendModelPickerContent', () => {
     }
     const defaultRow = rowFor('claude:claude-fable-5')
     const workRow = rowFor('claude@Work:claude-fable-5')
-    expect(defaultRow).toHaveTextContent('Default · Fable 5')
+    expect(defaultRow).toHaveTextContent('j60218 · Fable 5')
     expect(workRow).toHaveTextContent('Work · Fable 5')
     expect(
       screen.queryByRole('option', { name: /^OpenRouter ·/ })
@@ -1089,5 +1097,68 @@ describe('BackendModelPickerContent', () => {
     await user.click(defaultRow)
     expect(onClaudeAccountSelect).toHaveBeenCalledWith(null, 'claude-fable-5')
     expect(onModelChange).not.toHaveBeenCalled()
+  })
+  describe('default Claude account label', () => {
+    const renderPicker = (selectedProvider: string | null) =>
+      render(
+        <BackendModelPickerContent
+          open
+          selectedBackend="claude"
+          selectedModel="claude-fable-5"
+          selectedProvider={selectedProvider}
+          installedBackends={['claude']}
+          customCliProfiles={[
+            {
+              name: 'work',
+              settings_json:
+                '{"env":{"CLAUDE_CONFIG_DIR":"/home/u/.claude-work"}}',
+            },
+          ]}
+          onModelChange={vi.fn()}
+          onBackendModelChange={vi.fn()}
+          onClaudeAccountSelect={vi.fn()}
+          onRequestClose={vi.fn()}
+        />
+      )
+    const rowFor = (key: string) => {
+      const row = screen
+        .getByTestId(`model-actions-${key}`)
+        .closest<HTMLElement>('[role="option"]')
+      if (!row) throw new Error(`missing row ${key}`)
+      return row
+    }
+
+    it('labels the default row with the account short name, not Anthropic', () => {
+      renderPicker(null)
+      const defaultRow = rowFor('claude:claude-fable-5')
+      expect(defaultRow).toHaveTextContent('j60218 · Fable 5')
+      expect(defaultRow).not.toHaveTextContent('Anthropic')
+      expect(rowFor('claude@work:claude-fable-5')).toHaveTextContent(
+        'work · Fable 5'
+      )
+    })
+
+    it.each([null, '__anthropic__'])(
+      'checks the default row when selectedProvider is %s',
+      provider => {
+        renderPicker(provider)
+        expect(
+          rowFor('claude:claude-fable-5').querySelector('.opacity-100')
+        ).not.toBeNull()
+        expect(
+          rowFor('claude@work:claude-fable-5').querySelector('.opacity-100')
+        ).toBeNull()
+      }
+    )
+
+    it('checks only the named row when selectedProvider is a profile', () => {
+      renderPicker('work')
+      expect(
+        rowFor('claude:claude-fable-5').querySelector('.opacity-100')
+      ).toBeNull()
+      expect(
+        rowFor('claude@work:claude-fable-5').querySelector('.opacity-100')
+      ).not.toBeNull()
+    })
   })
 })
