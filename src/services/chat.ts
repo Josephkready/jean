@@ -58,6 +58,7 @@ import type {
 } from '@/types/projects'
 import { preserveQueryCacheOnError } from '@/lib/query-error'
 import { renameTableKeyMessage } from '@/lib/pinned-table-reveal'
+import { closeRequiresConfirmation } from '@/components/projects/worktree-close-decision'
 import {
   useConsolidatedAllSessions,
   useConsolidatedUnreadSessions,
@@ -1661,7 +1662,10 @@ export function useCloseSessionOrWorktreeKeybinding(
       )
       if (
         !bypassConfirm &&
-        preferences?.confirm_session_close !== false &&
+        closeRequiresConfirmation(
+          preferences?.confirm_session_close,
+          preferences?.removal_behavior
+        ) &&
         onConfirmRequired
       ) {
         // Find branch name and session count for the dialog

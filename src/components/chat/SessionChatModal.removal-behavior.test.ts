@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { closeRequiresConfirmation } from '@/components/projects/worktree-close-decision'
 
 const readSource = (path: string) =>
   readFileSync(join(process.cwd(), path), 'utf8')
@@ -107,10 +108,7 @@ describe('SessionChatModal removal behavior', () => {
       start === -1 || end === -1 ? '' : source.slice(start, end)
 
     expect(removeSessionTab).toContain('needsConfirm')
-    // Tolerate Prettier's line breaks in the inlined gate.
-    expect(removeSessionTab).toMatch(
-      /preferences\?\.confirm_session_close !== false &&\s*!sessionIsEmpty/
-    )
+    // Gate behavior is covered by the behavioral closeRequiresConfirmation table test.
     // Confirm gate wraps the action for every non-empty tab (not only last).
     expect(removeSessionTab).toMatch(
       /if \(needsConfirm\) \{[\s\S]*?pendingCloseAction\.current = action/
@@ -119,6 +117,14 @@ describe('SessionChatModal removal behavior', () => {
     expect(removeSessionTab).toMatch(
       /const action = \(\) => \{[\s\S]*activeSessions\.length > 1[\s\S]*handleDeleteSession/
     )
+  })
+
+  it('decides close confirmation from the removal behavior and explicit archive flag (issue #35)', () => {
+    expect(closeRequiresConfirmation(true, 'archive', false)).toBe(false)
+    expect(closeRequiresConfirmation(true, 'archive', true)).toBe(false)
+    expect(closeRequiresConfirmation(true, 'delete', false)).toBe(true)
+    expect(closeRequiresConfirmation(true, 'delete', true)).toBe(false)
+    expect(closeRequiresConfirmation(false, 'delete', false)).toBe(false)
   })
 
   it('waits for last-session removal success before leaving the modal', () => {

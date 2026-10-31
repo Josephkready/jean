@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  closeRequiresConfirmation,
+  decideSessionTabRemoval,
   decideWorktreeMiddleClose,
   decideSessionMiddleClose,
   isSessionEmpty,
@@ -152,5 +154,81 @@ describe('isSessionEmpty', () => {
 
   it('is not empty when the session has messages', () => {
     expect(isSessionEmpty({ id: 's1', message_count: 2 }, {})).toBe(false)
+  })
+})
+
+// Issue #35: Close must just archive, with no confirmation dialog, because
+// archiving is recoverable. Only permanent deletion is gated.
+describe('close confirmation vs removal behavior (issue #35)', () => {
+  it('does not confirm when removal behavior is archive', () => {
+    expect(closeRequiresConfirmation(true, 'archive')).toBe(false)
+    expect(decideWorktreeMiddleClose(true, false, 'archive')).toBe('close')
+    expect(
+      decideSessionMiddleClose({
+        activeSessionCount: 2,
+        sessionIsEmpty: false,
+        confirmSessionClose: true,
+        removalBehavior: 'archive',
+      })
+    ).toBe('delete')
+  })
+
+  it('does not confirm an explicit archive action even when behavior is delete', () => {
+    expect(closeRequiresConfirmation(true, 'delete', true)).toBe(false)
+  })
+
+  it('still confirms permanent deletion', () => {
+    expect(closeRequiresConfirmation(true, 'delete')).toBe(true)
+    expect(closeRequiresConfirmation(undefined, undefined)).toBe(true)
+    expect(decideWorktreeMiddleClose(true, false, 'delete')).toBe('confirm')
+  })
+
+  it('respects the confirm_session_close opt-out', () => {
+    expect(closeRequiresConfirmation(false, 'delete')).toBe(false)
+  })
+})
+
+describe('decideSessionTabRemoval', () => {
+  const base = {
+    confirmSessionClose: true,
+    removalBehavior: 'delete',
+    archive: false,
+    bypassConfirm: false,
+    sessionIsEmpty: false,
+  }
+
+  it('skips the dialog under archive preference', () => {
+    expect(
+      decideSessionTabRemoval({ ...base, removalBehavior: 'archive' })
+    ).toEqual({ confirm: false })
+    expect(
+      decideSessionTabRemoval({
+        ...base,
+        removalBehavior: 'archive',
+        archive: true,
+      })
+    ).toEqual({ confirm: false })
+  })
+
+  it('asks in session mode for a non-empty delete', () => {
+    expect(decideSessionTabRemoval(base)).toEqual({
+      confirm: true,
+      mode: 'session',
+    })
+  })
+
+  it('skips the dialog for an explicit archive under the delete preference', () => {
+    expect(decideSessionTabRemoval({ ...base, archive: true })).toEqual({
+      confirm: false,
+    })
+  })
+
+  it('skips for empty sessions and bypass', () => {
+    expect(
+      decideSessionTabRemoval({ ...base, sessionIsEmpty: true })
+    ).toEqual({ confirm: false })
+    expect(
+      decideSessionTabRemoval({ ...base, bypassConfirm: true })
+    ).toEqual({ confirm: false })
   })
 })
