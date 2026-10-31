@@ -8,6 +8,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useUIStore } from '@/store/ui-store'
+import { useChatStore } from '@/store/chat-store'
+import { copyActiveSessionInfo } from '@/lib/session-info'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { cn } from '@/lib/utils'
 import {
@@ -80,6 +82,8 @@ export function MobileToolbarMenu({
     'linked-projects': () =>
       useUIStore.getState().setLinkedProjectsModalOpen(true),
     'fork-session': () => dispatchMagicCommand({ command: 'fork-session' }),
+    'copy-session-info': () =>
+      void copyActiveSessionInfo(useChatStore.getState().activeWorktreeId),
     'check-github-issues': () =>
       dispatchMagicCommand({ command: 'check-github-issues' }),
     commit: onCommit,

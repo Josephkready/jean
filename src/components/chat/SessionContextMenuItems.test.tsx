@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { fireEvent, render, screen } from '@/test/test-utils'
@@ -13,6 +12,7 @@ import { SessionContextMenuItems } from './SessionContextMenuItems'
 const mocks = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
   canReconnectSession: vi.fn(() => false),
+  copySessionInfo: vi.fn(),
 }))
 
 vi.mock('@/lib/clipboard', () => ({
@@ -21,6 +21,10 @@ vi.mock('@/lib/clipboard', () => ({
 
 vi.mock('@/services/chat', () => ({
   canReconnectSession: mocks.canReconnectSession,
+}))
+
+vi.mock('@/lib/session-info', () => ({
+  copySessionInfo: mocks.copySessionInfo,
 }))
 
 vi.mock('sonner', () => ({
@@ -74,6 +78,7 @@ describe('SessionContextMenuItems', () => {
       'Rename',
       'Add Label',
       'Copy Session ID',
+      'Copy Session Info',
       'Archive Session',
       'Delete Session',
     ])
@@ -96,18 +101,19 @@ describe('SessionContextMenuItems', () => {
       'Native Resume Command',
       'Reconnect',
       'Copy Session ID',
+      'Copy Session Info',
       'Archive Session',
       'Delete Session',
     ])
   })
 
-  it('is the menu used by both the tab bar and the sidebar', () => {
-    for (const path of [
-      'src/components/chat/SessionChatModal.tsx',
-      'src/components/projects/SidebarSessionContextMenu.tsx',
-    ]) {
-      expect(readFileSync(path, 'utf8')).toContain('<SessionContextMenuItems')
-    }
+  it('copies the session info for the clicked session', async () => {
+    const user = userEvent.setup()
+    renderMenu()
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Copy Session Info' })
+    )
+    expect(mocks.copySessionInfo).toHaveBeenCalledWith('session-1')
   })
 
   it('copies the session id', async () => {

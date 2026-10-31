@@ -13,6 +13,7 @@ import {
   ContextMenuSeparator,
 } from '@/components/ui/context-menu'
 import { copyToClipboard } from '@/lib/clipboard'
+import { copySessionInfo } from '@/lib/session-info'
 import { canReconnectSession } from '@/services/chat'
 import type { Session } from '@/types/chat'
 
@@ -91,6 +92,10 @@ export function SessionContextMenuItems({
       >
         <Copy className="mr-2 h-4 w-4" />
         Copy Session ID
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => void copySessionInfo(session.id)}>
+        <Copy className="mr-2 h-4 w-4" />
+        Copy Session Info
       </ContextMenuItem>
       <ContextMenuSeparator />
       <ContextMenuItem onSelect={onArchive}>

@@ -2,6 +2,7 @@ import {
   ArrowDownToLine,
   ArrowDownUp,
   ArrowUpToLine,
+  Copy,
   BookmarkPlus,
   Bug,
   CircleDot,
@@ -31,6 +32,7 @@ export type MagicOption =
   | 'inject-session'
   | 'linked-projects'
   | 'fork-session'
+  | 'copy-session-info'
   | 'check-github-issues'
   | 'commit'
   | 'commit-and-push'
@@ -139,6 +141,12 @@ export function buildMagicColumns(hasOpenPr: boolean): MagicColumns {
           label: 'Fork Session',
           icon: GitBranchPlus,
           key: 'W',
+        },
+        {
+          id: 'copy-session-info',
+          label: 'Copy Session Info',
+          icon: Copy,
+          key: '1',
         },
         {
           id: 'check-github-issues',
