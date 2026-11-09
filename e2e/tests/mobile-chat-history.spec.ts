@@ -1,6 +1,6 @@
 import { test, expect } from '../fixtures/tauri-mock'
 import { worktree1, worktree2 } from '../fixtures/invoke-handlers'
-import { createSession } from '../fixtures/mock-data'
+import { createSession, mockPreferences } from '../fixtures/mock-data'
 
 // Regression for Josephkready/jean#6: on mobile the compact chat view hid
 // every prompt before the latest one, so there was nothing to scroll up to.
@@ -31,6 +31,8 @@ const session = createSession({
 test.use({
   responseOverrides: {
     list_worktrees: [{ ...worktree1, sessions: [session] }, worktree2],
+    // Pin compact view on so the desktop test does not depend on the default.
+    load_preferences: { ...mockPreferences, compact_chat_view_enabled: true },
     get_session: session,
     get_sessions: { sessions: [session], active_session_id: session.id },
   },
