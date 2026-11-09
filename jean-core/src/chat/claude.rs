@@ -1957,6 +1957,7 @@ pub fn tail_claude_output(
     let mut last_output_time = Instant::now();
     let mut received_claude_output = false; // Track if we've received any Claude output (not our metadata)
 
+    let mut suppress_queue_ack_result = false;
     loop {
         // Poll for new lines
         let lines = tailer.poll()?;
@@ -2020,6 +2021,14 @@ pub fn tail_claude_output(
                     continue;
                 }
             };
+
+            if super::types::is_claude_queue_ack(&msg) {
+                suppress_queue_ack_result = true;
+                continue;
+            }
+            if msg.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+                suppress_queue_ack_result = false;
+            }
 
             // Capture session_id from any message that has it
             if let Some(sid) = msg.get("session_id").and_then(|v| v.as_str()) {
@@ -2613,7 +2622,12 @@ pub fn tail_claude_output(
                         // retry) supersedes an earlier error.
                         api_error = None;
                         if full_content.is_empty() {
-                            if let Some(result) = msg.get("result").and_then(|v| v.as_str()) {
+                            if let Some(result) =
+                                msg.get("result").and_then(|v| v.as_str()).filter(|text| {
+                                    !suppress_queue_ack_result
+                                        || text.trim() != "No response requested."
+                                })
+                            {
                                 full_content = result.to_string();
                             }
                         }
@@ -2693,6 +2707,7 @@ pub fn tail_claude_output(
                         }
                     }
 
+                    suppress_queue_ack_result = false;
                     saw_final_result = true;
                     // For each armed Monitor, flip initial_turn_finished so
                     // subsequent assistant text is routed to that Monitor's
@@ -3323,6 +3338,38 @@ mod tests {
             assert!(prompt.contains("collect their output"));
             assert!(prompt.contains("ask inline instead"));
             assert!(prompt.contains("Custom agent instructions"));
+        }
+    }
+
+    // #50: a queue/AskUserQuestion acknowledgement must not become an
+    // assistant reply, including via the result-text fallback.
+    #[test]
+    fn queued_answer_synthetic_reply_is_hidden_live() {
+        for real_reply in [None, Some("I will use those point balances.")] {
+            let mut fixture = concat!(
+                r#"{"type":"jean_claude_host_start"}"#, "\n",
+                r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#, "\n",
+                r#"{"type":"result","subtype":"success","result":"No response requested."}"#, "\n",
+            ).to_string();
+            if let Some(text) = real_reply {
+                fixture.push_str(
+                    &serde_json::json!({
+                        "type": "assistant", "message": {"model": "claude", "content": [
+                            {"type": "text", "text": text}
+                        ]}
+                    })
+                    .to_string(),
+                );
+                fixture.push_str("\n{\"type\":\"result\",\"subtype\":\"success\"}\n");
+            }
+            fixture.push_str("{\"type\":\"jean_claude_host_exit\",\"code\":0}\n");
+            let response = tail_fixture("queue-ack", &fixture, None);
+            assert!(!response.cancelled);
+            assert_eq!(response.content, real_reply.unwrap_or(""));
+            assert_eq!(
+                response.content_blocks.len(),
+                usize::from(real_reply.is_some())
+            );
         }
     }
 
