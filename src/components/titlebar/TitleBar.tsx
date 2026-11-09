@@ -40,6 +40,7 @@ import { useRemoteConnections } from '@/lib/remote-connections'
 import { useProjectsStore } from '@/store/projects-store'
 import { resolveHeaderServerLabel } from './server-context'
 import { MinimizedCliUpdate } from './MinimizedCliUpdate'
+import { ThemeToggle } from './ThemeToggle'
 
 interface TitleBarProps {
   className?: string
@@ -268,6 +269,7 @@ export function TitleBar({
               </TooltipTrigger>
               <TooltipContent>Report a bug</TooltipContent>
             </Tooltip>
+            <ThemeToggle />
             <MinimizedCliUpdate />
             <CliUpdatesIndicator />
             <ServerUpdateIndicator />
