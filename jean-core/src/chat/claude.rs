@@ -948,7 +948,18 @@ fn build_claude_args(
 
     // Build combined system prompt parts
     // Claude CLI only uses the LAST --append-system-prompt, so we must combine all prompts
-    let mut system_prompt_parts: Vec<String> = Vec::new();
+    // #49: Jean's blocking-tool handoff terminates the process tree. This
+    // operational warning must also apply to custom prompts and resumed runs.
+    let mut system_prompt_parts = vec![
+        "Jean headless run lifecycle: AskUserQuestion and ExitPlanMode end this run and \
+         kill its background tasks (Bash run_in_background and background agents). \
+         Before calling either tool, wait for all background tasks to finish and \
+         collect their output. If you need a decision while work is running, ask \
+         inline instead (question, then `Reply with a number:`, then numbered options); \
+         collect background results before ending your turn. The answer will arrive \
+         in a later run; do not assume background tasks survive that handoff."
+            .to_string(),
+    ];
 
     // AI language preference - user's preferred response language
     if let Some(lang) = ai_language {
@@ -3276,6 +3287,44 @@ fn backgrounded_task_tool_use_id(msg: &serde_json::Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression for #49: the actual run arguments must carry the lifecycle
+    // warning, including on resume and with a custom agent prompt.
+    #[test]
+    fn run_prompt_warns_before_question_handoff_kills_background_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tauri::AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        for resume in [None, Some("claude-existing-session")] {
+            let (args, _) = build_claude_args(
+                &app,
+                "question-run",
+                "wt",
+                resume,
+                None,
+                Some("build"),
+                None,
+                None,
+                None,
+                None,
+                Some("Custom agent instructions"),
+                None,
+                None,
+                false,
+                None,
+                tmp.path(),
+            );
+            let prompt_path = args
+                .windows(2)
+                .find(|pair| pair[0] == "--append-system-prompt-file")
+                .expect("run must include the lifecycle warning");
+            let prompt = std::fs::read_to_string(&prompt_path[1]).unwrap();
+            assert!(prompt.contains("AskUserQuestion and ExitPlanMode end this run"));
+            assert!(prompt.contains("wait for all background tasks to finish"));
+            assert!(prompt.contains("collect their output"));
+            assert!(prompt.contains("ask inline instead"));
+            assert!(prompt.contains("Custom agent instructions"));
+        }
+    }
 
     const HOST_TURN_ONE: &str = r#"{"_run_meta":true}
 {"type":"jean_claude_host_start"}
