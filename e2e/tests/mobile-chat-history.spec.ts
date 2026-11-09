@@ -60,3 +60,20 @@ test('mobile: earlier prompts stay reachable by scrolling up', async ({
   expect(scrollTop.scrollable).toBe(true)
   await expect(mockPage.getByText('Prompt number 1')).toBeInViewport()
 })
+
+test('desktop: compact view hides earlier prompts behind a show-earlier row', async ({
+  mockPage,
+}) => {
+  await mockPage.setViewportSize({ width: 1280, height: 800 })
+  await mockPage.getByText('fuzzy-tiger').click()
+
+  await expect(mockPage.getByText('Answer number 4')).toBeVisible({
+    timeout: 5000,
+  })
+  // Desktop compact mode keeps earlier prompts hidden until expanded.
+  await expect(mockPage.getByText('Prompt number 1')).not.toBeVisible()
+  const showEarlier = mockPage.getByText('Show 3 earlier prompts')
+  await expect(showEarlier).toBeVisible()
+  await showEarlier.click()
+  await expect(mockPage.getByText('Prompt number 1')).toBeVisible()
+})

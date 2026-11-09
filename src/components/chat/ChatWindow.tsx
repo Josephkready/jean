@@ -3344,29 +3344,6 @@ const ChatWindowContent = memo(function ChatWindowContent({
                                 onClearGoal={handleClearGoal}
                               />
                             )}
-                            {compactView &&
-                              !zenMode &&
-                              !isCompactHistoryExpanded &&
-                              compactHistoryWindow.hiddenPromptCount > 0 && (
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      onClick={handleShowHiddenCompactPrompts}
-                                      aria-label={`Show ${compactHistoryWindow.hiddenPromptCount} earlier prompts`}
-                                      className="flex h-6 items-center gap-1 rounded-t-md border border-b-0 border-border bg-card px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                                    >
-                                      <ArrowUp className="h-3.5 w-3.5" />
-                                      <span>
-                                        {compactHistoryWindow.hiddenPromptCount}
-                                      </span>
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    Show earlier prompts
-                                  </TooltipContent>
-                                </Tooltip>
-                              )}
                             <PinnedTablesButton
                               sessionId={activeSessionId}
                               onShowInChat={handleShowTableInChat}
