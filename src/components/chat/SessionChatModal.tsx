@@ -87,6 +87,7 @@ import {
   sessionsForTabBar,
   sortSessionCardsForTabs,
 } from './session-tab-order'
+import { SESSION_TAB_CLOSE_CLASS } from './session-tab-close'
 import { useCanvasStoreState } from './hooks/useCanvasStoreState'
 import {
   ContextMenu,
@@ -1393,7 +1394,7 @@ export const SessionChatModal = memo(function SessionChatModal({
                                       ),
                                   })
                                 }}
-                                className="ml-0.5 opacity-60 sm:opacity-0 sm:group-hover/tab:opacity-60 hover:!opacity-100"
+                                className={SESSION_TAB_CLOSE_CLASS}
                                 size="xs"
                               />
                             )}
