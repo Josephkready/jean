@@ -1099,13 +1099,22 @@ export const CompactMessageList = memo(
       // Scroll-to-top auto-load.
       useEffect(() => {
         const container = scrollContainerRef.current
-        if (!container || !hasOlderOnDisk || hasHiddenPrompts) return
+        if (!container || !(hasOlderOnDisk || hasHiddenPrompts)) return
         const handleScroll = () => {
-          if (container.scrollTop < SCROLL_THRESHOLD) loadOlder()
+          if (container.scrollTop >= SCROLL_THRESHOLD) return
+          // Reaching the top reveals hidden prompts first, then loads from disk.
+          if (hasHiddenPrompts) onShowHiddenPrompts?.()
+          else loadOlder()
         }
         container.addEventListener('scroll', handleScroll, { passive: true })
         return () => container.removeEventListener('scroll', handleScroll)
-      }, [scrollContainerRef, hasOlderOnDisk, hasHiddenPrompts, loadOlder])
+      }, [
+        scrollContainerRef,
+        hasOlderOnDisk,
+        hasHiddenPrompts,
+        loadOlder,
+        onShowHiddenPrompts,
+      ])
 
       // Scroll-to-bottom on new message arrival.
       const prevMessageCountRef = useRef(messages.length)
@@ -1159,6 +1168,15 @@ export const CompactMessageList = memo(
 
       return (
         <div className="flex flex-col w-full">
+          {hasHiddenPrompts && (
+            <button
+              type="button"
+              onClick={onShowHiddenPrompts}
+              className="w-full text-center text-muted-foreground text-xs py-2 opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
+            >
+              {`↑ Show ${hiddenPromptCount} earlier ${hiddenPromptCount === 1 ? 'prompt' : 'prompts'}`}
+            </button>
+          )}
           {!hasHiddenPrompts && hasOlderOnDisk && (
             <button
               type="button"

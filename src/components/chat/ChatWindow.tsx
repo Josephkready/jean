@@ -2600,8 +2600,11 @@ const ChatWindowContent = memo(function ChatWindowContent({
   const [expandedCompactSessionId, setExpandedCompactSessionId] = useState<
     string | null
   >(null)
+  // Mobile always shows the full history (issue #6): the small "earlier
+  // prompts" chip was easy to miss and left nothing to scroll.
   const isCompactHistoryExpanded =
     Boolean(workingLabel) ||
+    isMobile ||
     (!!deferredSessionId && expandedCompactSessionId === deferredSessionId)
   const compactExpandAnchorRef = useRef<PrependScrollAnchor | null>(null)
   const compactMessages = useMemo(

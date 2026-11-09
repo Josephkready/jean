@@ -405,7 +405,7 @@ export const AppearancePane: React.FC = () => {
 
           <InlineField
             label="Compact chat view"
-            description="Compact answers into one section for a cleaner chat, showing only the last prompt and answer by default."
+            description="Compact answers into one section for a cleaner chat. On desktop, earlier prompts are hidden until you tap \u201cShow earlier prompts\u201d or scroll to the top. Mobile always shows full history."
           >
             <Switch
               aria-label="Compact chat view"
