@@ -68,6 +68,30 @@ pub(crate) fn is_claude_compaction_summary_text(text: &str) -> bool {
         .starts_with(CLAUDE_COMPACTION_SUMMARY_PREFIX)
 }
 
+/// Claude's queue acknowledgement is transport bookkeeping, not a reply (#50).
+/// Match the synthetic model as well as the exact text so real answers and
+/// synthetic errors remain visible through their normal handling paths.
+pub(crate) fn is_claude_queue_ack(msg: &serde_json::Value) -> bool {
+    let Some(message) = msg.get("message") else {
+        return false;
+    };
+    msg.get("type").and_then(|v| v.as_str()) == Some("assistant")
+        && message.get("model").and_then(|v| v.as_str()) == Some("<synthetic>")
+        && message
+            .get("content")
+            .and_then(|v| v.as_array())
+            .is_some_and(|blocks| {
+                !blocks.is_empty()
+                    && blocks.iter().all(|block| {
+                        block.get("type").and_then(|v| v.as_str()) == Some("text")
+                            && block
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|text| text.trim() == "No response requested.")
+                    })
+            })
+}
+
 // ============================================================================
 // Usage Types
 // ============================================================================

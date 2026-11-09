@@ -948,7 +948,18 @@ fn build_claude_args(
 
     // Build combined system prompt parts
     // Claude CLI only uses the LAST --append-system-prompt, so we must combine all prompts
-    let mut system_prompt_parts: Vec<String> = Vec::new();
+    // #49: Jean's blocking-tool handoff terminates the process tree. This
+    // operational warning must also apply to custom prompts and resumed runs.
+    let mut system_prompt_parts = vec![
+        "Jean headless run lifecycle: AskUserQuestion and ExitPlanMode end this run and \
+         kill its background tasks (Bash run_in_background and background agents). \
+         Before calling either tool, wait for all background tasks to finish and \
+         collect their output. If you need a decision while work is running, ask \
+         inline instead (question, then `Reply with a number:`, then numbered options); \
+         collect background results before ending your turn. The answer will arrive \
+         in a later run; do not assume background tasks survive that handoff."
+            .to_string(),
+    ];
 
     // AI language preference - user's preferred response language
     if let Some(lang) = ai_language {
@@ -1946,6 +1957,7 @@ pub fn tail_claude_output(
     let mut last_output_time = Instant::now();
     let mut received_claude_output = false; // Track if we've received any Claude output (not our metadata)
 
+    let mut suppress_queue_ack_result = false;
     loop {
         // Poll for new lines
         let lines = tailer.poll()?;
@@ -2009,6 +2021,14 @@ pub fn tail_claude_output(
                     continue;
                 }
             };
+
+            if super::types::is_claude_queue_ack(&msg) {
+                suppress_queue_ack_result = true;
+                continue;
+            }
+            if msg.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+                suppress_queue_ack_result = false;
+            }
 
             // Capture session_id from any message that has it
             if let Some(sid) = msg.get("session_id").and_then(|v| v.as_str()) {
@@ -2602,7 +2622,12 @@ pub fn tail_claude_output(
                         // retry) supersedes an earlier error.
                         api_error = None;
                         if full_content.is_empty() {
-                            if let Some(result) = msg.get("result").and_then(|v| v.as_str()) {
+                            if let Some(result) =
+                                msg.get("result").and_then(|v| v.as_str()).filter(|text| {
+                                    !suppress_queue_ack_result
+                                        || text.trim() != "No response requested."
+                                })
+                            {
                                 full_content = result.to_string();
                             }
                         }
@@ -2682,6 +2707,7 @@ pub fn tail_claude_output(
                         }
                     }
 
+                    suppress_queue_ack_result = false;
                     saw_final_result = true;
                     // For each armed Monitor, flip initial_turn_finished so
                     // subsequent assistant text is routed to that Monitor's
@@ -3276,6 +3302,76 @@ fn backgrounded_task_tool_use_id(msg: &serde_json::Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression for #49: the actual run arguments must carry the lifecycle
+    // warning, including on resume and with a custom agent prompt.
+    #[test]
+    fn run_prompt_warns_before_question_handoff_kills_background_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tauri::AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        for resume in [None, Some("claude-existing-session")] {
+            let (args, _) = build_claude_args(
+                &app,
+                "question-run",
+                "wt",
+                resume,
+                None,
+                Some("build"),
+                None,
+                None,
+                None,
+                None,
+                Some("Custom agent instructions"),
+                None,
+                None,
+                false,
+                None,
+                tmp.path(),
+            );
+            let prompt_path = args
+                .windows(2)
+                .find(|pair| pair[0] == "--append-system-prompt-file")
+                .expect("run must include the lifecycle warning");
+            let prompt = std::fs::read_to_string(&prompt_path[1]).unwrap();
+            assert!(prompt.contains("AskUserQuestion and ExitPlanMode end this run"));
+            assert!(prompt.contains("wait for all background tasks to finish"));
+            assert!(prompt.contains("collect their output"));
+            assert!(prompt.contains("ask inline instead"));
+            assert!(prompt.contains("Custom agent instructions"));
+        }
+    }
+
+    // #50: a queue/AskUserQuestion acknowledgement must not become an
+    // assistant reply, including via the result-text fallback.
+    #[test]
+    fn queued_answer_synthetic_reply_is_hidden_live() {
+        for real_reply in [None, Some("I will use those point balances.")] {
+            let mut fixture = concat!(
+                r#"{"type":"jean_claude_host_start"}"#, "\n",
+                r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#, "\n",
+                r#"{"type":"result","subtype":"success","result":"No response requested."}"#, "\n",
+            ).to_string();
+            if let Some(text) = real_reply {
+                fixture.push_str(
+                    &serde_json::json!({
+                        "type": "assistant", "message": {"model": "claude", "content": [
+                            {"type": "text", "text": text}
+                        ]}
+                    })
+                    .to_string(),
+                );
+                fixture.push_str("\n{\"type\":\"result\",\"subtype\":\"success\"}\n");
+            }
+            fixture.push_str("{\"type\":\"jean_claude_host_exit\",\"code\":0}\n");
+            let response = tail_fixture("queue-ack", &fixture, None);
+            assert!(!response.cancelled);
+            assert_eq!(response.content, real_reply.unwrap_or(""));
+            assert_eq!(
+                response.content_blocks.len(),
+                usize::from(real_reply.is_some())
+            );
+        }
+    }
 
     const HOST_TURN_ONE: &str = r#"{"_run_meta":true}
 {"type":"jean_claude_host_start"}

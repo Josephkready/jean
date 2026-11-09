@@ -966,6 +966,7 @@ pub fn parse_run_to_message(lines: &[String], run: &RunEntry) -> Result<ChatMess
         Some((total_secs * 1000 + ms) as u64)
     }
 
+    let mut suppress_queue_ack_result = false;
     for line in lines {
         if line.trim().is_empty() {
             continue;
@@ -983,6 +984,14 @@ pub fn parse_run_to_message(lines: &[String], run: &RunEntry) -> Result<ChatMess
             .unwrap_or(false)
         {
             continue;
+        }
+
+        if super::types::is_claude_queue_ack(&msg) {
+            suppress_queue_ack_result = true;
+            continue;
+        }
+        if msg.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+            suppress_queue_ack_result = false;
         }
 
         // Track parent_tool_use_id for sub-agent tool calls
@@ -1237,10 +1246,15 @@ pub fn parse_run_to_message(lines: &[String], run: &RunEntry) -> Result<ChatMess
                 // (`is_error: true`) are failures, not reply text.
                 let is_error_result = msg.get("is_error").and_then(|v| v.as_bool()) == Some(true);
                 if content.is_empty() && !is_error_result {
-                    if let Some(result) = msg.get("result").and_then(|v| v.as_str()) {
+                    if let Some(result) =
+                        msg.get("result").and_then(|v| v.as_str()).filter(|text| {
+                            !suppress_queue_ack_result || text.trim() != "No response requested."
+                        })
+                    {
                         content = result.to_string();
                     }
                 }
+                suppress_queue_ack_result = false;
             }
             "system" => {
                 let subtype = msg.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
@@ -2586,6 +2600,32 @@ Move services between instances without downtime.
         });
 
         assert_eq!(window.run_indices, vec![0]);
+    }
+
+    // #50: reloading history must agree with live queue-ack filtering.
+    #[test]
+    fn queued_answer_synthetic_reply_is_hidden_in_history() {
+        let ack = r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#.to_string();
+        let result = r#"{"type":"result","subtype":"success","result":"No response requested."}"#
+            .to_string();
+        let run = sample_run();
+        let hidden = parse_run_to_message(&[ack.clone(), result.clone()], &run).unwrap();
+        assert!(hidden.content.is_empty());
+        assert!(hidden.content_blocks.is_empty());
+
+        for (model, text) in [
+            ("claude", "I will use those point balances."),
+            ("claude", "No response requested."),
+            ("<synthetic>", "A different synthetic message"),
+        ] {
+            let real = serde_json::json!({"type": "assistant", "message": {
+                "model": model, "content": [{"type": "text", "text": text}]
+            }})
+            .to_string();
+            let message = parse_run_to_message(&[ack.clone(), result.clone(), real], &run).unwrap();
+            assert_eq!(message.content, text);
+            assert_eq!(message.content_blocks.len(), 1);
+        }
     }
 
     #[test]
