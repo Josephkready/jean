@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
-import { fireEvent, render, screen } from '@/test/test-utils'
+import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { WorktreeDropdownMenu } from './WorktreeDropdownMenu'
 import type { Worktree } from '@/types/projects'
 import { useUIStore } from '@/store/ui-store'
@@ -419,6 +419,10 @@ describe('WorktreeDropdownMenu', () => {
     await user.click(screen.getByRole('button', { name: 'Actions' }))
     await user.click(screen.getByRole('menuitem', { name: 'Rename Session' }))
 
+    await waitFor(() => {
+      expect(screen.queryByRole('menu')).toBeNull()
+    })
+    expect(screen.getByRole('button', { name: 'Actions' })).not.toHaveFocus()
     expect(onRenameSession).toHaveBeenCalledOnce()
   })
 })
