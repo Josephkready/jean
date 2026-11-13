@@ -78,8 +78,11 @@ export function useVisualViewportShell(
     let settleTimer: number | null = null
 
     const update = () => {
+      const isPanned =
+        vv.offsetTop > 0.5 || Math.abs(window.innerHeight - vv.height) > 1
       if (
         (vv.scale ?? 1) <= 1.02 &&
+        isPanned &&
         (window.scrollX !== 0 || window.scrollY !== 0)
       ) {
         window.scrollTo(0, 0)
@@ -93,27 +96,31 @@ export function useVisualViewportShell(
     }
 
     const scheduleUpdate = () => {
-      if (rafId !== null) window.cancelAnimationFrame(rafId)
-      rafId = window.requestAnimationFrame(() => {
-        rafId = null
-        update()
-      })
+      // Coalesce a burst: one rAF update (leading) plus one trailing settle
+      // update after the last event, instead of two updates per event.
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null
+          update()
+        })
+      }
       if (settleTimer !== null) window.clearTimeout(settleTimer)
       // iOS/iPadOS keyboard & accessory bar animations often finish ~80-100ms after the last event.
-      settleTimer = window.setTimeout(update, 100)
+      settleTimer = window.setTimeout(() => {
+        settleTimer = null
+        update()
+      }, 100)
     }
 
     update()
 
     vv.addEventListener('resize', scheduleUpdate)
     vv.addEventListener('scroll', scheduleUpdate)
-    window.addEventListener('scroll', scheduleUpdate, { passive: true })
     window.addEventListener('orientationchange', scheduleUpdate)
 
     return () => {
       vv.removeEventListener('resize', scheduleUpdate)
       vv.removeEventListener('scroll', scheduleUpdate)
-      window.removeEventListener('scroll', scheduleUpdate)
       window.removeEventListener('orientationchange', scheduleUpdate)
       if (rafId !== null) window.cancelAnimationFrame(rafId)
       if (settleTimer !== null) window.clearTimeout(settleTimer)

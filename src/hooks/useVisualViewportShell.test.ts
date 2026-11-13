@@ -113,8 +113,10 @@ describe('useVisualViewportShell', () => {
     expect(result.current).toEqual({ height: null, offsetTop: 0 })
   })
 
-  it('resets accidental layout scrollY drift when not pinch-zoomed', () => {
+  it('resets accidental layout scrollY drift when visualViewport is panned', () => {
     renderHook(() => useVisualViewportShell(true))
+    vvState.offsetTop = 38
+    vvState.height = 856
     Object.defineProperty(window, 'scrollY', { value: 24, configurable: true })
 
     act(() => {
@@ -123,6 +125,18 @@ describe('useVisualViewportShell', () => {
     })
 
     expect(window.scrollTo).toHaveBeenCalledWith(0, 0)
+  })
+
+  it('does not snap back an intentional document scroll without a visualViewport pan', () => {
+    renderHook(() => useVisualViewportShell(true))
+    Object.defineProperty(window, 'scrollY', { value: 24, configurable: true })
+
+    act(() => {
+      for (const cb of listeners.scroll) cb()
+      vi.runAllTimers()
+    })
+
+    expect(window.scrollTo).not.toHaveBeenCalled()
   })
 
   it('stays inactive when disabled (native mode)', () => {
