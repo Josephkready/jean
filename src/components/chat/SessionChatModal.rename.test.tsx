@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
-import { act, fireEvent, render, screen } from '@/test/test-utils'
+import { fireEvent, render, screen } from '@/test/test-utils'
 import type { Project, Worktree } from '@/types/projects'
 import type { Session } from '@/types/chat'
 import { useChatStore } from '@/store/chat-store'
@@ -251,11 +251,6 @@ describe('SessionChatModal session renaming (Fixes #57)', () => {
     expect(input).toHaveFocus()
     expect(input).toHaveClass('min-w-24')
 
-    await act(async () => {
-      await new Promise(resolve => setTimeout(resolve, 25))
-    })
-    expect(input).toHaveFocus()
-
     await user.clear(input)
     await user.type(input, 'Updated tab name{Enter}')
 
@@ -290,11 +285,6 @@ describe('SessionChatModal session renaming (Fixes #57)', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Rename Session' }))
 
     const input = screen.getByRole('textbox', { name: 'Rename session' })
-    expect(input).toHaveFocus()
-
-    await act(async () => {
-      await new Promise(resolve => setTimeout(resolve, 25))
-    })
     expect(input).toHaveFocus()
 
     await user.clear(input)

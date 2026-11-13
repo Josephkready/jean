@@ -64,7 +64,7 @@ import { isBaseSession, type Project, type Worktree } from '@/types/projects'
 import type { Session } from '@/types/chat'
 import { isNativeApp } from '@/lib/environment'
 import { isImeComposingEvent } from '@/lib/ime-composition'
-import { isClosingMenuFocusTarget } from '@/lib/menu-focus'
+import { shouldIgnoreRenameBlur } from '@/lib/menu-focus'
 import { toast } from 'sonner'
 import { ChatWindow } from './ChatWindow'
 import { ModalTerminalDrawer } from './ModalTerminalDrawer'
@@ -506,12 +506,12 @@ export const SessionChatModal = memo(function SessionChatModal({
   const [openContextMenuSessionId, setOpenContextMenuSessionId] = useState<
     string | null
   >(null)
-  const editStartTimeRef = useRef(0)
+  const renameFocusHandoffRef = useRef(false)
   // Start rename synchronously inside the user gesture so mobile Safari allows
   // input focus and opens the keyboard.
   const handleStartRenameImmediate = useCallback(
-    (sessionId: string, currentName: string) => {
-      editStartTimeRef.current = Date.now()
+    (sessionId: string, currentName: string, fromMenu = false) => {
+      renameFocusHandoffRef.current = fromMenu
       setRenameValue(currentName)
       setRenamingSessionId(sessionId)
     },
@@ -527,6 +527,7 @@ export const SessionChatModal = memo(function SessionChatModal({
       ) {
         renameSession.mutate({ worktreeId, worktreePath, sessionId, newName })
       }
+      renameFocusHandoffRef.current = false
       setRenamingSessionId(null)
     },
     [renameValue, worktreeId, worktreePath, renameSession, tabSessions]
@@ -542,6 +543,7 @@ export const SessionChatModal = memo(function SessionChatModal({
       } else if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
+        renameFocusHandoffRef.current = false
         setRenamingSessionId(null)
       }
     },
@@ -1358,7 +1360,8 @@ export const SessionChatModal = memo(function SessionChatModal({
                             pendingMenuRenameRef.current = null
                             handleStartRenameImmediate(
                               pending.sessionId,
-                              pending.name
+                              pending.name,
+                              true
                             )
                           }
                         }}
@@ -1412,9 +1415,10 @@ export const SessionChatModal = memo(function SessionChatModal({
                                 onChange={e => setRenameValue(e.target.value)}
                                 onBlur={e => {
                                   if (
-                                    Date.now() - editStartTimeRef.current <
-                                      300 &&
-                                    isClosingMenuFocusTarget(e.relatedTarget)
+                                    shouldIgnoreRenameBlur(
+                                      renameFocusHandoffRef,
+                                      e.relatedTarget
+                                    )
                                   ) {
                                     // FocusScope's useEffect cleanup runs after this layout
                                     // commit and removes the trap; our useEffect re-focuses.

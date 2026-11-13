@@ -34,7 +34,7 @@ import {
   type SessionCardProps,
 } from './session-card-utils'
 import { canReconnectSession } from '@/services/chat'
-import { isClosingMenuFocusTarget } from '@/lib/menu-focus'
+import { shouldIgnoreRenameBlur } from '@/lib/menu-focus'
 import { copySessionInfo } from '@/lib/session-info'
 import { useChatStore } from '@/store/chat-store'
 
@@ -72,7 +72,7 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
     const pendingRenameRef = useRef(false)
     const renameInputElementRef = useRef<HTMLInputElement | null>(null)
     const suppressCloseAutoFocusRef = useRef(false)
-    const editStartTimeRef = useRef(0)
+    const renameFocusHandoffRef = useRef(false)
     const renameInputRef = useCallback((node: HTMLInputElement | null) => {
       renameInputElementRef.current = node
       if (node) {
@@ -83,7 +83,6 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
 
     useEffect(() => {
       if (isRenaming) {
-        editStartTimeRef.current = Date.now()
         const input = renameInputElementRef.current
         if (input && document.activeElement !== input) {
           input.focus()
@@ -94,6 +93,9 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
 
     const handleRenameKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === 'Escape') {
+          renameFocusHandoffRef.current = false
+        }
         if (e.key === 'Enter') {
           e.preventDefault()
           e.stopPropagation()
@@ -114,6 +116,7 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
           setMenuOpen(open)
           if (!open && pendingRenameRef.current) {
             pendingRenameRef.current = false
+            renameFocusHandoffRef.current = true
             onRenameStart?.(card.session.id, card.session.name)
           }
         }}
@@ -122,9 +125,10 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
           <div
             ref={ref}
             onClick={onSelect}
-            onDoubleClick={() =>
+            onDoubleClick={() => {
+              renameFocusHandoffRef.current = false
               onRenameStart?.(card.session.id, card.session.name)
-            }
+            }}
             className={cn(
               'group flex w-full items-center gap-3 rounded-md px-3 py-1.5 border border-transparent transition-colors text-left cursor-pointer scroll-mt-28 scroll-mb-20',
               'hover:bg-muted/50 hover:border-foreground/10',
@@ -156,11 +160,14 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
                 onChange={e => onRenameValueChange?.(e.target.value)}
                 onBlur={e => {
                   if (
-                    Date.now() - editStartTimeRef.current < 300 &&
-                    isClosingMenuFocusTarget(e.relatedTarget)
+                    shouldIgnoreRenameBlur(
+                      renameFocusHandoffRef,
+                      e.relatedTarget
+                    )
                   ) {
                     return
                   }
+                  renameFocusHandoffRef.current = false
                   onRenameSubmit?.(card.session.id)
                 }}
                 onKeyDown={handleRenameKeyDown}
