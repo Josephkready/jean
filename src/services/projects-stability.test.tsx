@@ -1,6 +1,8 @@
 import { renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as ReactQuery from '@tanstack/react-query'
+import type * as Environment from '@/lib/environment'
+import type * as RemoteConnections from '@/lib/remote-connections'
 import type { Project } from '@/types/projects'
 
 const localProject: Project = {
@@ -29,12 +31,14 @@ vi.mock('@tanstack/react-query', async importOriginal => {
   const actual = await importOriginal<typeof ReactQuery>()
   return { ...actual, useQuery: () => localResult }
 })
-vi.mock('@/lib/environment', () => ({
+vi.mock('@/lib/environment', async importOriginal => ({
+  ...(await importOriginal<typeof Environment>()),
   hasBackend: () => true,
   hasBackendTransport: () => true,
   isNativeApp: () => true,
 }))
-vi.mock('@/lib/remote-connections', () => ({
+vi.mock('@/lib/remote-connections', async importOriginal => ({
+  ...(await importOriginal<typeof RemoteConnections>()),
   useLocalDashboardEnabled: () => true,
 }))
 vi.mock('./multi-server-projects', () => ({
@@ -42,11 +46,12 @@ vi.mock('./multi-server-projects', () => ({
   toRoutedProjects: (projects: typeof remoteResult.data) => projects,
 }))
 
+import { useProjects } from './projects'
+
 beforeEach(() => vi.clearAllMocks())
 
 describe('useProjects result stability', () => {
-  it('keeps the combined project array stable across unrelated renders', async () => {
-    const { useProjects } = await import('./projects')
+  it('keeps the combined project array stable across unrelated renders', () => {
     const { result, rerender } = renderHook(() => useProjects())
     const first = result.current.data
 
