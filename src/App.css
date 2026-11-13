@@ -115,6 +115,15 @@
   --safe-area-right: env(safe-area-inset-right, 0px);
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --safe-area-left: env(safe-area-inset-left, 0px);
+  --titlebar-height: calc(2rem + var(--safe-area-top));
+  --vv-offset-top: 0px;
+}
+
+/* iPadOS 26 windowed standalone PWAs can report env(safe-area-inset-top) = 0px
+   even when the OS menu/status bar overlaps the top edge. Guarantee at least
+   24px clearance while still honoring larger hardware safe-area insets. */
+html[data-ipad-standalone='true'] {
+  --safe-area-top: max(env(safe-area-inset-top, 0px), 24px);
 }
 
 .dark {
@@ -456,6 +465,10 @@
     min-height: 100%;
     min-height: 100dvh;
     background: var(--background);
+  }
+  html,
+  body {
+    overscroll-behavior: none;
   }
 
   html {
