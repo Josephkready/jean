@@ -14,6 +14,7 @@ import { TitleBar } from '@/components/titlebar/TitleBar'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useIsTouchDevice } from '@/hooks/use-touch-device'
 import { useSwipeDown } from '@/hooks/useSwipeDown'
+import { useVisualViewportShell } from '@/hooks/useVisualViewportShell'
 import { DevModeBanner } from './DevModeBanner'
 import { SidebarWidthProvider } from './SidebarWidthContext'
 import { SidebarHoverPreview } from './SidebarHoverPreview'
@@ -213,7 +214,7 @@ import {
   useWorktreeEvents,
 } from '@/services/projects'
 import { isNativeApp } from '@/lib/environment'
-import { isLinux, isWindows } from '@/lib/platform'
+import { isIPadOSStandalone, isLinux, isWindows } from '@/lib/platform'
 import { usePreferences } from '@/services/preferences'
 
 // Left sidebar resize constraints (pixels)
@@ -583,15 +584,48 @@ export function MainWindow() {
     newSessionModeTarget !== null
   )
 
+  const native = isNativeApp()
+  const ipadStandalone = !native && isIPadOSStandalone()
+
+  useEffect(() => {
+    if (!ipadStandalone) {
+      delete document.documentElement.dataset.ipadStandalone
+      return
+    }
+    document.documentElement.dataset.ipadStandalone = 'true'
+    return () => {
+      delete document.documentElement.dataset.ipadStandalone
+    }
+  }, [ipadStandalone])
+
+  const { height: vvHeight, offsetTop: vvOffsetTop } =
+    useVisualViewportShell(!native)
+
+  const shellStyle: CSSProperties | undefined = useMemo(() => {
+    if (native) return undefined
+    const style: Record<string, string | number> = {
+      '--vv-offset-top': `${vvOffsetTop}px`,
+    }
+    if (vvHeight !== null || vvOffsetTop > 0) {
+      style.position = 'fixed'
+      style.top = `${vvOffsetTop}px`
+      style.left = 0
+      style.right = 0
+      style.height = vvHeight !== null ? `${vvHeight}px` : '100dvh'
+    }
+    return style as CSSProperties
+  }, [native, vvHeight, vvOffsetTop])
+
   // On Windows, use smaller border radius and remove it when maximized
   // On other platforms, use rounded-xl only in native app mode
   const roundedClass = isWindows
     ? !isMaximized && 'rounded-sm'
-    : isNativeApp() && 'rounded-xl'
+    : native && 'rounded-xl'
 
   return (
     <div
       ref={isTouch ? swipeDown.containerRef : undefined}
+      style={shellStyle}
       className={cn(
         'flex h-dvh w-full flex-col overflow-hidden bg-background',
         roundedClass
@@ -634,9 +668,12 @@ export function MainWindow() {
             : // 72px tab rail + sidebar + 1px resize handle
               72 + (leftSidebarVisible ? leftSidebarSize + 1 : 0)
         }
+        style={
+          !native && vvOffsetTop > 0 ? { top: `${vvOffsetTop}px` } : undefined
+        }
         className={cn(
           'top-0 left-0 right-0',
-          isNativeApp() ? 'absolute' : 'fixed bg-background'
+          native ? 'absolute' : 'fixed bg-background'
         )}
       />
 
@@ -651,7 +688,7 @@ export function MainWindow() {
           // Collapsed: blend with the main window. Expanded: match the sidebar.
           <div
             className={cn(
-              'h-full shrink-0 pt-8',
+              'h-full shrink-0 pt-[var(--titlebar-height)]',
               leftSidebarVisible
                 ? 'bg-sidebar dark:bg-[#0b0b0b]'
                 : 'bg-background'
@@ -684,7 +721,7 @@ export function MainWindow() {
           <SidebarWidthProvider value={leftSidebarSize}>
             <div
               ref={sidebarRef}
-              className="h-full overflow-hidden bg-sidebar pt-8 dark:bg-[#0b0b0b]"
+              className="h-full overflow-hidden bg-sidebar pt-[var(--titlebar-height)] dark:bg-[#0b0b0b]"
               style={{ width: leftSidebarSize }}
             >
               <Suspense fallback={null}>
@@ -743,7 +780,7 @@ export function MainWindow() {
         )}
 
         {/* Main Content + bottom browser panel stacked vertically */}
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden pt-8">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden pt-[var(--titlebar-height)]">
           <div className="relative min-w-0 flex-1 overflow-hidden">
             <MainWindowContent
               sidebarSwipeContainerRef={
@@ -774,7 +811,7 @@ export function MainWindow() {
         {!isMobile && fileBrowserVisible && isInitialized && (
           <div
             ref={fileBrowserRef}
-            className="h-full overflow-hidden bg-sidebar pt-8"
+            className="h-full overflow-hidden bg-sidebar pt-[var(--titlebar-height)]"
             style={{ width: fileBrowserSize }}
           >
             <Suspense fallback={null}>

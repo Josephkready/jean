@@ -4,7 +4,11 @@ import { ArrowLeft } from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
 import { LinuxWindowControls } from '@/components/titlebar/LinuxWindowControls'
 import { isNativeApp } from '@/lib/environment'
-import { isClientLinux, isClientMacOS } from '@/lib/platform'
+import {
+  isClientLinux,
+  isClientMacOS,
+  isIPadOSStandalone,
+} from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 /**
@@ -32,10 +36,13 @@ export function SettingsPage({
         <DialogPrimitive.Content
           aria-describedby={undefined}
           className={cn(
-            'fixed inset-0 z-[70] overflow-hidden bg-background font-sans outline-none',
+            'fixed inset-x-0 top-[var(--vv-offset-top,0px)] bottom-0 z-[70] overflow-hidden bg-background font-sans pt-[var(--safe-area-top)] outline-none',
             native &&
               isClientMacOS &&
               '[&_[data-settings-title]]:pl-[calc(var(--mac-titlebar-action-left-inset)+1rem)]',
+            !native &&
+              isIPadOSStandalone() &&
+              '[&_[data-settings-title]]:pl-[76px]',
             native && isClientLinux && '[&_main>header]:pr-36'
           )}
           onInteractOutside={event => event.preventDefault()}
