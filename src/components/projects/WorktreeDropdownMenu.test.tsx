@@ -401,4 +401,24 @@ describe('WorktreeDropdownMenu', () => {
       favorite_package_scripts: ['project-1:test'],
     })
   })
+
+  it('triggers Rename Session from the mobile actions menu without restoring focus to the menu button', async () => {
+    const user = userEvent.setup()
+    const onRenameSession = vi.fn()
+    envMocks.isMobile = true
+
+    render(
+      <WorktreeDropdownMenu
+        worktree={worktree}
+        projectId="project-1"
+        projectPath="/tmp/project"
+        onRenameSession={onRenameSession}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Actions' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Rename Session' }))
+
+    expect(onRenameSession).toHaveBeenCalledOnce()
+  })
 })

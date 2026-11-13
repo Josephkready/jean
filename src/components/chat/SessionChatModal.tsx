@@ -64,6 +64,7 @@ import { isBaseSession, type Project, type Worktree } from '@/types/projects'
 import type { Session } from '@/types/chat'
 import { isNativeApp } from '@/lib/environment'
 import { isImeComposingEvent } from '@/lib/ime-composition'
+import { isClosingMenuFocusTarget } from '@/lib/menu-focus'
 import { toast } from 'sonner'
 import { ChatWindow } from './ChatWindow'
 import { ModalTerminalDrawer } from './ModalTerminalDrawer'
@@ -496,20 +497,23 @@ export const SessionChatModal = memo(function SessionChatModal({
     null
   )
   const [renameValue, setRenameValue] = useState('')
-  // Start rename immediately (for double-click)
+  const renameInputElementRef = useRef<HTMLInputElement | null>(null)
+  const suppressContextMenuAutoFocusRef = useRef(false)
+  const pendingMenuRenameRef = useRef<{
+    sessionId: string
+    name: string
+  } | null>(null)
+  const [openContextMenuSessionId, setOpenContextMenuSessionId] = useState<
+    string | null
+  >(null)
+  const editStartTimeRef = useRef(0)
+  // Start rename synchronously inside the user gesture so mobile Safari allows
+  // input focus and opens the keyboard.
   const handleStartRenameImmediate = useCallback(
     (sessionId: string, currentName: string) => {
+      editStartTimeRef.current = Date.now()
       setRenameValue(currentName)
       setRenamingSessionId(sessionId)
-    },
-    []
-  )
-  // Delay rename start so the input renders after the context menu fully closes
-  // (Radix restores focus to the trigger on close, which would steal focus from the input)
-  const handleStartRename = useCallback(
-    (sessionId: string, currentName: string) => {
-      setRenameValue(currentName)
-      setTimeout(() => setRenamingSessionId(sessionId), 200)
     },
     []
   )
@@ -530,10 +534,14 @@ export const SessionChatModal = memo(function SessionChatModal({
 
   const handleRenameKeyDown = useCallback(
     (e: React.KeyboardEvent, sessionId: string) => {
+      if (isImeComposingEvent(e)) return
       if (e.key === 'Enter') {
         e.preventDefault()
+        e.stopPropagation()
         handleRenameSubmit(sessionId)
       } else if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
         setRenamingSessionId(null)
       }
     },
@@ -551,8 +559,7 @@ export const SessionChatModal = memo(function SessionChatModal({
       const session = tabSessions.find(s => s.id === sessionId)
       if (!session || session.archived_at) return
 
-      setRenameValue(session.name)
-      setRenamingSessionId(session.id)
+      handleStartRenameImmediate(session.id, session.name)
     }
 
     window.addEventListener(
@@ -564,14 +571,27 @@ export const SessionChatModal = memo(function SessionChatModal({
         'command:rename-session',
         handleRenameSessionCommand as EventListener
       )
-  }, [isOpen, tabSessions])
+  }, [isOpen, tabSessions, handleStartRenameImmediate])
 
   const renameInputRef = useCallback((node: HTMLInputElement | null) => {
+    renameInputElementRef.current = node
     if (node) {
+      node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
       node.focus()
       node.select()
     }
   }, [])
+
+  // Re-focus once after commit effects settle (when a closing Radix menu
+  // FocusScope cleans up its focusin trap after layout ref callbacks run).
+  useEffect(() => {
+    if (!renamingSessionId) return
+    const input = renameInputElementRef.current
+    if (input && document.activeElement !== input) {
+      input.focus()
+      input.select()
+    }
+  }, [renamingSessionId])
 
   // Session archive/delete handlers
   const { handleArchiveSession, handleDeleteSession } = useSessionArchive({
@@ -1071,6 +1091,12 @@ export const SessionChatModal = memo(function SessionChatModal({
       branchDiffRemoved={isBase ? 0 : branchDiffRemoved}
       onUncommittedDiffClick={handleUncommittedDiffClick}
       onBranchDiffClick={handleBranchDiffClick}
+      onRenameSession={
+        currentSession && !currentSession.archived_at
+          ? () =>
+              handleStartRenameImmediate(currentSession.id, currentSession.name)
+          : undefined
+      }
       onToggleTerminal={handleToggleModalTerminal}
       onToggleBrowser={isNativeApp() ? handleToggleModalBrowser : undefined}
       packageScripts={packageScripts}
@@ -1312,7 +1338,31 @@ export const SessionChatModal = memo(function SessionChatModal({
                     const isGeneratingName =
                       namingSessionIds[session.id] ?? false
                     return (
-                      <ContextMenu key={session.id}>
+                      <ContextMenu
+                        key={session.id}
+                        open={openContextMenuSessionId === session.id}
+                        onOpenChange={open => {
+                          setOpenContextMenuSessionId(prev =>
+                            open
+                              ? session.id
+                              : prev === session.id
+                                ? null
+                                : prev
+                          )
+                          if (
+                            !open &&
+                            pendingMenuRenameRef.current?.sessionId ===
+                              session.id
+                          ) {
+                            const pending = pendingMenuRenameRef.current
+                            pendingMenuRenameRef.current = null
+                            handleStartRenameImmediate(
+                              pending.sessionId,
+                              pending.name
+                            )
+                          }
+                        }}
+                      >
                         <ContextMenuTrigger asChild>
                           <div
                             data-session-id={session.id}
@@ -1324,8 +1374,14 @@ export const SessionChatModal = memo(function SessionChatModal({
                                 session.name
                               )
                             }
+                            style={
+                              renamingSessionId !== session.id
+                                ? { WebkitTouchCallout: 'none' }
+                                : undefined
+                            }
                             className={cn(
                               'group/tab flex shrink-0 items-center gap-1.5 border-r border-border/40 px-3 py-1.5 text-xs transition-colors whitespace-nowrap cursor-pointer',
+                              renamingSessionId !== session.id && 'select-none',
                               isActive
                                 ? 'bg-muted text-foreground'
                                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
@@ -1354,14 +1410,26 @@ export const SessionChatModal = memo(function SessionChatModal({
                                 type="text"
                                 value={renameValue}
                                 onChange={e => setRenameValue(e.target.value)}
-                                onBlur={() => handleRenameSubmit(session.id)}
+                                onBlur={e => {
+                                  if (
+                                    Date.now() - editStartTimeRef.current <
+                                      300 &&
+                                    isClosingMenuFocusTarget(e.relatedTarget)
+                                  ) {
+                                    // FocusScope's useEffect cleanup runs after this layout
+                                    // commit and removes the trap; our useEffect re-focuses.
+                                    return
+                                  }
+                                  handleRenameSubmit(session.id)
+                                }}
                                 onKeyDown={e =>
                                   handleRenameKeyDown(e, session.id)
                                 }
                                 onPointerDown={e => e.stopPropagation()}
                                 onClick={e => e.stopPropagation()}
+                                onDoubleClick={e => e.stopPropagation()}
                                 aria-label="Rename session"
-                                className="w-full min-w-0 bg-transparent text-base outline-none md:text-xs"
+                                className="w-32 min-w-24 max-w-48 bg-transparent text-base outline-none ring-1 ring-ring rounded px-1 md:w-36 md:text-xs"
                               />
                             ) : (
                               <Tooltip>
@@ -1400,34 +1468,48 @@ export const SessionChatModal = memo(function SessionChatModal({
                             )}
                           </div>
                         </ContextMenuTrigger>
-                        <ContextMenuContent className="w-64">
-                          <SessionContextMenuItems
-                            session={session}
-                            hasLabel={!!sessionLabel}
-                            resumeCommand={resumeCommand}
-                            nativeClientPending={isOpeningInNativeClient}
-                            onRename={() =>
-                              handleStartRename(session.id, session.name)
-                            }
-                            onToggleLabel={() => {
-                              setLabelTargetSessionId(session.id)
-                              setLabelModalOpen(true)
+                        {openContextMenuSessionId === session.id && (
+                          <ContextMenuContent
+                            className="w-64"
+                            onCloseAutoFocus={e => {
+                              if (suppressContextMenuAutoFocusRef.current) {
+                                e.preventDefault()
+                                suppressContextMenuAutoFocusRef.current = false
+                              }
                             }}
-                            onOpenInNativeClient={() =>
-                              handleOpenInNativeClient(session)
-                            }
-                            onReconnect={() =>
-                              void reconnectNativeCliSession(
-                                session,
-                                worktreeId
-                              )
-                            }
-                            onArchive={() =>
-                              removeSessionTab(session, { archive: true })
-                            }
-                            onDelete={() => removeSessionTab(session)}
-                          />
-                        </ContextMenuContent>
+                          >
+                            <SessionContextMenuItems
+                              session={session}
+                              hasLabel={!!sessionLabel}
+                              resumeCommand={resumeCommand}
+                              nativeClientPending={isOpeningInNativeClient}
+                              onRename={() => {
+                                suppressContextMenuAutoFocusRef.current = true
+                                pendingMenuRenameRef.current = {
+                                  sessionId: session.id,
+                                  name: session.name,
+                                }
+                              }}
+                              onToggleLabel={() => {
+                                setLabelTargetSessionId(session.id)
+                                setLabelModalOpen(true)
+                              }}
+                              onOpenInNativeClient={() =>
+                                handleOpenInNativeClient(session)
+                              }
+                              onReconnect={() =>
+                                void reconnectNativeCliSession(
+                                  session,
+                                  worktreeId
+                                )
+                              }
+                              onArchive={() =>
+                                removeSessionTab(session, { archive: true })
+                              }
+                              onDelete={() => removeSessionTab(session)}
+                            />
+                          </ContextMenuContent>
+                        )}
                       </ContextMenu>
                     )
                   })}
