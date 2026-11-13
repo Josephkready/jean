@@ -568,3 +568,7 @@ crate::background_tasks::commands::my_command(state, arg)?;
 - [ ] Register in `lib.rs` `generate_handler![]`
 - [ ] Add match arm in `dispatch.rs` `dispatch_command()`
 - [ ] Add `emit_cache_invalidation()` if the command mutates data that other clients should refresh
+
+#### Vitest Partial Module Mocks
+
+`src/lib/ssh-tunnel.ts` registers `setSshProfileLifecycle(...)` at module evaluation time, so tests that mock `@/lib/remote-connections` while transitively importing `ssh-tunnel.ts` (for example via `@/services/projects`) must preserve exports with `importOriginal` (or also mock `@/lib/ssh-tunnel`). Also keep heavy module imports at top level rather than `await import(...)` inside `it(...)` so cold transforms do not eat into the 5s per-test timeout.
