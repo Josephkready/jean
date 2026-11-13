@@ -123,11 +123,9 @@ const WorktreeSessionList = memo(function WorktreeSessionList({
     null
   )
   const [renameValue, setRenameValue] = useState('')
-  // Delay so the input renders after the context menu closes (Radix restores
-  // focus to the trigger on close, which would steal focus from the input).
   const handleStartRename = useCallback((session: Session) => {
     setRenameValue(session.name)
-    setTimeout(() => setRenamingSessionId(session.id), 200)
+    setRenamingSessionId(session.id)
   }, [])
   const handleRenameSubmit = useCallback(
     (session: Session) => {

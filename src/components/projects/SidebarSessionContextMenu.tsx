@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -25,13 +25,29 @@ interface SidebarSessionContextMenuProps {
 /** Sidebar session rows use the same menu as the worktree session tabs. */
 export function SidebarSessionContextMenu({
   children,
+  onRename,
   ...props
 }: SidebarSessionContextMenuProps) {
   const [open, setOpen] = useState(false)
+  const suppressCloseAutoFocusRef = useRef(false)
   return (
     <ContextMenu onOpenChange={setOpen}>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      {open && <SidebarSessionContextMenuContent {...props} />}
+      {open && (
+        <SidebarSessionContextMenuContent
+          {...props}
+          onRename={session => {
+            suppressCloseAutoFocusRef.current = true
+            onRename(session)
+          }}
+          onCloseAutoFocus={e => {
+            if (suppressCloseAutoFocusRef.current) {
+              e.preventDefault()
+              suppressCloseAutoFocusRef.current = false
+            }
+          }}
+        />
+      )}
     </ContextMenu>
   )
 }
@@ -45,7 +61,10 @@ function SidebarSessionContextMenuContent({
   onLabel,
   onArchive,
   onDelete,
-}: Omit<SidebarSessionContextMenuProps, 'children'>) {
+  onCloseAutoFocus,
+}: Omit<SidebarSessionContextMenuProps, 'children'> & {
+  onCloseAutoFocus: (event: Event) => void
+}) {
   const hasLabel = useChatStore(state => !!state.sessionLabels[session.id])
   const { openInNativeClient, isPending } = useOpenInNativeClient(
     worktreeId,
@@ -54,7 +73,7 @@ function SidebarSessionContextMenuContent({
   const resumeCommand = getResumeCommand(session)
 
   return (
-    <ContextMenuContent className="w-64">
+    <ContextMenuContent className="w-64" onCloseAutoFocus={onCloseAutoFocus}>
       <SessionContextMenuItems
         session={session}
         hasLabel={hasLabel}
