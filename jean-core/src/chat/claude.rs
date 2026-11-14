@@ -2606,6 +2606,12 @@ pub fn tail_claude_output(
                         }
                     }
                 }
+                "result" if super::claude_host::is_noop_turn_result(&msg) => {
+                    // Empty turn from a replayed stale task notification on
+                    // resume. The real prompt is still running; ending the
+                    // run here orphans its output (#60).
+                    log::trace!("Ignoring no-op result (num_turns 0) for session {session_id}");
+                }
                 "result" => {
                     // Final result - Claude CLI completed
                     // `is_error` results (error_during_execution, error_max_turns,

@@ -41,6 +41,20 @@ pub(crate) fn host_marker_type(line: &str) -> Option<&'static str> {
     }
 }
 
+/// A `result` for a turn that did no work: `num_turns` 0, no reply text, not
+/// an error. The CLI emits one per stale `task_notification` it replays on
+/// `--resume` (e.g. "stopped ... previous session ended"), before it starts
+/// the real prompt. It is not the end of the run (Jean #60).
+pub(crate) fn is_noop_turn_result(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("result")
+        && value.get("is_error").and_then(Value::as_bool) != Some(true)
+        && value.get("num_turns").and_then(Value::as_u64) == Some(0)
+        && value
+            .get("result")
+            .and_then(Value::as_str)
+            .map_or(true, |text| text.trim().is_empty())
+}
+
 /// stream-json stdin line for one user message.
 pub(crate) fn user_input_line(text: &str) -> String {
     serde_json::json!({
@@ -143,7 +157,10 @@ impl ClaudeHostState {
             };
         }
 
-        if value.get("type").and_then(Value::as_str) == Some("result") && !self.stdin_closed {
+        if value.get("type").and_then(Value::as_str) == Some("result")
+            && !is_noop_turn_result(&value)
+            && !self.stdin_closed
+        {
             if self.pending_steers.is_empty() {
                 self.stdin_closed = true;
                 return StdoutDecision {
@@ -545,6 +562,33 @@ mod tests {
 
     fn written(d: &StdoutDecision) -> Value {
         serde_json::from_str(d.write.as_deref().unwrap()).unwrap()
+    }
+
+    // Shape of the stale-task-notification turns a resumed session replays
+    // before the real prompt (Jean #60: run ended in 3 s, "Response content
+    // was not captured", while Claude kept working).
+    const NOOP_RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_api_ms":0,"num_turns":0,"result":"","session_id":"s"}"#;
+    const REAL_RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"Done","session_id":"s"}"#;
+    const ERROR_RESULT: &str = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"result":"","session_id":"s"}"#;
+
+    #[test]
+    fn noop_turn_result_is_only_an_empty_zero_turn_success() {
+        let parse = |l: &str| serde_json::from_str::<Value>(l).unwrap();
+        assert!(is_noop_turn_result(&parse(NOOP_RESULT)));
+        assert!(!is_noop_turn_result(&parse(REAL_RESULT)));
+        assert!(!is_noop_turn_result(&parse(ERROR_RESULT)));
+        // Older CLIs omit num_turns: keep treating those as real results.
+        assert!(!is_noop_turn_result(&parse(RESULT)));
+    }
+
+    #[test]
+    fn noop_result_does_not_close_stdin_before_the_real_turn() {
+        let mut s = ClaudeHostState::new();
+        assert_eq!(s.on_stdout_line(INITIAL_ECHO).write, None);
+        let d = s.on_stdout_line(NOOP_RESULT);
+        assert!(!d.close_stdin);
+        assert_eq!(d.write.as_deref(), Some(NOOP_RESULT));
+        assert!(s.on_stdout_line(REAL_RESULT).close_stdin);
     }
 
     #[test]
