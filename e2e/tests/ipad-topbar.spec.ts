@@ -141,7 +141,9 @@ test.describe('iPadOS top bar safe-area and visualViewport clearance (#58)', () 
         }
       ).__TRIGGER_VV__(38, 856)
     })
-    await mockPage.waitForTimeout(200)
+    await expect
+      .poll(async () => (await leftSidebarBtn.boundingBox())?.y ?? 0)
+      .toBeGreaterThanOrEqual(38 + 24)
 
     const pannedLeftBtnBox = await leftSidebarBtn.boundingBox()
     const pannedCloseBtnBox = await closeModalBtn.boundingBox()
