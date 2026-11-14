@@ -8,7 +8,9 @@
 //!
 //! Finish rule (see [`ClaudeHostState`]): on a `result` line the host closes
 //! child stdin (the CLI then exits) unless a steer was written that the CLI
-//! has not echoed yet. Echo filtering: the replayed initial prompt is dropped
+//! has not echoed yet. No-op turn results (`num_turns` 0, empty text, not an
+//! error; see [`is_noop_turn_result`]) are written through but never close
+//! stdin, because the CLI replays them before the real turn (Jean #60). Echo filtering: the replayed initial prompt is dropped
 //! and each replayed steer is written as `steered_user_message`, so no parser
 //! sees a replayed `user` text line.
 
@@ -157,6 +159,11 @@ impl ClaudeHostState {
             };
         }
 
+        if value.get("type").and_then(Value::as_str) == Some("result")
+            && is_noop_turn_result(&value)
+        {
+            eprintln!("[claude-host] ignoring no-op turn result; stdin stays open");
+        }
         if value.get("type").and_then(Value::as_str) == Some("result")
             && !is_noop_turn_result(&value)
             && !self.stdin_closed
@@ -319,7 +326,6 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
 
     struct Shared {
         state: ClaudeHostState,
-        stdin: Option<ChildStdin>,
     }
 
     let mut socket_path: Option<PathBuf> = None;
@@ -408,13 +414,20 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
         .ok_or("Failed to capture Claude stdout")?;
     let mut initial = initial_input.trim_end().to_string();
     initial.push('\n');
-    let _ = stdin
+    if let Err(e) = stdin
         .write_all(initial.as_bytes())
-        .and_then(|_| stdin.flush());
+        .and_then(|_| stdin.flush())
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        append(&format!("Failed to write prompt to Claude CLI: {e}"));
+        append(&serde_json::json!({ "type": HOST_EXIT_TYPE, "code": null }).to_string());
+        return Err(format!("Failed to write prompt to Claude CLI: {e}"));
+    }
 
+    let stdin_slot = Arc::new(Mutex::new(Some(stdin)));
     let shared = Arc::new(Mutex::new(Shared {
         state: ClaudeHostState::new(),
-        stdin: Some(stdin),
     }));
 
     // stderr goes to the run JSONL too (same as `2>&1` in the plain pipeline),
@@ -432,11 +445,17 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
     {
         let stop = stop.clone();
         let shared = shared.clone();
+        let stdin = stdin_slot.clone();
         std::thread::spawn(move || {
-            fn handle_client(stream: UnixStream, shared: Arc<Mutex<Shared>>) {
+            fn handle_client(
+                stream: UnixStream,
+                stdin: Arc<Mutex<Option<ChildStdin>>>,
+                shared: Arc<Mutex<Shared>>,
+            ) {
                 let Ok(mut writer) = stream.try_clone() else {
                     return;
                 };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                 let mut line = String::new();
                 if BufReader::new(stream).read_line(&mut line).is_err() || line.trim().is_empty() {
                     return;
@@ -444,7 +463,7 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
                 let reply = match serde_json::from_str::<Value>(line.trim()) {
                     Ok(req) if req.get("type").and_then(Value::as_str) == Some("steer") => {
                         let text = req.get("message").and_then(Value::as_str).unwrap_or("");
-                        steer(&shared, text)
+                        steer(&shared, &stdin, text)
                     }
                     _ => Err("Unknown Claude host command".to_string()),
                 };
@@ -455,13 +474,22 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
                 let _ = writer.write_all(format!("{reply}\n").as_bytes());
             }
 
-            fn steer(shared: &Mutex<Shared>, text: &str) -> Result<(), String> {
+            fn steer(
+                shared: &Mutex<Shared>,
+                stdin: &Mutex<Option<ChildStdin>>,
+                text: &str,
+            ) -> Result<(), String> {
                 if text.trim().is_empty() {
                     return Err("Empty steer message".to_string());
                 }
-                let mut guard = shared.lock().map_err(|_| "Claude host lock poisoned")?;
-                let line = guard.state.accept_steer(text)?;
-                let written = match guard.stdin.as_mut() {
+                // Lock order is stdin, then state. The stdout loop never holds
+                // the state lock while taking stdin, so this cannot deadlock.
+                let mut slot = stdin.lock().map_err(|_| "Claude host lock poisoned")?;
+                let line = {
+                    let mut guard = shared.lock().map_err(|_| "Claude host lock poisoned")?;
+                    guard.state.accept_steer(text)?
+                };
+                let written = match slot.as_mut() {
                     Some(stdin) => stdin
                         .write_all(format!("{line}\n").as_bytes())
                         .and_then(|_| stdin.flush())
@@ -469,7 +497,9 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
                     None => Err("Claude turn already finished".to_string()),
                 };
                 if written.is_err() {
-                    guard.state.reject_last_steer();
+                    if let Ok(mut guard) = shared.lock() {
+                        guard.state.reject_last_steer();
+                    }
                 }
                 written
             }
@@ -482,7 +512,8 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
                             break;
                         }
                         let shared = shared.clone();
-                        std::thread::spawn(move || handle_client(stream, shared));
+                        let stdin = stdin.clone();
+                        std::thread::spawn(move || handle_client(stream, stdin, shared));
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(e) => {
@@ -498,13 +529,18 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
     {
         let stop = stop.clone();
         let shared = shared.clone();
+        let stdin = stdin_slot.clone();
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(500));
-                if let Ok(mut guard) = shared.lock() {
-                    if guard.state.should_force_close(Instant::now()) {
-                        eprintln!("[claude-host] pending steer not consumed; closing stdin");
-                        guard.stdin = None;
+                let force = match shared.lock() {
+                    Ok(mut guard) => guard.state.should_force_close(Instant::now()),
+                    Err(_) => false,
+                };
+                if force {
+                    eprintln!("[claude-host] pending steer not consumed; closing stdin");
+                    if let Ok(mut slot) = stdin.lock() {
+                        *slot = None;
                     }
                 }
             }
@@ -514,16 +550,15 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         let decision = match shared.lock() {
-            Ok(mut guard) => {
-                let decision = guard.state.on_stdout_line(&line);
-                if decision.close_stdin {
-                    // Dropping ChildStdin closes the pipe; the CLI then exits.
-                    guard.stdin = None;
-                }
-                decision
-            }
+            Ok(mut guard) => guard.state.on_stdout_line(&line),
             Err(_) => break,
         };
+        if decision.close_stdin {
+            // Dropping ChildStdin closes the pipe; the CLI then exits.
+            if let Ok(mut slot) = stdin_slot.lock() {
+                *slot = None;
+            }
+        }
         if let Some(out) = decision.write {
             append(&out);
         }
@@ -532,7 +567,9 @@ pub fn run_claude_host_from_args() -> Result<(), String> {
     // stdout closed: no more steers can land.
     if let Ok(mut guard) = shared.lock() {
         guard.state.mark_stdin_closed();
-        guard.stdin = None;
+    }
+    if let Ok(mut slot) = stdin_slot.lock() {
+        *slot = None;
     }
     let code = child.wait().ok().and_then(|status| status.code());
     if let Some(handle) = stderr_thread {
@@ -579,6 +616,16 @@ mod tests {
         assert!(!is_noop_turn_result(&parse(ERROR_RESULT)));
         // Older CLIs omit num_turns: keep treating those as real results.
         assert!(!is_noop_turn_result(&parse(RESULT)));
+        // Whitespace-only text is still no reply; a missing result key counts too.
+        assert!(is_noop_turn_result(&parse(
+            r#"{"type":"result","is_error":false,"num_turns":0,"result":"  \n"}"#
+        )));
+        assert!(is_noop_turn_result(&parse(
+            r#"{"type":"result","is_error":false,"num_turns":0}"#
+        )));
+        assert!(!is_noop_turn_result(&parse(
+            r#"{"type":"result","is_error":false,"num_turns":0,"result":"x"}"#
+        )));
     }
 
     #[test]
@@ -675,6 +722,66 @@ mod tests {
         s.accept_steer("x").unwrap();
         s.reject_last_steer();
         assert!(s.on_stdout_line(RESULT).close_stdin);
+    }
+
+    #[test]
+    #[ignore = "live: runs the real claude CLI; set JEAN_LIVE_CLAUDE_SESSION to a resumable session that has a background task"]
+    fn live_resumed_session_emits_noop_result_before_real_result() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+        let Ok(session) = std::env::var("JEAN_LIVE_CLAUDE_SESSION") else {
+            eprintln!("skipped: JEAN_LIVE_CLAUDE_SESSION not set");
+            return;
+        };
+        let cli = std::env::var("JEAN_LIVE_CLAUDE_CLI").unwrap_or_else(|_| "claude".to_string());
+        let mut child = Command::new(&cli)
+            .args([
+                "--print",
+                "--verbose",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--replay-user-messages",
+                "--resume",
+                session.as_str(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn claude");
+        let mut stdin = child.stdin.take().expect("claude stdin");
+        stdin
+            .write_all(format!("{}\n", user_input_line("reply with OK")).as_bytes())
+            .expect("write prompt");
+        let mut stdin = Some(stdin);
+        let stdout = child.stdout.take().expect("claude stdout");
+        let mut results: Vec<Value> = Vec::new();
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if value.get("type").and_then(Value::as_str) != Some("result") {
+                continue;
+            }
+            let noop = is_noop_turn_result(&value);
+            results.push(value);
+            if !noop {
+                // Real reply seen: close stdin so the CLI exits after this turn.
+                drop(stdin.take());
+            }
+        }
+        child.wait().expect("wait for claude");
+        let first_real = results
+            .iter()
+            .position(|r| !is_noop_turn_result(r))
+            .expect("stream has a real result");
+        assert!(
+            results[..first_real].iter().any(|r| is_noop_turn_result(r)),
+            "expected a no-op result (num_turns 0, empty text) before the real result"
+        );
     }
 
     #[test]
