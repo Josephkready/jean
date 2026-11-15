@@ -2606,6 +2606,14 @@ pub fn tail_claude_output(
                         }
                     }
                 }
+                "result" if super::claude_host::is_noop_turn_result(&msg) => {
+                    // Empty turn from a replayed stale task notification on
+                    // resume. The real prompt is still running; ending the
+                    // run here orphans its output (#60). Intentionally skips
+                    // usage, permission denials, and turn-boundary bookkeeping:
+                    // a no-op turn carries no reply, so it is not a turn end.
+                    log::trace!("Ignoring no-op result for session {session_id}");
+                }
                 "result" => {
                     // Final result - Claude CLI completed
                     // `is_error` results (error_during_execution, error_max_turns,
@@ -3597,6 +3605,41 @@ mod tests {
         assert!(!wait.saw_background_task);
         assert_eq!(wait.observe(&line, |_| false), Some("toolu_monitor"));
         assert!(wait.saw_background_task);
+    }
+
+    #[test]
+    fn stale_noop_result_does_not_end_non_host_run() {
+        // Resume replays a stale task notification, then an empty num_turns 0
+        // result. The real reply that follows must still be captured (#60).
+        let fixture = concat!(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","status":"stopped"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","num_turns":0,"result":""}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"real reply"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","result":"real reply"}"#,
+            "\n",
+        );
+        let response = tail_fixture("noop-stale", fixture, None);
+        assert!(!response.cancelled);
+        assert_eq!(response.content, "real reply");
+    }
+
+    #[test]
+    fn noop_result_as_last_line_does_not_complete_run() {
+        // A lone no-op result must not complete the run. With a dead process
+        // the tailer reports a cancel and no content.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let fixture = concat!(
+            r#"{"type":"result","subtype":"success","num_turns":0,"result":""}"#,
+            "\n",
+        );
+        let response = tail_fixture_with_pid("noop-last", fixture, None, dead_pid);
+        assert!(response.cancelled);
+        assert!(response.content.is_empty());
     }
 
     #[test]
