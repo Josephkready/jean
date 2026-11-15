@@ -1,7 +1,12 @@
 import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
-import { isClientLinux, isClientMacOS, openExternal } from '@/lib/platform'
+import {
+  isClientLinux,
+  isClientMacOS,
+  isIPadOSStandalone,
+  openExternal,
+} from '@/lib/platform'
 import { Button } from '@/components/ui/button'
 import {
   Tooltip,
@@ -44,6 +49,7 @@ import { ThemeToggle } from './ThemeToggle'
 
 interface TitleBarProps {
   className?: string
+  style?: React.CSSProperties
   title?: string
   hideTitle?: boolean
   /** Width (px) of the left rail + sidebar; the center group is centered over the remaining content area */
@@ -52,6 +58,7 @@ interface TitleBarProps {
 
 export function TitleBar({
   className,
+  style,
   title = 'Jean',
   hideTitle = false,
   contentInset = 0,
@@ -77,6 +84,7 @@ export function TitleBar({
       DEFAULT_KEYBINDINGS.toggle_file_browser) as string
   )
   const native = isNativeApp()
+  const ipadStandalone = !native && isIPadOSStandalone()
   const selectedProjectId = useProjectsStore(state => state.selectedProjectId)
   const remoteConnections = useRemoteConnections()
   const serverLabel = resolveHeaderServerLabel(
@@ -88,227 +96,240 @@ export function TitleBar({
     <div
       {...(native ? { 'data-tauri-drag-region': true } : {})}
       className={cn(
-        'relative flex h-8 w-full shrink-0 items-center justify-between',
-        'bg-transparent md:px-2',
+        'relative w-full shrink-0 pt-[var(--safe-area-top)]',
         native ? 'z-[60]' : 'z-50',
         className
       )}
+      style={style}
     >
-      {/* Desktop: Jean logo above the 36px sidebar tab rail (macOS native
-          uses this corner for the traffic lights) */}
-      {!isMobile && !(native && isClientMacOS) && (
-        <div className="pointer-events-none absolute inset-y-0 left-0 flex w-9 items-center justify-center pt-1">
-          <img
-            src="/logo.png"
-            alt="Jean"
-            width={18}
-            height={18}
-            className="size-[18px]"
-            draggable={false}
-          />
-        </div>
-      )}
-      {/* Left side - Window Controls + Left Actions (hidden in zen mode) */}
       <div
-        className="flex items-center"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        {/* macOS traffic-light inset even when action buttons are hidden */}
-        {zenMode && native && isClientMacOS && (
-          <div className="pl-[80px]" aria-hidden />
+        {...(native ? { 'data-tauri-drag-region': true } : {})}
+        className={cn(
+          'relative flex h-8 w-full items-center justify-between',
+          'bg-transparent md:px-2'
         )}
-        {/* Left Action Buttons */}
-        {!zenMode && (
-          <div
-            className={cn(
-              'relative z-10 flex items-center gap-1',
-              native && isClientMacOS
-                ? 'mac-titlebar-actions'
-                : isMobile
-                  ? 'pl-2 pt-1'
-                  : 'pl-9 pt-1' // Start after the 36px sidebar tab rail
-            )}
-          >
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  onClick={toggleLeftSidebar}
-                  variant="ghost"
-                  size="icon"
-                  aria-label={
-                    leftSidebarVisible
-                      ? 'Hide Left Sidebar'
-                      : 'Show Left Sidebar'
-                  }
-                  className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
-                >
-                  {leftSidebarVisible ? (
-                    <PanelLeftClose className="size-3.5" />
-                  ) : (
-                    <PanelLeft className="size-3.5" />
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {leftSidebarVisible ? 'Hide' : 'Show'} Left Sidebar{' '}
-                <kbd className="ml-1 text-[0.625rem] opacity-60">
-                  {sidebarShortcut}
-                </kbd>
-              </TooltipContent>
-            </Tooltip>
-            {!isMobile && (
+      >
+        {/* Desktop: Jean logo above the 36px sidebar tab rail (macOS native
+            and iPadOS standalone PWA use this corner for system traffic lights) */}
+        {!isMobile && !(native && isClientMacOS) && !ipadStandalone && (
+          <div className="pointer-events-none absolute inset-y-0 left-0 flex w-9 items-center justify-center pt-1">
+            <img
+              src="/logo.png"
+              alt="Jean"
+              width={18}
+              height={18}
+              className="size-[18px]"
+              draggable={false}
+            />
+          </div>
+        )}
+        {/* Left side - Window Controls + Left Actions (hidden in zen mode) */}
+        <div
+          className="flex items-center"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          {/* Traffic-light inset even when action buttons are hidden */}
+          {zenMode && ((native && isClientMacOS) || ipadStandalone) && (
+            <div
+              className={native && isClientMacOS ? 'pl-[80px]' : 'pl-[76px]'}
+              aria-hidden
+            />
+          )}
+          {/* Left Action Buttons */}
+          {!zenMode && (
+            <div
+              className={cn(
+                'relative z-10 flex items-center gap-1',
+                native && isClientMacOS
+                  ? 'mac-titlebar-actions'
+                  : ipadStandalone
+                    ? 'pl-[76px] pt-1'
+                    : isMobile
+                      ? 'pl-2 pt-1'
+                      : 'pl-9 pt-1' // Start after the 36px sidebar tab rail
+              )}
+            >
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
-                    onClick={() =>
-                      openExternal('https://jean.build/sponsorships/')
-                    }
+                    onClick={toggleLeftSidebar}
                     variant="ghost"
                     size="icon"
-                    className="h-6 w-6 rounded-none text-pink-600 hover:text-pink-500 dark:text-pink-500 dark:hover:text-pink-400"
+                    aria-label={
+                      leftSidebarVisible
+                        ? 'Hide Left Sidebar'
+                        : 'Show Left Sidebar'
+                    }
+                    className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
                   >
-                    <Heart className="size-3.5" />
+                    {leftSidebarVisible ? (
+                      <PanelLeftClose className="size-3.5" />
+                    ) : (
+                      <PanelLeft className="size-3.5" />
+                    )}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Sponsor</TooltipContent>
+                <TooltipContent>
+                  {leftSidebarVisible ? 'Hide' : 'Show'} Left Sidebar{' '}
+                  <kbd className="ml-1 text-[0.625rem] opacity-60">
+                    {sidebarShortcut}
+                  </kbd>
+                </TooltipContent>
               </Tooltip>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Center - Title / Unread indicator (inlined left in mobile zen) */}
-      {mobileZen ? (
-        <div
-          className="relative z-10 flex min-w-0 flex-1 items-center pl-3 pr-1"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        >
-          <span className="truncate text-sm font-semibold text-foreground">
-            {hideTitle ? '' : title}
-          </span>
-          {native && (
-            <span className="ml-2 flex shrink-0 items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              {serverLabel}
-            </span>
+              {!isMobile && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      onClick={() =>
+                        openExternal('https://jean.build/sponsorships/')
+                      }
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 rounded-none text-pink-600 hover:text-pink-500 dark:text-pink-500 dark:hover:text-pink-400"
+                    >
+                      <Heart className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Sponsor</TooltipContent>
+                </Tooltip>
+              )}
+            </div>
           )}
         </div>
-      ) : (
-        <div
-          className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[50%] px-2 pt-1"
-          style={
-            {
-              left: `calc(50% + ${contentInset / 2}px)`,
-              WebkitAppRegion: 'no-drag',
-            } as React.CSSProperties
-          }
-        >
-          <div className="flex items-center gap-2">
-            <UnreadBell title={title} hideTitle={hideTitle} />
+
+        {/* Center - Title / Unread indicator (inlined left in mobile zen) */}
+        {mobileZen ? (
+          <div
+            className="relative z-10 flex min-w-0 flex-1 items-center pl-3 pr-1"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            <span className="truncate text-sm font-semibold text-foreground">
+              {hideTitle ? '' : title}
+            </span>
             {native && (
-              <span
-                className="flex shrink-0 items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-                aria-label={`Current Jean server: ${serverLabel}`}
-              >
+              <span className="ml-2 flex shrink-0 items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                 {serverLabel}
               </span>
             )}
           </div>
-        </div>
-      )}
-
-      {/* Right side - Actions + Windows/Linux window controls (hidden in zen) */}
-      <div
-        className={cn('flex items-center pt-1', isMobile && 'pr-2')}
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        {mobileZen && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                onClick={toggleZenMode}
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
-                aria-label="Exit zen mode"
-                data-testid="toggle-zen-mode"
-              >
-                <Minimize2 className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              Exit zen mode{' '}
-              <kbd className="ml-1 text-[0.625rem] opacity-60">
-                {formatShortcutDisplay(
-                  (preferences?.keybindings?.toggle_zen_mode ||
-                    DEFAULT_KEYBINDINGS.toggle_zen_mode) as string
-                )}
-              </kbd>
-            </TooltipContent>
-          </Tooltip>
+        ) : (
+          <div
+            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[50%] px-2 pt-1"
+            style={
+              {
+                left: `calc(50% + ${contentInset / 2}px)`,
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties
+            }
+          >
+            <div className="flex items-center gap-2">
+              <UnreadBell title={title} hideTitle={hideTitle} />
+              {native && (
+                <span
+                  className="flex shrink-0 items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  aria-label={`Current Jean server: ${serverLabel}`}
+                >
+                  {serverLabel}
+                </span>
+              )}
+            </div>
+          </div>
         )}
-        {!zenMode && (
-          <>
-            {/* Line-art bug icon: the clearest "report a problem" signal. Shown on
-                native, web and mobile so a report can be filed from anywhere. */}
+
+        {/* Right side - Actions + Windows/Linux window controls (hidden in zen) */}
+        <div
+          className={cn('flex items-center pt-1', isMobile && 'pr-2')}
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          {mobileZen && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  onClick={() => useUIStore.getState().setBugReportOpen(true)}
+                  onClick={toggleZenMode}
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
-                  title="Report a bug"
-                  aria-label="Report a bug"
-                  aria-haspopup="dialog"
-                  aria-expanded={bugReportOpen}
-                  data-feature="header.bug"
-                  data-testid="report-bug"
+                  aria-label="Exit zen mode"
+                  data-testid="toggle-zen-mode"
                 >
-                  <Bug className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Report a bug</TooltipContent>
-            </Tooltip>
-            <ThemeToggle />
-            <MinimizedCliUpdate />
-            <CliUpdatesIndicator />
-            <ServerUpdateIndicator />
-            <UpdateIndicator />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  onClick={toggleFileBrowser}
-                  variant="ghost"
-                  size="icon"
-                  className={cn(
-                    'h-6 w-6 rounded-none text-foreground/70 hover:text-foreground',
-                    fileBrowserVisible && 'bg-muted/50 text-foreground'
-                  )}
-                  aria-pressed={fileBrowserVisible}
-                  aria-label={
-                    fileBrowserVisible
-                      ? 'Hide file browser'
-                      : 'Show file browser'
-                  }
-                  data-testid="toggle-file-browser"
-                >
-                  {fileBrowserVisible ? (
-                    <PanelRightClose className="size-3.5" />
-                  ) : (
-                    <PanelRight className="size-3.5" />
-                  )}
+                  <Minimize2 className="size-3.5" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
-                {fileBrowserVisible ? 'Hide' : 'Show'} File Browser{' '}
+                Exit zen mode{' '}
                 <kbd className="ml-1 text-[0.625rem] opacity-60">
-                  {fileBrowserShortcut}
+                  {formatShortcutDisplay(
+                    (preferences?.keybindings?.toggle_zen_mode ||
+                      DEFAULT_KEYBINDINGS.toggle_zen_mode) as string
+                  )}
                 </kbd>
               </TooltipContent>
             </Tooltip>
-          </>
-        )}
-        {native && isClientLinux && <LinuxWindowControls />}
+          )}
+          {!zenMode && (
+            <>
+              {/* Line-art bug icon: the clearest "report a problem" signal. Shown on
+                native, web and mobile so a report can be filed from anywhere. */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={() => useUIStore.getState().setBugReportOpen(true)}
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 rounded-none text-foreground/70 hover:text-foreground"
+                    title="Report a bug"
+                    aria-label="Report a bug"
+                    aria-haspopup="dialog"
+                    aria-expanded={bugReportOpen}
+                    data-feature="header.bug"
+                    data-testid="report-bug"
+                  >
+                    <Bug className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Report a bug</TooltipContent>
+              </Tooltip>
+              <ThemeToggle />
+              <MinimizedCliUpdate />
+              <CliUpdatesIndicator />
+              <ServerUpdateIndicator />
+              <UpdateIndicator />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={toggleFileBrowser}
+                    variant="ghost"
+                    size="icon"
+                    className={cn(
+                      'h-6 w-6 rounded-none text-foreground/70 hover:text-foreground',
+                      fileBrowserVisible && 'bg-muted/50 text-foreground'
+                    )}
+                    aria-pressed={fileBrowserVisible}
+                    aria-label={
+                      fileBrowserVisible
+                        ? 'Hide file browser'
+                        : 'Show file browser'
+                    }
+                    data-testid="toggle-file-browser"
+                  >
+                    {fileBrowserVisible ? (
+                      <PanelRightClose className="size-3.5" />
+                    ) : (
+                      <PanelRight className="size-3.5" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {fileBrowserVisible ? 'Hide' : 'Show'} File Browser{' '}
+                  <kbd className="ml-1 text-[0.625rem] opacity-60">
+                    {fileBrowserShortcut}
+                  </kbd>
+                </TooltipContent>
+              </Tooltip>
+            </>
+          )}
+          {native && isClientLinux && <LinuxWindowControls />}
+        </div>
       </div>
     </div>
   )
