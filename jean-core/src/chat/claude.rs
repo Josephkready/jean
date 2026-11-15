@@ -722,6 +722,14 @@ fn build_claude_args(
     let mut args = Vec::new();
     let mut env_vars = Vec::new();
 
+    // The CLI stops background tasks 10 min after the last turn in --print mode
+    // ("Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely"). Jean runs
+    // are long-lived, so wait indefinitely instead of killing background work (#49).
+    env_vars.push((
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_string(),
+        "0".to_string(),
+    ));
+
     // Core args
     args.push("--print".to_string());
     args.push("--output-format".to_string());
@@ -3310,6 +3318,36 @@ fn backgrounded_task_tool_use_id(msg: &serde_json::Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression for #49: without this the CLI kills background tasks 10 minutes
+    // after the last turn of a run.
+    #[test]
+    fn claude_env_disables_print_background_wait_ceiling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tauri::AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        let (_, env_vars) = build_claude_args(
+            &app,
+            "bg-run",
+            "wt",
+            None,
+            None,
+            Some("build"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            tmp.path(),
+        );
+        assert!(env_vars.contains(&(
+            "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_string(),
+            "0".to_string()
+        )));
+    }
 
     // Regression for #49: the actual run arguments must carry the lifecycle
     // warning, including on resume and with a custom agent prompt.
