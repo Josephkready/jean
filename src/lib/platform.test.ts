@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  isIPadOSDevice,
+  isIPadOSStandalone,
+  isStandaloneDisplayMode,
+} from './platform'
 
 const openUrlMock = vi.hoisted(() => vi.fn())
 
@@ -137,5 +142,124 @@ describe('server platform detection', () => {
 
     expect(platform.getModifierSymbol()).toBe('Ctrl')
     expect(formatShortcutDisplay('mod+period')).toBe('Ctrl + .')
+  })
+})
+
+describe('iPadOS and standalone PWA detection', () => {
+  const originalNavigator = globalThis.navigator
+  const originalWindow = globalThis.window
+
+  function mockClient({
+    userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    platform = 'MacIntel',
+    maxTouchPoints = 0,
+    standalone,
+    displayModeStandalone = false,
+    nativeTauri = false,
+  }: {
+    userAgent?: string
+    platform?: string
+    maxTouchPoints?: number
+    standalone?: boolean
+    displayModeStandalone?: boolean
+    nativeTauri?: boolean
+  }) {
+    vi.stubGlobal('navigator', {
+      userAgent,
+      platform,
+      maxTouchPoints,
+      ...(standalone !== undefined ? { standalone } : {}),
+    })
+    const win = {
+      matchMedia: vi.fn((query: string) => ({
+        matches:
+          displayModeStandalone && query.includes('display-mode: standalone'),
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(() => false),
+      })),
+      ...(nativeTauri ? { __TAURI_INTERNALS__: { invoke: vi.fn() } } : {}),
+    }
+    vi.stubGlobal('window', win)
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    if (originalNavigator !== undefined) {
+      vi.stubGlobal('navigator', originalNavigator)
+    }
+    if (originalWindow !== undefined) {
+      vi.stubGlobal('window', originalWindow)
+    }
+  })
+
+  it('detects desktop-UA iPadOS via Macintosh/MacIntel + maxTouchPoints > 1', () => {
+    mockClient({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15',
+      platform: 'MacIntel',
+      maxTouchPoints: 5,
+    })
+    expect(isIPadOSDevice()).toBe(true)
+  })
+
+  it('detects legacy iPad UA directly', () => {
+    mockClient({
+      userAgent: 'Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X)',
+      platform: 'iPad',
+      maxTouchPoints: 5,
+    })
+    expect(isIPadOSDevice()).toBe(true)
+  })
+
+  it('does not treat desktop macOS with 0 touch points as iPadOS', () => {
+    mockClient({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      platform: 'MacIntel',
+      maxTouchPoints: 0,
+    })
+    expect(isIPadOSDevice()).toBe(false)
+  })
+
+  it('detects standalone mode from display-mode media query or navigator.standalone', () => {
+    mockClient({ displayModeStandalone: true })
+    expect(isStandaloneDisplayMode()).toBe(true)
+
+    mockClient({ standalone: true, displayModeStandalone: false })
+    expect(isStandaloneDisplayMode()).toBe(true)
+
+    mockClient({ standalone: false, displayModeStandalone: false })
+    expect(isStandaloneDisplayMode()).toBe(false)
+  })
+
+  it('returns true for isIPadOSStandalone only on non-native standalone iPadOS', () => {
+    mockClient({
+      platform: 'MacIntel',
+      maxTouchPoints: 5,
+      displayModeStandalone: true,
+      nativeTauri: false,
+    })
+    expect(isIPadOSStandalone()).toBe(true)
+
+    mockClient({
+      platform: 'MacIntel',
+      maxTouchPoints: 5,
+      displayModeStandalone: false,
+      nativeTauri: false,
+    })
+    expect(isIPadOSStandalone()).toBe(false)
+
+    mockClient({
+      platform: 'MacIntel',
+      maxTouchPoints: 5,
+      displayModeStandalone: true,
+      nativeTauri: true,
+    })
+    expect(isIPadOSStandalone()).toBe(false)
   })
 })

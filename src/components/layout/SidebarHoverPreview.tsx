@@ -262,7 +262,7 @@ export function SidebarHoverPreview({
       {!mounted && (
         <div
           data-testid="sidebar-hover-hotspot"
-          className="fixed top-8 bottom-0 left-0 z-45 w-4"
+          className="fixed top-[calc(var(--titlebar-height)+var(--vv-offset-top,0px))] bottom-0 left-0 z-45 w-4"
           onPointerEnter={handleHotspotEnter}
           onPointerLeave={handleHotspotLeave}
         />
@@ -273,7 +273,7 @@ export function SidebarHoverPreview({
           data-testid="sidebar-hover-preview"
           data-open={open}
           className={cn(
-            'fixed top-8 bottom-2 left-2 z-40 overflow-hidden border rounded-lg bg-sidebar' +
+            'fixed top-[calc(var(--titlebar-height)+var(--vv-offset-top,0px))] bottom-2 left-2 z-40 overflow-hidden border rounded-lg bg-sidebar' +
               ' shadow-xl',
             'transition-transform duration-180 ease-out motion-reduce:transition-none',
             open ? 'translate-x-0' : '-translate-x-full'
