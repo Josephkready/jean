@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
-import { fireEvent, render, screen } from '@/test/test-utils'
+import { act, fireEvent, render, screen } from '@/test/test-utils'
 import type { Worktree } from '@/types/projects'
 import { useProjectsStore } from '@/store/projects-store'
 import { WorktreeItem } from './WorktreeItem'
@@ -216,5 +216,31 @@ describe('WorktreeItem session context menu', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Add Label' }))
 
     expect(screen.getByText('label modal s2')).toBeInTheDocument()
+  })
+
+  it('opens and keeps focus on the rename input synchronously when selecting Rename (Fixes #57)', async () => {
+    const user = userEvent.setup()
+    renderExpanded()
+
+    fireEvent.contextMenu(screen.getByText('Busy chat'))
+    await user.click(screen.getByRole('menuitem', { name: 'Rename' }))
+
+    const input = screen.getByRole('textbox', { name: 'Rename session' })
+    expect(input).toHaveFocus()
+
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 25))
+    })
+    expect(input).toHaveFocus()
+
+    await user.clear(input)
+    await user.type(input, 'Renamed chat{Enter}')
+
+    expect(mocks.rename).toHaveBeenCalledWith({
+      worktreeId: 'wt-1',
+      worktreePath: '/tmp/feature',
+      sessionId: 's1',
+      newName: 'Renamed chat',
+    })
   })
 })

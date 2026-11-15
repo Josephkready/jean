@@ -10,6 +10,7 @@ import {
   Globe,
   Maximize,
   MoreHorizontal,
+  Pencil,
   Play,
   Plus,
   Settings,
@@ -19,7 +20,7 @@ import {
   Trash2,
   X,
 } from '@/components/icons/reicon'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertDialog,
@@ -90,6 +91,7 @@ interface WorktreeDropdownMenuProps {
   branchDiffRemoved?: number
   onUncommittedDiffClick?: () => void
   onBranchDiffClick?: () => void
+  onRenameSession?: () => void
   onToggleTerminal?: () => void
   onToggleBrowser?: () => void
   packageScripts?: PackageScript[]
@@ -110,6 +112,7 @@ export function WorktreeDropdownMenu({
   branchDiffRemoved = 0,
   onUncommittedDiffClick,
   onBranchDiffClick,
+  onRenameSession,
   onToggleTerminal,
   onToggleBrowser,
   packageScripts = [],
@@ -133,6 +136,9 @@ export function WorktreeDropdownMenu({
     handleArchiveOrClose,
     handleDelete,
   } = useWorktreeMenuActions({ worktree, projectId })
+  const [menuOpen, setMenuOpen] = useState(false)
+  const pendingRenameSessionRef = useRef(false)
+  const suppressCloseAutoFocusRef = useRef(false)
   const isMobile = useIsMobile()
   const patchPreferences = usePatchPreferences()
   const favoriteKeys = preferences?.favorite_package_scripts ?? []
@@ -271,7 +277,16 @@ export function WorktreeDropdownMenu({
 
   return (
     <>
-      <DropdownMenu>
+      <DropdownMenu
+        open={menuOpen}
+        onOpenChange={open => {
+          setMenuOpen(open)
+          if (!open && pendingRenameSessionRef.current) {
+            pendingRenameSessionRef.current = false
+            onRenameSession?.()
+          }
+        }}
+      >
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
@@ -283,278 +298,305 @@ export function WorktreeDropdownMenu({
             <MoreHorizontal className="h-4 w-4" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-48">
-          <DropdownMenuItem
-            onClick={() =>
-              window.dispatchEvent(new CustomEvent('create-new-session'))
-            }
+        {menuOpen && (
+          <DropdownMenuContent
+            align="start"
+            className="w-48"
+            onCloseAutoFocus={e => {
+              if (suppressCloseAutoFocusRef.current) {
+                e.preventDefault()
+                suppressCloseAutoFocusRef.current = false
+              }
+            }}
           >
-            <Plus className="mr-2 h-4 w-4" />
-            New Session
-          </DropdownMenuItem>
-
-          <DropdownMenuItem onClick={handleNewWorktree}>
-            <GitBranch className="mr-2 h-4 w-4" />
-            New Worktree
-          </DropdownMenuItem>
-
-          {isMobile && (
             <DropdownMenuItem
-              onClick={() => useUIStore.getState().toggleZenMode()}
-              data-testid="menu-toggle-zen-mode"
+              onClick={() =>
+                window.dispatchEvent(new CustomEvent('create-new-session'))
+              }
             >
-              <Maximize className="mr-2 h-4 w-4" />
-              Zen mode
+              <Plus className="mr-2 h-4 w-4" />
+              New Session
             </DropdownMenuItem>
-          )}
 
-          {!isMobile && runScripts.length === 1 && (
-            <DropdownMenuItem onClick={handleRun}>
-              <Play className="mr-2 h-4 w-4" />
-              Run
+            {onRenameSession && (
+              <DropdownMenuItem
+                onSelect={() => {
+                  suppressCloseAutoFocusRef.current = true
+                  pendingRenameSessionRef.current = true
+                }}
+              >
+                <Pencil className="mr-2 h-4 w-4" />
+                Rename Session
+              </DropdownMenuItem>
+            )}
+
+            <DropdownMenuItem onClick={handleNewWorktree}>
+              <GitBranch className="mr-2 h-4 w-4" />
+              New Worktree
             </DropdownMenuItem>
-          )}
-          {!isMobile && runScripts.length > 1 && (
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <Play className="mr-4 h-4 w-4" />
+
+            {isMobile && (
+              <DropdownMenuItem
+                onClick={() => useUIStore.getState().toggleZenMode()}
+                data-testid="menu-toggle-zen-mode"
+              >
+                <Maximize className="mr-2 h-4 w-4" />
+                Zen mode
+              </DropdownMenuItem>
+            )}
+
+            {!isMobile && runScripts.length === 1 && (
+              <DropdownMenuItem onClick={handleRun}>
+                <Play className="mr-2 h-4 w-4" />
                 Run
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {runScripts.map(cmd => (
-                  <DropdownMenuItem
-                    key={cmd}
-                    onSelect={() => handleRunCommand(cmd)}
-                    className="font-mono text-xs"
-                  >
-                    {cmd}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          )}
-
-          {!isMobile && onToggleTerminal && (
-            <DropdownMenuItem onClick={onToggleTerminal}>
-              <Terminal className="mr-2 h-4 w-4" />
-              Terminal
-            </DropdownMenuItem>
-          )}
-
-          {!isServer && onToggleBrowser && (
-            <DropdownMenuItem onClick={onToggleBrowser}>
-              <Globe className="mr-2 h-4 w-4" />
-              Browser
-            </DropdownMenuItem>
-          )}
-
-          {!isServer &&
-            showPackageScripts &&
-            packageScripts.length > 0 &&
-            onRunPackageScript && (
+              </DropdownMenuItem>
+            )}
+            {!isMobile && runScripts.length > 1 && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>
                   <Play className="mr-4 h-4 w-4" />
-                  Scripts
+                  Run
                 </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent className="max-h-72 min-w-48 overflow-y-auto">
-                  {sortedPackageScripts.map(script => (
+                <DropdownMenuSubContent>
+                  {runScripts.map(cmd => (
                     <DropdownMenuItem
-                      key={script.name}
-                      onSelect={() => onRunPackageScript(script)}
+                      key={cmd}
+                      onSelect={() => handleRunCommand(cmd)}
+                      className="font-mono text-xs"
                     >
-                      <Play className="h-3.5 w-3.5" />
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                        {script.name}
-                      </span>
-                      <button
-                        type="button"
-                        className="-my-1 -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        aria-label={`${favoriteScriptNames.has(script.name) ? 'Unfavorite' : 'Favorite'} ${script.name}`}
-                        aria-pressed={favoriteScriptNames.has(script.name)}
-                        onPointerDown={event => {
-                          event.preventDefault()
-                          event.stopPropagation()
-                          togglePackageScriptFavorite(script.name)
-                        }}
-                        onClick={event => {
-                          event.preventDefault()
-                          event.stopPropagation()
-                          if (event.detail === 0) {
-                            togglePackageScriptFavorite(script.name)
-                          }
-                        }}
-                      >
-                        <Star
-                          className={cn(
-                            'h-3.5 w-3.5',
-                            favoriteScriptNames.has(script.name) &&
-                              'fill-warning text-warning'
-                          )}
-                        />
-                      </button>
+                      {cmd}
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             )}
 
-          {serverProject && (
-            <DropdownMenuItem
-              onClick={() =>
-                useProjectsStore
-                  .getState()
-                  .setServerDialog({ project: serverProject })
-              }
-            >
-              <Settings className="mr-2 h-4 w-4" />
-              Server Settings
-            </DropdownMenuItem>
-          )}
+            {!isMobile && onToggleTerminal && (
+              <DropdownMenuItem onClick={onToggleTerminal}>
+                <Terminal className="mr-2 h-4 w-4" />
+                Terminal
+              </DropdownMenuItem>
+            )}
 
-          {!isServer && (
-            <>
+            {!isServer && onToggleBrowser && (
+              <DropdownMenuItem onClick={onToggleBrowser}>
+                <Globe className="mr-2 h-4 w-4" />
+                Browser
+              </DropdownMenuItem>
+            )}
+
+            {!isServer &&
+              showPackageScripts &&
+              packageScripts.length > 0 &&
+              onRunPackageScript && (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <Play className="mr-4 h-4 w-4" />
+                    Scripts
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="max-h-72 min-w-48 overflow-y-auto">
+                    {sortedPackageScripts.map(script => (
+                      <DropdownMenuItem
+                        key={script.name}
+                        onSelect={() => onRunPackageScript(script)}
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                          {script.name}
+                        </span>
+                        <button
+                          type="button"
+                          className="-my-1 -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label={`${favoriteScriptNames.has(script.name) ? 'Unfavorite' : 'Favorite'} ${script.name}`}
+                          aria-pressed={favoriteScriptNames.has(script.name)}
+                          onPointerDown={event => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            togglePackageScriptFavorite(script.name)
+                          }}
+                          onClick={event => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            if (event.detail === 0) {
+                              togglePackageScriptFavorite(script.name)
+                            }
+                          }}
+                        >
+                          <Star
+                            className={cn(
+                              'h-3.5 w-3.5',
+                              favoriteScriptNames.has(script.name) &&
+                                'fill-warning text-warning'
+                            )}
+                          />
+                        </button>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              )}
+
+            {serverProject && (
               <DropdownMenuItem
                 onClick={() =>
-                  useProjectsStore.getState().openProjectSettings(projectId)
+                  useProjectsStore
+                    .getState()
+                    .setServerDialog({ project: serverProject })
                 }
               >
                 <Settings className="mr-2 h-4 w-4" />
-                Project Settings
+                Server Settings
               </DropdownMenuItem>
+            )}
 
-              <DropdownMenuSeparator />
+            {!isServer && (
+              <>
+                <DropdownMenuItem
+                  onClick={() =>
+                    useProjectsStore.getState().openProjectSettings(projectId)
+                  }
+                >
+                  <Settings className="mr-2 h-4 w-4" />
+                  Project Settings
+                </DropdownMenuItem>
 
-              {showGitItem && (
-                <DropdownMenuItem onClick={onUncommittedDiffClick}>
-                  <GitBranch className="mr-2 h-4 w-4" />
-                  <span>Git</span>
-                  {hasDiff && (
+                <DropdownMenuSeparator />
+
+                {showGitItem && (
+                  <DropdownMenuItem onClick={onUncommittedDiffClick}>
+                    <GitBranch className="mr-2 h-4 w-4" />
+                    <span>Git</span>
+                    {hasDiff && (
+                      <span className="ml-auto text-xs">
+                        <span className="text-success">
+                          +{uncommittedAdded}
+                        </span>{' '}
+                        <span className="text-destructive">
+                          -{uncommittedRemoved}
+                        </span>
+                      </span>
+                    )}
+                  </DropdownMenuItem>
+                )}
+
+                {isMobile && hasBranchDiff && (
+                  <DropdownMenuItem onClick={onBranchDiffClick}>
+                    <GitBranch className="mr-2 h-4 w-4" />
+                    <span>Branch diff</span>
                     <span className="ml-auto text-xs">
-                      <span className="text-success">+{uncommittedAdded}</span>{' '}
+                      <span className="text-success">+{branchDiffAdded}</span>
+                      {' / '}
                       <span className="text-destructive">
-                        -{uncommittedRemoved}
+                        -{branchDiffRemoved}
                       </span>
                     </span>
-                  )}
+                  </DropdownMenuItem>
+                )}
+
+                <DropdownMenuItem onClick={handleOpenIssues}>
+                  <CircleDot className="mr-2 h-4 w-4 text-success" />
+                  {issueCount > 0 ? `${issueCount} Issues` : 'Issues'}
                 </DropdownMenuItem>
-              )}
 
-              {isMobile && hasBranchDiff && (
-                <DropdownMenuItem onClick={onBranchDiffClick}>
-                  <GitBranch className="mr-2 h-4 w-4" />
-                  <span>Branch diff</span>
-                  <span className="ml-auto text-xs">
-                    <span className="text-success">+{branchDiffAdded}</span>
-                    {' / '}
-                    <span className="text-destructive">
-                      -{branchDiffRemoved}
-                    </span>
-                  </span>
+                <DropdownMenuItem onClick={handleOpenPRs}>
+                  <GitPullRequestArrow className="mr-2 h-4 w-4 text-info" />
+                  {prCount > 0
+                    ? `${prCount} ${forgeLabels.pullRequest}s`
+                    : `${forgeLabels.pullRequest}s`}
                 </DropdownMenuItem>
-              )}
 
-              <DropdownMenuItem onClick={handleOpenIssues}>
-                <CircleDot className="mr-2 h-4 w-4 text-success" />
-                {issueCount > 0 ? `${issueCount} Issues` : 'Issues'}
-              </DropdownMenuItem>
+                {!isGitlab && (
+                  <DropdownMenuItem onClick={handleOpenWorkflowRuns}>
+                    {failedWorkflowCount > 0 ? (
+                      <AlertCircle className="mr-2 h-4 w-4 text-destructive" />
+                    ) : (
+                      <Activity className="mr-2 h-4 w-4" />
+                    )}
+                    {failedWorkflowCount > 0
+                      ? `${failedWorkflowCount} Failed Workflows`
+                      : workflowRunCount > 0
+                        ? `${workflowRunCount} Workflows`
+                        : 'Workflows'}
+                  </DropdownMenuItem>
+                )}
 
-              <DropdownMenuItem onClick={handleOpenPRs}>
-                <GitPullRequestArrow className="mr-2 h-4 w-4 text-info" />
-                {prCount > 0
-                  ? `${prCount} ${forgeLabels.pullRequest}s`
-                  : `${forgeLabels.pullRequest}s`}
-              </DropdownMenuItem>
+                {!isGitlab && (showMobileGitHubItems || securityCount > 0) && (
+                  <DropdownMenuItem onClick={handleOpenSecurity}>
+                    <ShieldAlert className="mr-2 h-4 w-4 text-warning" />
+                    {securityCount > 0
+                      ? `${securityCount} Security`
+                      : 'Security'}
+                  </DropdownMenuItem>
+                )}
+              </>
+            )}
 
-              {!isGitlab && (
-                <DropdownMenuItem onClick={handleOpenWorkflowRuns}>
-                  {failedWorkflowCount > 0 ? (
-                    <AlertCircle className="mr-2 h-4 w-4 text-destructive" />
-                  ) : (
-                    <Activity className="mr-2 h-4 w-4" />
-                  )}
-                  {failedWorkflowCount > 0
-                    ? `${failedWorkflowCount} Failed Workflows`
-                    : workflowRunCount > 0
-                      ? `${workflowRunCount} Workflows`
-                      : 'Workflows'}
-                </DropdownMenuItem>
-              )}
+            {(canOpenInEditor() ||
+              canOpenInTerminal() ||
+              (canOpenInFinder(worktree.serverId) &&
+                (!server ||
+                  canOpenServerInFinder(server, worktree.serverId)))) && (
+              <DropdownMenuSeparator />
+            )}
 
-              {!isGitlab && (showMobileGitHubItems || securityCount > 0) && (
-                <DropdownMenuItem onClick={handleOpenSecurity}>
-                  <ShieldAlert className="mr-2 h-4 w-4 text-warning" />
-                  {securityCount > 0 ? `${securityCount} Security` : 'Security'}
-                </DropdownMenuItem>
-              )}
-            </>
-          )}
-
-          {(canOpenInEditor() ||
-            canOpenInTerminal() ||
-            (canOpenInFinder(worktree.serverId) &&
-              (!server ||
-                canOpenServerInFinder(server, worktree.serverId)))) && (
-            <DropdownMenuSeparator />
-          )}
-
-          {canOpenInEditor() && (
-            <DropdownMenuItem
-              onClick={
-                server ? () => openOnServer('editor') : handleOpenInEditor
-              }
-            >
-              <Code className="mr-2 h-4 w-4" />
-              Open in {getEditorLabel(preferences?.editor)}
-            </DropdownMenuItem>
-          )}
-
-          {canOpenInFinder(worktree.serverId) &&
-            (!server || canOpenServerInFinder(server, worktree.serverId)) && (
+            {canOpenInEditor() && (
               <DropdownMenuItem
                 onClick={
-                  server ? () => openOnServer('finder') : handleOpenInFinder
+                  server ? () => openOnServer('editor') : handleOpenInEditor
                 }
               >
-                <FolderOpen className="mr-2 h-4 w-4" />
-                Open in Finder
+                <Code className="mr-2 h-4 w-4" />
+                Open in {getEditorLabel(preferences?.editor)}
               </DropdownMenuItem>
             )}
 
-          {canOpenInTerminal() && (
-            <DropdownMenuItem
-              onClick={
-                server ? () => openOnServer('terminal') : handleOpenInTerminal
-              }
-            >
-              <Terminal className="mr-2 h-4 w-4" />
-              Open in {getTerminalLabel(preferences?.terminal)}
-            </DropdownMenuItem>
-          )}
+            {canOpenInFinder(worktree.serverId) &&
+              (!server || canOpenServerInFinder(server, worktree.serverId)) && (
+                <DropdownMenuItem
+                  onClick={
+                    server ? () => openOnServer('finder') : handleOpenInFinder
+                  }
+                >
+                  <FolderOpen className="mr-2 h-4 w-4" />
+                  Open in Finder
+                </DropdownMenuItem>
+              )}
 
-          <DropdownMenuSeparator />
-
-          <DropdownMenuItem onClick={handleArchiveOrClose}>
-            {isBase ? (
-              <>
-                <X className="mr-2 h-4 w-4" />
-                Close Session
-              </>
-            ) : (
-              <>
-                <Archive className="mr-2 h-4 w-4" />
-                Archive Worktree
-              </>
+            {canOpenInTerminal() && (
+              <DropdownMenuItem
+                onClick={
+                  server ? () => openOnServer('terminal') : handleOpenInTerminal
+                }
+              >
+                <Terminal className="mr-2 h-4 w-4" />
+                Open in {getTerminalLabel(preferences?.terminal)}
+              </DropdownMenuItem>
             )}
-          </DropdownMenuItem>
 
-          {!isBase && (
-            <DropdownMenuItem onClick={() => setShowDeleteConfirm(true)}>
-              <Trash2 className="mr-2 h-4 w-4 text-destructive" />
-              Delete Worktree
+            <DropdownMenuSeparator />
+
+            <DropdownMenuItem onClick={handleArchiveOrClose}>
+              {isBase ? (
+                <>
+                  <X className="mr-2 h-4 w-4" />
+                  Close Session
+                </>
+              ) : (
+                <>
+                  <Archive className="mr-2 h-4 w-4" />
+                  Archive Worktree
+                </>
+              )}
             </DropdownMenuItem>
-          )}
-        </DropdownMenuContent>
+
+            {!isBase && (
+              <DropdownMenuItem onClick={() => setShowDeleteConfirm(true)}>
+                <Trash2 className="mr-2 h-4 w-4 text-destructive" />
+                Delete Worktree
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        )}
       </DropdownMenu>
 
       <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>

@@ -1,4 +1,4 @@
-import { forwardRef, useCallback } from 'react'
+import { forwardRef, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Archive,
   Copy,
@@ -34,6 +34,7 @@ import {
   type SessionCardProps,
 } from './session-card-utils'
 import { canReconnectSession } from '@/services/chat'
+import { shouldIgnoreRenameBlur } from '@/lib/menu-focus'
 import { copySessionInfo } from '@/lib/session-info'
 import { useChatStore } from '@/store/chat-store'
 
@@ -67,19 +68,41 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
     )
     const resumeCommand = getResumeCommand(card.session)
     const canReconnect = canReconnectSession(card.session)
+    const [menuOpen, setMenuOpen] = useState(false)
+    const pendingRenameRef = useRef(false)
+    const renameInputElementRef = useRef<HTMLInputElement | null>(null)
+    const suppressCloseAutoFocusRef = useRef(false)
+    const renameFocusHandoffRef = useRef(false)
     const renameInputRef = useCallback((node: HTMLInputElement | null) => {
+      renameInputElementRef.current = node
       if (node) {
         node.focus()
         node.select()
       }
     }, [])
 
+    useEffect(() => {
+      if (isRenaming) {
+        const input = renameInputElementRef.current
+        if (input && document.activeElement !== input) {
+          input.focus()
+          input.select()
+        }
+      }
+    }, [isRenaming])
+
     const handleRenameKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === 'Escape') {
+          renameFocusHandoffRef.current = false
+        }
         if (e.key === 'Enter') {
           e.preventDefault()
+          e.stopPropagation()
           onRenameSubmit?.(card.session.id)
         } else if (e.key === 'Escape') {
+          e.preventDefault()
+          e.stopPropagation()
           onRenameCancel?.()
         }
       },
@@ -87,14 +110,25 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
     )
 
     return (
-      <ContextMenu>
+      <ContextMenu
+        open={menuOpen}
+        onOpenChange={open => {
+          setMenuOpen(open)
+          if (!open && pendingRenameRef.current) {
+            pendingRenameRef.current = false
+            renameFocusHandoffRef.current = true
+            onRenameStart?.(card.session.id, card.session.name)
+          }
+        }}
+      >
         <ContextMenuTrigger asChild>
           <div
             ref={ref}
             onClick={onSelect}
-            onDoubleClick={() =>
+            onDoubleClick={() => {
+              renameFocusHandoffRef.current = false
               onRenameStart?.(card.session.id, card.session.name)
-            }
+            }}
             className={cn(
               'group flex w-full items-center gap-3 rounded-md px-3 py-1.5 border border-transparent transition-colors text-left cursor-pointer scroll-mt-28 scroll-mb-20',
               'hover:bg-muted/50 hover:border-foreground/10',
@@ -124,7 +158,18 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
                 type="text"
                 value={renameValue ?? ''}
                 onChange={e => onRenameValueChange?.(e.target.value)}
-                onBlur={() => onRenameSubmit?.(card.session.id)}
+                onBlur={e => {
+                  if (
+                    shouldIgnoreRenameBlur(
+                      renameFocusHandoffRef,
+                      e.relatedTarget
+                    )
+                  ) {
+                    return
+                  }
+                  renameFocusHandoffRef.current = false
+                  onRenameSubmit?.(card.session.id)
+                }}
                 onKeyDown={handleRenameKeyDown}
                 onClick={e => e.stopPropagation()}
                 onDoubleClick={e => e.stopPropagation()}
@@ -249,65 +294,78 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
               )}
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="w-48">
-          {onRenameStart && (
-            <ContextMenuItem
-              onSelect={() => onRenameStart(card.session.id, card.session.name)}
-            >
-              <Pencil className="mr-2 h-4 w-4" />
-              Rename
-            </ContextMenuItem>
-          )}
-          {onToggleLabel && (
-            <ContextMenuItem onSelect={onToggleLabel}>
-              <Tag className="mr-2 h-4 w-4" />
-              {card.label ? 'Remove Label' : 'Add Label'}
-            </ContextMenuItem>
-          )}
-          <ContextMenuItem
-            onSelect={() => {
-              void copyToClipboard(card.session.id)
-                .then(() => toast.success('Session ID copied'))
-                .catch(() => toast.error('Failed to copy session ID'))
+        {menuOpen && (
+          <ContextMenuContent
+            className="w-48"
+            onCloseAutoFocus={e => {
+              if (suppressCloseAutoFocusRef.current) {
+                e.preventDefault()
+                suppressCloseAutoFocusRef.current = false
+              }
             }}
           >
-            <Copy className="mr-2 h-4 w-4" />
-            Copy Session ID
-          </ContextMenuItem>
-          <ContextMenuItem
-            onSelect={() => void copySessionInfo(card.session.id)}
-          >
-            <Copy className="mr-2 h-4 w-4" />
-            Copy Session Info
-          </ContextMenuItem>
-          {resumeCommand && (
+            {onRenameStart && (
+              <ContextMenuItem
+                onSelect={() => {
+                  suppressCloseAutoFocusRef.current = true
+                  pendingRenameRef.current = true
+                }}
+              >
+                <Pencil className="mr-2 h-4 w-4" />
+                Rename
+              </ContextMenuItem>
+            )}
+            {onToggleLabel && (
+              <ContextMenuItem onSelect={onToggleLabel}>
+                <Tag className="mr-2 h-4 w-4" />
+                {card.label ? 'Remove Label' : 'Add Label'}
+              </ContextMenuItem>
+            )}
             <ContextMenuItem
               onSelect={() => {
-                void copyToClipboard(resumeCommand)
-                  .then(() => toast.success('Resume command copied'))
-                  .catch(() => toast.error('Failed to copy resume command'))
+                void copyToClipboard(card.session.id)
+                  .then(() => toast.success('Session ID copied'))
+                  .catch(() => toast.error('Failed to copy session ID'))
               }}
             >
               <Copy className="mr-2 h-4 w-4" />
-              Native Resume Command
+              Copy Session ID
             </ContextMenuItem>
-          )}
-          {onReconnect && canReconnect && (
-            <ContextMenuItem onSelect={onReconnect}>
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Reconnect
+            <ContextMenuItem
+              onSelect={() => void copySessionInfo(card.session.id)}
+            >
+              <Copy className="mr-2 h-4 w-4" />
+              Copy Session Info
             </ContextMenuItem>
-          )}
-          <ContextMenuSeparator />
-          <ContextMenuItem onSelect={onArchive}>
-            <Archive className="mr-2 h-4 w-4" />
-            Archive Session
-          </ContextMenuItem>
-          <ContextMenuItem variant="destructive" onSelect={onDelete}>
-            <Trash2 className="mr-2 h-4 w-4" />
-            Delete Session
-          </ContextMenuItem>
-        </ContextMenuContent>
+            {resumeCommand && (
+              <ContextMenuItem
+                onSelect={() => {
+                  void copyToClipboard(resumeCommand)
+                    .then(() => toast.success('Resume command copied'))
+                    .catch(() => toast.error('Failed to copy resume command'))
+                }}
+              >
+                <Copy className="mr-2 h-4 w-4" />
+                Native Resume Command
+              </ContextMenuItem>
+            )}
+            {onReconnect && canReconnect && (
+              <ContextMenuItem onSelect={onReconnect}>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Reconnect
+              </ContextMenuItem>
+            )}
+            <ContextMenuSeparator />
+            <ContextMenuItem onSelect={onArchive}>
+              <Archive className="mr-2 h-4 w-4" />
+              Archive Session
+            </ContextMenuItem>
+            <ContextMenuItem variant="destructive" onSelect={onDelete}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete Session
+            </ContextMenuItem>
+          </ContextMenuContent>
+        )}
       </ContextMenu>
     )
   }
