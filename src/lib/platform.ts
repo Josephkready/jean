@@ -15,6 +15,40 @@ const clientPlatform =
 export const isClientMacOS = clientPlatform.includes('mac')
 export const isClientLinux = clientPlatform.includes('linux')
 
+export function isIPadOSDevice(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent || ''
+  if (/\biPad\b/i.test(ua)) return true
+  const maxTouchPoints = navigator.maxTouchPoints ?? 0
+  return (
+    maxTouchPoints > 1 &&
+    (navigator.platform === 'MacIntel' || /\bMacintosh\b/i.test(ua))
+  )
+}
+
+export function isStandaloneDisplayMode(): boolean {
+  if (typeof navigator === 'undefined' && typeof window === 'undefined') {
+    return false
+  }
+  const nav = navigator as Navigator & { standalone?: boolean }
+  if (nav?.standalone === true) return true
+  if (
+    typeof window === 'undefined' ||
+    typeof window.matchMedia !== 'function'
+  ) {
+    return false
+  }
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    window.matchMedia('(display-mode: window-controls-overlay)').matches ||
+    window.matchMedia('(display-mode: fullscreen)').matches
+  )
+}
+
+export function isIPadOSStandalone(): boolean {
+  return !isNativeApp() && isIPadOSDevice() && isStandaloneDisplayMode()
+}
+
 export let isMacOS = false
 export let isWindows = false
 export let isLinux = true
