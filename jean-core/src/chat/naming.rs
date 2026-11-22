@@ -243,11 +243,12 @@ Base your naming on both the user's message AND the content of the referenced fi
 "#;
 
 /// Convert a model preference to a Claude CLI model alias
-fn get_cli_model_alias(model: &str) -> &'static str {
+fn get_cli_model_alias(model: &str) -> &str {
     match model {
         "haiku" => "haiku",
         "sonnet" => "sonnet",
         "claude-opus-4-6" => "claude-opus-4-6",
+        other if other.starts_with("claude-") => other,
         _ => "sonnet",
     }
 }
@@ -382,11 +383,12 @@ fn generate_names(app: &AppHandle, request: &NamingRequest) -> Result<NamingOutp
         return generate_names_kimi(app, &prompt, &request.model, request);
     }
     if backend == super::types::Backend::Antigravity {
+        let schema = naming_schema_for_request(request);
         let text = super::antigravity::execute_one_shot_antigravity(
             app,
             &prompt,
             &request.model,
-            Some(NAMING_SCHEMA),
+            Some(schema),
             Some(std::path::Path::new(&request.worktree_path)),
         )?;
         let json = extract_json_object(&text)
@@ -395,11 +397,12 @@ fn generate_names(app: &AppHandle, request: &NamingRequest) -> Result<NamingOutp
             .map_err(|error| format!("Failed to parse Antigravity naming JSON: {error}"));
     }
     if backend == super::types::Backend::Muse {
+        let schema = naming_schema_for_request(request);
         let json_str = super::muse::execute_one_shot_muse(
             app,
             &prompt,
             &request.model,
-            Some(NAMING_SCHEMA),
+            Some(schema),
             Some(std::path::Path::new(&request.worktree_path)),
         )?;
         return serde_json::from_str(&json_str)
@@ -550,8 +553,8 @@ fn generate_names(app: &AppHandle, request: &NamingRequest) -> Result<NamingOutp
     Ok(naming_output)
 }
 
-/// Schema for Codex naming output
-const NAMING_SCHEMA: &str = r#"{
+/// Schema for naming output when both session and branch names are requested
+pub(crate) const NAMING_SCHEMA_BOTH: &str = r#"{
     "type": "object",
     "properties": {
         "session_name": {
@@ -567,6 +570,62 @@ const NAMING_SCHEMA: &str = r#"{
     "additionalProperties": false
 }"#;
 
+/// Schema for naming output when only session name is requested
+pub(crate) const NAMING_SCHEMA_SESSION_ONLY: &str = r#"{
+    "type": "object",
+    "properties": {
+        "session_name": {
+            "type": "string",
+            "description": "A short, descriptive name for the session (2-6 words)"
+        }
+    },
+    "required": ["session_name"],
+    "additionalProperties": false
+}"#;
+
+/// Schema for naming output when only branch name is requested
+pub(crate) const NAMING_SCHEMA_BRANCH_ONLY: &str = r#"{
+    "type": "object",
+    "properties": {
+        "branch_name": {
+            "type": "string",
+            "description": "A git branch name in kebab-case (e.g. feat/add-dark-mode)"
+        }
+    },
+    "required": ["branch_name"],
+    "additionalProperties": false
+}"#;
+
+/// Legacy alias for NAMING_SCHEMA_BOTH
+pub(crate) const NAMING_SCHEMA: &str = NAMING_SCHEMA_BOTH;
+
+/// Select the appropriate JSON schema based on what names are requested.
+pub(crate) fn naming_schema_for_request(request: &NamingRequest) -> &'static str {
+    if request.generate_session_name && request.generate_branch_name {
+        NAMING_SCHEMA_BOTH
+    } else if request.generate_session_name {
+        NAMING_SCHEMA_SESSION_ONLY
+    } else {
+        NAMING_SCHEMA_BRANCH_ONLY
+    }
+}
+
+/// Check if a session name is a default un-named placeholder (e.g. "Session 1", "New Session", "Session")
+pub fn is_default_session_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("new session")
+        || trimmed.eq_ignore_ascii_case("session")
+    {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix("Session ") {
+        let rest = rest.trim();
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
 /// Generate names using Codex CLI with --output-schema
 fn generate_names_codex(
     app: &tauri::AppHandle,
@@ -574,12 +633,18 @@ fn generate_names_codex(
     model: &str,
     request: &NamingRequest,
 ) -> Result<NamingOutput, String> {
-    log::trace!("Generating names with Codex CLI using model {model}");
+    let model_to_use = if crate::is_codex_model(model) {
+        model
+    } else {
+        "gpt-6-luna"
+    };
+    log::trace!("Generating names with Codex CLI using model {model_to_use}");
+    let schema = naming_schema_for_request(request);
     let json_str = super::codex::execute_one_shot_codex(
         app,
         prompt,
-        model,
-        NAMING_SCHEMA,
+        model_to_use,
+        schema,
         Some(&request.worktree_path),
         request.reasoning_effort.as_deref(),
     )?;
@@ -666,11 +731,12 @@ fn generate_names_grok(
     // Use native --json-schema constrained decoding (same as other Grok magic
     // prompts). Without a schema, headless Grok often returns prose or a CLI
     // envelope that fails worktree/session name parsing.
+    let schema = naming_schema_for_request(request);
     let json_str = super::grok::execute_one_shot_grok(
         app,
         prompt,
         model,
-        Some(NAMING_SCHEMA),
+        Some(schema),
         Some(&request.worktree_path),
         request.reasoning_effort.as_deref(),
     )?;
@@ -1154,11 +1220,36 @@ fn execute_naming(app: &AppHandle, request: &NamingRequest) {
         None
     };
 
+    // Helper to reset session_naming_completed on failure if session still has a default name
+    let reset_naming_completed_if_default =
+        |session_id: &str, worktree_path: &std::path::Path, worktree_id: &str| {
+            let _ = with_sessions_mut(
+                app,
+                &worktree_path.to_string_lossy(),
+                worktree_id,
+                |sessions| {
+                    if let Some(session) = sessions.find_session_mut(session_id) {
+                        if is_default_session_name(&session.name) {
+                            session.session_naming_completed = false;
+                        }
+                    }
+                    Ok(())
+                },
+            );
+        };
+
     // Generate names
     let naming_result = match generate_names(app, request) {
         Ok(result) => result,
         Err(e) => {
             log::warn!("Naming generation failed: {e}");
+            if request.generate_session_name {
+                reset_naming_completed_if_default(
+                    &request.session_id,
+                    &request.worktree_path,
+                    &request.worktree_id,
+                );
+            }
             let error = NamingError {
                 session_id: if request.generate_session_name {
                     Some(request.session_id.clone())
@@ -1204,11 +1295,21 @@ fn execute_naming(app: &AppHandle, request: &NamingRequest) {
                     }
                     Err(error) => {
                         log::warn!("Session naming storage failed: {}", error.error);
+                        reset_naming_completed_if_default(
+                            &request.session_id,
+                            &request.worktree_path,
+                            &request.worktree_id,
+                        );
                         let _ = app.emit_all("session-naming-failed", &error);
                     }
                 },
                 Err(e) => {
                     log::warn!("Session name validation failed: {e}");
+                    reset_naming_completed_if_default(
+                        &request.session_id,
+                        &request.worktree_path,
+                        &request.worktree_id,
+                    );
                     let error = NamingError {
                         session_id: Some(request.session_id.clone()),
                         worktree_id: request.worktree_id.clone(),
@@ -1220,6 +1321,11 @@ fn execute_naming(app: &AppHandle, request: &NamingRequest) {
             }
         } else {
             log::warn!("No session name in response");
+            reset_naming_completed_if_default(
+                &request.session_id,
+                &request.worktree_path,
+                &request.worktree_id,
+            );
             let error = NamingError {
                 session_id: Some(request.session_id.clone()),
                 worktree_id: request.worktree_id.clone(),
@@ -1372,6 +1478,72 @@ mod tests {
             .expect("required array");
         assert!(required.iter().any(|v| v.as_str() == Some("session_name")));
         assert!(required.iter().any(|v| v.as_str() == Some("branch_name")));
+    }
+
+    #[test]
+    fn naming_schema_for_request_selects_expected_schema() {
+        let mut request = NamingRequest {
+            session_id: "s1".to_string(),
+            worktree_id: "w1".to_string(),
+            worktree_path: PathBuf::from("/tmp"),
+            first_message: "hello".to_string(),
+            model: "gpt-6-luna".to_string(),
+            existing_branch_names: vec![],
+            generate_session_name: true,
+            generate_branch_name: true,
+            custom_session_prompt: None,
+            custom_profile_name: None,
+            backend_override: None,
+            reasoning_effort: None,
+        };
+
+        let schema_both: serde_json::Value =
+            serde_json::from_str(naming_schema_for_request(&request)).unwrap();
+        let req_both = schema_both["required"].as_array().unwrap();
+        assert_eq!(req_both.len(), 2);
+        assert!(req_both.iter().any(|v| v == "session_name"));
+        assert!(req_both.iter().any(|v| v == "branch_name"));
+
+        request.generate_session_name = true;
+        request.generate_branch_name = false;
+        let schema_sess: serde_json::Value =
+            serde_json::from_str(naming_schema_for_request(&request)).unwrap();
+        let req_sess = schema_sess["required"].as_array().unwrap();
+        assert_eq!(req_sess.len(), 1);
+        assert_eq!(req_sess[0], "session_name");
+        assert!(!schema_sess["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("branch_name"));
+
+        request.generate_session_name = false;
+        request.generate_branch_name = true;
+        let schema_branch: serde_json::Value =
+            serde_json::from_str(naming_schema_for_request(&request)).unwrap();
+        let req_branch = schema_branch["required"].as_array().unwrap();
+        assert_eq!(req_branch.len(), 1);
+        assert_eq!(req_branch[0], "branch_name");
+        assert!(!schema_branch["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("session_name"));
+    }
+
+    #[test]
+    fn default_session_name_detection() {
+        assert!(is_default_session_name("Session 1"));
+        assert!(is_default_session_name("Session 24"));
+        assert!(is_default_session_name("Session"));
+        assert!(is_default_session_name("session"));
+        assert!(is_default_session_name("New Session"));
+        assert!(is_default_session_name("new session"));
+        assert!(is_default_session_name(""));
+        assert!(is_default_session_name("   "));
+
+        assert!(!is_default_session_name("Fix auto naming"));
+        assert!(!is_default_session_name("Session management bug"));
+        assert!(!is_default_session_name("Session 1: Refactor"));
+        assert!(!is_default_session_name("Session One"));
     }
 
     #[test]
