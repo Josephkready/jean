@@ -609,6 +609,24 @@ fn load_codex_auth_from_keychain() -> Option<CodexAuthFile> {
     parse_auth_payload(&payload)
 }
 
+pub(crate) fn normalize_last_refresh(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if chrono::DateTime::parse_from_rfc3339(trimmed).is_ok() {
+        return Some(trimmed.to_string());
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(secs) = trimmed.parse::<i64>() {
+            if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
+                return Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+            }
+        }
+    }
+    Some(trimmed.to_string())
+}
+
 fn load_codex_auth_for_binary(
     binary_path: Option<&str>,
 ) -> Result<(CodexAuthSource, CodexAuthFile), String> {
@@ -621,18 +639,34 @@ fn load_codex_auth_for_binary(
 
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read Codex auth file {}: {e}", path.display()))?;
-        let auth: CodexAuthFile = serde_json::from_str(&content).map_err(|e| {
+        let mut auth: CodexAuthFile = serde_json::from_str(&content).map_err(|e| {
             format!(
                 "Failed to parse Codex auth file JSON ({}): {e}",
                 path.display()
             )
         })?;
+        if let Some(ref last) = auth.last_refresh {
+            if let Some(normalized) = normalize_last_refresh(last) {
+                if normalized != *last {
+                    auth.last_refresh = Some(normalized);
+                    let _ = persist_codex_auth(&CodexAuthSource::File(path.clone()), &auth);
+                }
+            }
+        }
         return Ok((CodexAuthSource::File(path), auth));
     }
 
     #[cfg(target_os = "macos")]
     {
-        if let Some(auth) = load_codex_auth_from_keychain() {
+        if let Some(mut auth) = load_codex_auth_from_keychain() {
+            if let Some(ref last) = auth.last_refresh {
+                if let Some(normalized) = normalize_last_refresh(last) {
+                    if normalized != *last {
+                        auth.last_refresh = Some(normalized);
+                        let _ = persist_codex_auth(&CodexAuthSource::Keychain, &auth);
+                    }
+                }
+            }
             return Ok((CodexAuthSource::Keychain, auth));
         }
     }
@@ -891,12 +925,7 @@ async fn refresh_codex_access_token(
         tokens.id_token = Some(id_token);
     }
     auth.tokens = Some(tokens);
-    auth.last_refresh = Some(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_else(|_| "0".to_string()),
-    );
+    auth.last_refresh = Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
 
     if let Err(e) = persist_codex_auth(auth_source, auth) {
         log::warn!("Codex token refresh succeeded but could not persist auth: {e}");
@@ -2615,6 +2644,20 @@ fn extract_zip_binary_bytes(archive_content: &[u8], target: &str) -> Result<Vec<
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+
+    #[test]
+    fn normalize_last_refresh_converts_numeric_timestamp() {
+        assert_eq!(
+            normalize_last_refresh("1795110881"),
+            Some("2026-11-19T17:54:41Z".to_string())
+        );
+        assert_eq!(
+            normalize_last_refresh("2026-11-19T17:54:41Z"),
+            Some("2026-11-19T17:54:41Z".to_string())
+        );
+        assert_eq!(normalize_last_refresh(""), None);
+        assert_eq!(normalize_last_refresh("   "), None);
+    }
 
     fn make_test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());

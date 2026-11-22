@@ -271,6 +271,12 @@ re-parse the whole accumulated buffer (avoids O(n²) on long sessions).
   - Schema constant: `PR_CONTENT_SCHEMA` in `src-tauri/src/projects/commands.rs`
   - Tauri command: `create_pr_with_ai_content` - creates PR with AI-generated title/body
 
+#### Auto Naming and Codex Auth Serializations
+
+- **Codex auth last_refresh format**: Official Codex CLI (`0.163.0`) deserializes `auth.json`'s `last_refresh` using `chrono::DateTime<Utc>` (RFC 3339 string). Writing numeric Unix timestamps breaks Codex CLI with `input contains invalid characters at line 8 column 30`. Always write RFC 3339 strings and normalize legacy numeric timestamps on load.
+- **Naming schema constrained decoding**: When generating names via constrained decoding backends (Codex, Antigravity, Muse, Grok), the JSON schema required fields must strictly match what is asked for (`NAMING_SCHEMA_SESSION_ONLY`, `NAMING_SCHEMA_BRANCH_ONLY`, or `NAMING_SCHEMA_BOTH`). Requiring unrequested fields causes constrained decoding generation to fail.
+- **Codex ChatGPT account one-shot model compatibility**: ChatGPT accounts do not support API-only models like `gpt-6.1-sol`. One-shot calls fall back to `gpt-6-luna` when encountering ChatGPT account model restrictions.
+
 #### Background Operations with Toast Notifications
 
 **Pattern:** For operations that run in the background (not in chat), use toast notifications instead of inline UI state indicators.

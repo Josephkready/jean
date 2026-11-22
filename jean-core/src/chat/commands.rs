@@ -10,7 +10,7 @@ use serde_json::Value;
 use tauri::AppHandle;
 use uuid::Uuid;
 
-use super::naming::{spawn_naming_task, NamingRequest};
+use super::naming::{is_default_session_name, spawn_naming_task, NamingRequest};
 use super::registry::{
     cancel_process, cancel_process_if_running, has_active_send, release_active_send, SendClaim,
 };
@@ -3059,7 +3059,10 @@ pub async fn send_chat_message(
     let session_for_naming = sessions.find_session(&session_id).cloned();
     let is_first_session_message = session_for_naming
         .as_ref()
-        .map(|sess| !sess.session_naming_completed && session_has_no_prior_user_messages(sess))
+        .map(|sess| {
+            !sess.session_naming_completed
+                && (session_has_no_prior_user_messages(sess) || is_default_session_name(&sess.name))
+        })
         .unwrap_or(false);
 
     // Spawn unified naming task if either condition is met

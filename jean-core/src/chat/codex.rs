@@ -5277,6 +5277,26 @@ pub fn execute_one_shot_codex(
     working_dir: Option<&std::path::Path>,
     reasoning_effort: Option<&str>,
 ) -> Result<String, String> {
+    execute_one_shot_codex_inner(
+        app,
+        prompt,
+        model,
+        output_schema,
+        working_dir,
+        reasoning_effort,
+        true,
+    )
+}
+
+fn execute_one_shot_codex_inner(
+    app: &tauri::AppHandle,
+    prompt: &str,
+    model: &str,
+    output_schema: &str,
+    working_dir: Option<&std::path::Path>,
+    reasoning_effort: Option<&str>,
+    allow_fallback: bool,
+) -> Result<String, String> {
     let cli_path = crate::codex_cli::resolve_cli_binary(app)?;
 
     if !crate::platform::resolved_cli_exists(&cli_path) {
@@ -5293,8 +5313,14 @@ pub fn execute_one_shot_codex(
     );
 
     // Write schema to a temp file since --output-schema expects a file path
-    let schema_file =
-        std::env::temp_dir().join(format!("jean-codex-schema-{}.json", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let schema_file = std::env::temp_dir().join(format!(
+        "jean-codex-schema-{}-{nanos}.json",
+        std::process::id()
+    ));
     std::fs::write(&schema_file, output_schema)
         .map_err(|e| format!("Failed to write schema file: {e}"))?;
 
@@ -5393,6 +5419,28 @@ pub fn execute_one_shot_codex(
             stderr.trim(),
             stdout.trim()
         );
+
+        if allow_fallback && actual_model != "gpt-6-luna" {
+            let combined = format!("{stderr}\n{stdout}");
+            if combined.contains("not supported when using Codex with a ChatGPT account")
+                || combined.contains("model is not supported")
+                || combined.contains("model_not_found")
+                || combined.contains("Model not found")
+            {
+                log::warn!(
+                    "Codex one-shot model '{actual_model}' not supported for this account; falling back to 'gpt-6-luna'"
+                );
+                return execute_one_shot_codex_inner(
+                    app,
+                    prompt,
+                    "gpt-6-luna",
+                    output_schema,
+                    working_dir,
+                    reasoning_effort,
+                    false,
+                );
+            }
+        }
 
         // User-facing error: detect common patterns and provide actionable hints
         let failure_detail = one_shot_failure_detail(&stderr, &stdout).unwrap_or_default();
@@ -6145,6 +6193,14 @@ mod tests {
         );
         assert_eq!(params["model"], "gpt-5.5");
         assert_eq!(params["serviceTier"], "fast");
+    }
+
+    #[test]
+    fn one_shot_failure_detects_unsupported_chatgpt_account_model() {
+        let stderr =
+            "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.";
+        let detail = one_shot_failure_detail(stderr, "").unwrap();
+        assert!(detail.contains("not supported when using Codex with a ChatGPT account"));
     }
 
     #[test]
