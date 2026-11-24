@@ -3,7 +3,8 @@ import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TitleBar } from './TitleBar'
 
-const { mockIsIPadOSStandalone } = vi.hoisted(() => ({
+const { mockIsIPadOSStandalone, mockIsMobile } = vi.hoisted(() => ({
+  mockIsMobile: vi.fn(() => false),
   mockIsIPadOSStandalone: vi.fn(() => false),
 }))
 
@@ -22,7 +23,7 @@ vi.mock('@/lib/environment', async importOriginal => ({
 }))
 
 vi.mock('@/hooks/use-mobile', () => ({
-  useIsMobile: () => false,
+  useIsMobile: mockIsMobile,
 }))
 
 vi.mock('@/services/preferences', () => ({
@@ -107,5 +108,18 @@ describe('TitleBar iPadOS standalone PWA insets (issue #58)', () => {
     expect(screen.queryByRole('button', { name: /github/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /sponsor/i })).toBeNull()
     expect(screen.getByTestId('report-bug')).toBeInTheDocument()
+  })
+
+  it('keeps the centre content in flow on mobile so it cannot cover the actions', () => {
+    mockIsMobile.mockReturnValue(true)
+    const { unmount } = render(<TitleBar />)
+    expect(screen.getByTestId('unread-bell').closest('.absolute')).toBeNull()
+    unmount()
+
+    mockIsMobile.mockReturnValue(false)
+    render(<TitleBar />)
+    expect(
+      screen.getByTestId('unread-bell').closest('.absolute')
+    ).not.toBeNull()
   })
 })

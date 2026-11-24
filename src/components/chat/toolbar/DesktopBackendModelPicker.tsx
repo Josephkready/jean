@@ -315,9 +315,12 @@ export function DesktopBackendModelPicker({
                     'aria-label': backendName,
                   })}
                   {selectedAccountLabel && (
-                    <span className="truncate">· {selectedAccountLabel}</span>
+                    <span className="truncate">{selectedAccountLabel}</span>
                   )}
-                  <span className="truncate">· {selectedModelLabel}</span>
+                  <span className="truncate">
+                    {selectedAccountLabel && '· '}
+                    {selectedModelLabel}
+                  </span>
                   {onProviderChange && selectedBackend === 'claude' && (
                     <span className="truncate text-muted-foreground">
                       ·{' '}

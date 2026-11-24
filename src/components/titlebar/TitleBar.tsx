@@ -224,11 +224,20 @@ export function TitleBar({
         ) : (
           // Flex centering, not translate(-50%): a half-pixel transform blurs the title text
           <div
-            className="pointer-events-none absolute inset-0 flex items-center justify-center pt-1"
-            style={{ paddingLeft: contentInset }}
+            className={
+              isMobile
+                ? // In flow: the bug, theme and updates controls leave too little
+                  // room to overlay the diff counter on a phone.
+                  'flex min-w-0 flex-1 items-center justify-center overflow-hidden pt-1'
+                : 'pointer-events-none absolute inset-0 flex items-center justify-center pt-1'
+            }
+            style={isMobile ? undefined : { paddingLeft: contentInset }}
           >
             <div
-              className="pointer-events-auto flex max-w-[50%] items-center gap-2 px-2"
+              className={cn(
+                'pointer-events-auto flex items-center gap-2 px-2',
+                isMobile ? 'min-w-0 max-w-full' : 'max-w-[50%]'
+              )}
               style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             >
               {native && (
@@ -252,7 +261,7 @@ export function TitleBar({
 
         {/* Right side - Actions + Windows/Linux window controls (hidden in zen) */}
         <div
-          className={cn('flex items-center pt-1', isMobile && 'pr-2')}
+          className={cn('flex shrink-0 items-center pt-1', isMobile && 'pr-2')}
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           {mobileZen && (
