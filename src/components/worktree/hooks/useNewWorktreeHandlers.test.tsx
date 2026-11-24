@@ -1,13 +1,16 @@
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { invoke } from '@/lib/transport'
+import { invoke, listen } from '@/lib/transport'
 import { useUIStore } from '@/store/ui-store'
 import type { GitHubIssue } from '@/types/github'
 import { useNewWorktreeHandlers } from './useNewWorktreeHandlers'
 import { openContextLinkMatch } from '@/hooks/useContextLinkUsage'
 import { toast } from 'sonner'
 
-vi.mock('@/lib/transport', () => ({ invoke: vi.fn() }))
+vi.mock('@/lib/transport', () => ({
+  invoke: vi.fn(),
+  listen: vi.fn(async () => () => undefined),
+}))
 vi.mock('@/hooks/useContextLinkUsage', () => ({
   openContextLinkMatch: vi.fn(),
   contextLinkMatchLabel: (match: { worktreeName: string }) =>
@@ -87,7 +90,13 @@ describe('useNewWorktreeHandlers duplicate guard', () => {
     )
     const { result, createWorktree } = setup(getMatches)
     vi.mocked(invoke).mockResolvedValue({ number: 2, title: 't' } as never)
-    createWorktree.mutateAsync.mockResolvedValue({ id: 'wt-new' })
+    createWorktree.mutateAsync.mockImplementation(async () => {
+      const worktree = { id: 'wt-new' }
+      for (const [event, handler] of vi.mocked(listen).mock.calls) {
+        if (event === 'worktree:created') handler({ payload: { worktree } })
+      }
+      return worktree
+    })
 
     await act(async () => {
       await result.current.handleBulkInvestigateIssues([
@@ -99,6 +108,7 @@ describe('useNewWorktreeHandlers duplicate guard', () => {
     expect(invoke).toHaveBeenCalledTimes(1)
     expect(invoke).toHaveBeenCalledWith('get_github_issue', {
       projectPath: '/repo',
+      projectId: 'project-1',
       issueNumber: 2,
     })
     expect(toast.info).toHaveBeenCalledWith(
@@ -132,6 +142,7 @@ describe('useNewWorktreeHandlers duplicate guard', () => {
     expect(openContextLinkMatch).not.toHaveBeenCalled()
     expect(invoke).toHaveBeenCalledWith('get_github_issue', {
       projectPath: '/repo',
+      projectId: 'project-1',
       issueNumber: 42,
       repo: 'octocat/jean',
     })
@@ -163,5 +174,39 @@ describe('useNewWorktreeHandlers duplicate guard', () => {
 
     expect(openContextLinkMatch).toHaveBeenCalledWith(match)
     expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('creates one worktree when a branch is double-clicked', () => {
+    const createWorktreeFromBranch = {
+      mutateAsync: vi.fn(() => Promise.resolve({ id: 'wt-branch' })),
+    }
+    const { result } = setup(
+      vi.fn(() => []),
+      { createWorktreeFromBranch }
+    )
+
+    act(() => {
+      result.current.handleSelectBranch('origin/next')
+      result.current.handleSelectBranch('origin/next')
+    })
+
+    expect(createWorktreeFromBranch.mutateAsync).toHaveBeenCalledTimes(1)
+  })
+
+  it('creates one worktree for repeated background selects of a branch', () => {
+    const createWorktreeFromBranch = {
+      mutateAsync: vi.fn(() => new Promise(() => undefined)),
+    }
+    const { result } = setup(
+      vi.fn(() => []),
+      { createWorktreeFromBranch }
+    )
+
+    act(() => {
+      result.current.handleSelectBranch('origin/next', true)
+      result.current.handleSelectBranch('origin/next', true)
+      result.current.handleSelectBranch('origin/main', true)
+    })
+    expect(createWorktreeFromBranch.mutateAsync).toHaveBeenCalledTimes(2)
   })
 })

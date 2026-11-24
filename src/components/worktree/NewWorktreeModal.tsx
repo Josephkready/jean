@@ -1,20 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getModifierSymbol } from '@/lib/platform'
-import { Kbd } from '@/components/ui/kbd'
-import { useIsMobile } from '@/hooks/use-mobile'
-import {
-  Zap,
-  CircleDot,
-  GitPullRequest,
-  Shield,
-  GitBranch,
-  Sentry,
-  MessagesSquare,
-} from '@/components/icons/reicon'
-import { LinearIcon } from '@/components/icons/LinearIcon'
-import type { LucideIcon } from '@/components/icons/reicon'
 import { useGhLogin } from '@/hooks/useGhLogin'
 import { usePreferences } from '@/services/preferences'
+import { useProjects } from '@/services/projects'
 import {
   resolveMagicPromptProvider,
   resolveMagicPromptBackend,
@@ -33,6 +20,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Kbd } from '@/components/ui/kbd'
+import { useIsMobile } from '@/hooks/use-mobile'
+import { getModifierSymbol } from '@/lib/platform'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { parseServerResourceKey } from '@/lib/server-resource'
@@ -41,6 +31,7 @@ import { useNewWorktreeData } from './hooks/useNewWorktreeData'
 import { useNewWorktreeHandlers } from './hooks/useNewWorktreeHandlers'
 import { useNewWorktreeKeyboard } from './hooks/useNewWorktreeKeyboard'
 import { SessionTabBar } from './NewWorktreeItems'
+import { GITHUB_ONLY_TABS, TABS, type TabId } from './new-worktree-tabs'
 import { QuickActionsTab } from './QuickActionsTab'
 import { GitHubIssuesTab } from './GitHubIssuesTab'
 import { GitHubPRsTab } from './GitHubPRsTab'
@@ -51,40 +42,19 @@ import { SentryIssuesTab } from './SentryIssuesTab'
 import { GitHubDiscussionsTab } from './GitHubDiscussionsTab'
 import { IssuePreviewModal } from './IssuePreviewModal'
 
-export type TabId =
-  | 'quick'
-  | 'issues'
-  | 'prs'
-  | 'security'
-  | 'branches'
-  | 'linear'
-  | 'sentry'
-  | 'discussions'
-
-export interface Tab {
-  id: TabId
-  label: string
-  key: string
-  icon: LucideIcon
-}
-
-// eslint-disable-next-line react-refresh/only-export-components
-export const TABS: Tab[] = [
-  { id: 'quick', label: 'Actions', key: '1', icon: Zap },
-  { id: 'issues', label: 'Issues', key: '2', icon: CircleDot },
-  { id: 'prs', label: 'PRs', key: '3', icon: GitPullRequest },
-  { id: 'security', label: 'Security', key: '4', icon: Shield },
-  { id: 'branches', label: 'Branches', key: '5', icon: GitBranch },
-  { id: 'linear', label: 'Linear', key: '6', icon: LinearIcon },
-  { id: 'sentry', label: 'Sentry', key: '7', icon: Sentry },
-  { id: 'discussions', label: 'Discussions', key: '8', icon: MessagesSquare },
-]
-
 export function NewWorktreeModal() {
   const selectedProjectId = useProjectsStore(state => state.selectedProjectId)
   const serverId = selectedProjectId
     ? (parseServerResourceKey(selectedProjectId)?.serverId ?? 'local')
     : 'local'
+  const { data: projects } = useProjects()
+  const isServerProject = !!projects?.find(p => p.id === selectedProjectId)
+    ?.server
+  // Servers (Servers tab) have only sessions: no worktrees, issues, or PRs.
+  useEffect(() => {
+    if (isServerProject) useUIStore.getState().setNewWorktreeModalOpen(false)
+  }, [isServerProject])
+  if (isServerProject) return null
 
   return (
     <SettingsTargetProvider serverId={serverId}>
@@ -97,9 +67,9 @@ function NewWorktreeModalContent() {
   const { triggerLogin: triggerGhLogin, isGhInstalled } = useGhLogin()
   const { triggerLogin: triggerGlabLogin, isGlabInstalled } = useGlabLogin()
   const { newWorktreeModalOpen } = useUIStore()
-  const isMobile = useIsMobile()
 
   // Local state
+  const isMobile = useIsMobile()
   const [activeTab, setActiveTab] = useState<TabId>('quick')
   const [searchQuery, setSearchQuery] = useState('')
   const [includeClosed, setIncludeClosed] = useState(false)
@@ -137,7 +107,9 @@ function NewWorktreeModalContent() {
 
   // Resolve the project's git host provider for provider-aware auth + wording.
   const { data: providerInfo, isLoading: isProviderLoading } =
-    useProjectGitProvider(data.selectedProject?.path)
+    useProjectGitProvider(data.selectedProject?.path, {
+      projectId: data.selectedProject?.id,
+    })
   const provider = providerInfo?.provider ?? 'github'
   // Until the provider resolves it defaults to `github`; auth-error UI must wait
   // for this so a GitLab project never flashes the GitHub sign-in prompt.
@@ -149,9 +121,7 @@ function NewWorktreeModalContent() {
   // them for GitLab.
   const githubOnlyTabsEnabled = provider !== 'gitlab'
   const displayTabs = TABS.filter(
-    tab =>
-      (tab.id !== 'security' && tab.id !== 'discussions') ||
-      githubOnlyTabsEnabled
+    tab => !GITHUB_ONLY_TABS.has(tab.id) || githubOnlyTabsEnabled
   ).map(tab =>
     tab.id === 'prs' ? { ...tab, label: labels.pullRequestsShort } : tab
   )
@@ -351,46 +321,23 @@ function NewWorktreeModalContent() {
       <Dialog
         open={newWorktreeModalOpen}
         onOpenChange={open => {
-          console.log('[DIALOG-DEBUG] Parent onOpenChange', {
-            open,
-            previewItem: !!previewItem,
-            previewOpenRef: previewOpenRef.current,
-          })
           if (!open && (previewItem || previewOpenRef.current)) return
           handlers.handleOpenChange(open)
         }}
       >
         <DialogContent
-          className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 flex flex-col overflow-hidden"
+          className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-[85vh] sm:!rounded-lg flex flex-col overflow-hidden"
           onKeyDown={handleKeyDown}
           onEscapeKeyDown={e => {
-            console.log('[DIALOG-DEBUG] Parent onEscapeKeyDown', {
-              previewItem: !!previewItem,
-              previewOpenRef: previewOpenRef.current,
-            })
             if (previewItem || previewOpenRef.current) e.preventDefault()
           }}
           onPointerDownOutside={e => {
-            console.log('[DIALOG-DEBUG] Parent onPointerDownOutside', {
-              previewItem: !!previewItem,
-              previewOpenRef: previewOpenRef.current,
-              target: (e.target as HTMLElement)?.tagName,
-            })
             if (previewItem || previewOpenRef.current) e.preventDefault()
           }}
           onInteractOutside={e => {
-            console.log('[DIALOG-DEBUG] Parent onInteractOutside', {
-              previewItem: !!previewItem,
-              previewOpenRef: previewOpenRef.current,
-              type: e.type,
-            })
             if (previewItem || previewOpenRef.current) e.preventDefault()
           }}
           onFocusOutside={e => {
-            console.log('[DIALOG-DEBUG] Parent onFocusOutside', {
-              previewItem: !!previewItem,
-              previewOpenRef: previewOpenRef.current,
-            })
             if (previewItem || previewOpenRef.current) e.preventDefault()
           }}
         >
@@ -678,16 +625,13 @@ function NewWorktreeModalContent() {
             )}
           </div>
 
-          {/* Background open hint */}
           {activeTab !== 'quick' && !isMobile && (
-            <div className="shrink-0 border-t border-border px-3 py-1.5">
-              <span className="text-xs text-muted-foreground">
-                Hold{' '}
-                <Kbd className="mx-0.5 h-5 min-w-5 px-1 text-[10px]">
-                  {getModifierSymbol()}
-                </Kbd>{' '}
-                to open in background
-              </span>
+            <div className="shrink-0 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
+              Hold{' '}
+              <Kbd data-web-visible className="mx-0.5 text-2xs">
+                {getModifierSymbol()}
+              </Kbd>{' '}
+              to open in background
             </div>
           )}
         </DialogContent>
@@ -697,19 +641,16 @@ function NewWorktreeModalContent() {
           open={!!previewItem}
           onOpenChange={open => {
             if (!open) {
-              console.log(
-                '[DIALOG-DEBUG] Preview closing — setting previewOpenRef=true, clearing after rAF'
-              )
               previewOpenRef.current = true
               setPreviewItem(null)
               // Clear ref after the current event cycle so parent guards still block
               requestAnimationFrame(() => {
                 previewOpenRef.current = false
-                console.log('[DIALOG-DEBUG] previewOpenRef cleared')
               })
             }
           }}
           projectPath={data.selectedProject.path}
+          projectId={data.selectedProject.id}
           type={previewItem.type}
           number={previewItem.number}
           ghsaId={previewItem.ghsaId}

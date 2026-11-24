@@ -13,7 +13,9 @@ import {
   hasPreloadedData,
   listen,
   onEstablishedWsDisconnect,
+  waitUntilBackendReachable,
   usesWebSocketBackend,
+  signInToWebAccess,
   type InitialData,
 } from '@/lib/transport'
 import {
@@ -27,9 +29,11 @@ import { QuitConfirmationDialog } from '@/components/layout/QuitConfirmationDial
 import { setServerPlatform } from '@/lib/platform'
 import { projectsQueryKeys } from '@/services/projects'
 import { chatQueryKeys } from '@/services/chat'
-import { reconcileSessionsAfterReconnect } from '@/services/session-reconcile'
+import {
+  refreshRunStates,
+  refreshRunStatesOnFocus,
+} from '@/services/run-states'
 import { serverConnectionManager } from '@/lib/server-connections'
-import { parseServerResourceKey } from '@/lib/server-resource'
 import { invalidateMcpServers } from '@/services/mcp'
 import { mergeWorktreesPreservingOptimistic } from '@/lib/worktree-list-cache'
 import type { Session, WorktreeSessions } from '@/types/chat'
@@ -83,7 +87,6 @@ import { useServerUpdateCheck } from './hooks/useServerUpdateCheck'
 import { useCodexCodeModeHostRepair } from './hooks/useCodexCodeModeHostRepair'
 import { useServerQuerySync } from './hooks/useServerQuerySync'
 import { useBackgroundInvestigation } from './hooks/useBackgroundInvestigation'
-import { useAutoArchiveOnMerge } from './hooks/useAutoArchiveOnMerge'
 import { useMagicPromptAutoDefaults } from './hooks/useMagicPromptAutoDefaults'
 import useStreamingEvents from './components/chat/hooks/useStreamingEvents'
 import { hydrateRunningSnapshot } from './lib/hydrate-running-snapshot'
@@ -113,6 +116,7 @@ import { RemoteConnectionRecovery } from './components/remote/RemoteConnectionRe
 import { getStartupOnboardingAction } from './lib/startup-onboarding'
 import { dismissTransientUi } from './lib/dismiss-transient-ui'
 import { JeanLoadingScreen } from './components/shared/JeanLoadingScreen'
+import { NetworkOfflineScreen } from './components/shared/NetworkOfflineScreen'
 import { relaunchAfterUIStateSave } from './lib/ui-state-relaunch'
 
 interface AutoFixStoppedEvent {
@@ -120,11 +124,6 @@ interface AutoFixStoppedEvent {
   projectName: string
   backend: string
   error: string
-}
-
-function handleWsAuthTokenSubmit(token: string) {
-  localStorage.setItem('jean-http-token', token)
-  window.location.reload()
 }
 
 /** Sign-in surface for web access mode, shown until the session is authorized. */
@@ -147,7 +146,7 @@ function WsAuthErrorOverlay() {
         // (remote removed right after a drop), the sign-in form still works —
         // submitting reloads the page, which is how connections recover.
         reason={authReason === 'rejected' ? 'rejected' : 'signed-out'}
-        onTokenSubmit={handleWsAuthTokenSubmit}
+        onTokenSubmit={signInToWebAccess}
       />
     </div>
   )
@@ -160,6 +159,7 @@ function App() {
   // Track preloading state for web view
   const [isPreloading, setIsPreloading] = useState(webBackend)
   const [platformVersion, setPlatformVersion] = useState(0)
+  const [webReconnecting, setWebReconnecting] = useState(false)
   const queryClient = useQueryClient()
   const hasStartedTransportRef = useRef(false)
 
@@ -523,11 +523,15 @@ function App() {
         // turn without pending approvals should not show approve buttons.
         // Keep waiting when the running turn itself is paused on mid-turn
         // approvals (Codex command/permission prompts — issue #626).
-        if (data.runningSessions?.length) {
-          const runningSessionIds = new Set(data.runningSessions)
-          for (const sessionId of data.runningSessions) {
-            runningSessionIds.add(sessionId)
-          }
+        const runningSessionIds = new Set(
+          (data.runStates ?? [])
+            .filter(
+              runState =>
+                runState.status === 'running' || runState.status === 'resumable'
+            )
+            .map(runState => runState.sessionId)
+        )
+        if (runningSessionIds.size > 0) {
           const filteredReviewingUpdates = Object.fromEntries(
             Object.entries(reviewingUpdates).filter(
               ([sessionId]) => !runningSessionIds.has(sessionId)
@@ -648,66 +652,19 @@ function App() {
           }
         }
       }
-      // Replace sendingSessionIds with exactly the server's running sessions.
-      // This clears sessions that finished while the page was closed and restores
-      // sessions that are still running — server is source of truth.
-      const runningSendingIds: Record<string, boolean> = {}
-      const runningSendStartedAt: Record<string, number> = {}
-      if (data.runningSessions?.length) {
-        const knownStartedAt = useChatStore.getState().sendStartedAt
-        for (const sessionId of data.runningSessions) {
-          runningSendingIds[sessionId] = true
-          // Sessions outside the bootstrapped worktrees (e.g. agent sessions)
-          // are absent from sessionsByWorktree; fall back to the focused
-          // session payload, then to the start time this client already knew.
-          const startedAt =
-            (data.sessionsByWorktree
-              ? Object.values(data.sessionsByWorktree)
-                  .flatMap(ws => (ws as WorktreeSessions).sessions)
-                  .find(session => session.id === sessionId)
-                  ?.last_run_started_at
-              : undefined) ??
-            (data.activeSessions?.[sessionId] as Session | undefined)
-              ?.last_run_started_at
-          if (startedAt) {
-            runningSendStartedAt[sessionId] = startedAt * 1000
-          } else if (knownStartedAt[sessionId] != null) {
-            runningSendStartedAt[sessionId] = knownStartedAt[sessionId]
-          }
-        }
+      // The backend is the source of truth for what is running. This clears
+      // sessions that finished while the page was closed and restores the
+      // ones still running, with their persisted start times.
+      beginSessionStateHydration()
+      try {
+        useChatStore.getState().applyRunStateSnapshot(data.runStates ?? [], {
+          ownsSession: () => true,
+          requestedAt: Date.now(),
+        })
+      } finally {
+        endSessionStateHydration()
       }
-      useChatStore.setState(state => {
-        const current = state.sendingSessionIds
-        const currentSendStartedAt = state.sendStartedAt
-        // Check if anything actually changed to avoid unnecessary re-renders
-        const currentKeys = Object.keys(current)
-        const newKeys = Object.keys(runningSendingIds)
-        const currentStartKeys = Object.keys(currentSendStartedAt).filter(
-          key => runningSendingIds[key]
-        )
-        const newStartKeys = Object.keys(runningSendStartedAt)
-        if (
-          currentKeys.length === newKeys.length &&
-          newKeys.every(k => current[k]) &&
-          currentStartKeys.length === newStartKeys.length &&
-          newStartKeys.every(
-            k => currentSendStartedAt[k] === runningSendStartedAt[k]
-          )
-        ) {
-          return state
-        }
-        return {
-          sendingSessionIds: runningSendingIds,
-          sendStartedAt: {
-            ...Object.fromEntries(
-              Object.entries(currentSendStartedAt).filter(
-                ([sessionId]) => !runningSendingIds[sessionId]
-              )
-            ),
-            ...runningSendStartedAt,
-          },
-        }
-      })
+      const runningSendingIds = useChatStore.getState().sendingSessionIds
 
       for (const { sessionId, message } of runningSnapshotMessages) {
         // Only lift the snapshot into the live stream when this client already
@@ -918,18 +875,22 @@ function App() {
         dismissTransientUi()
         return
       }
-      logger.info('WebSocket disconnected, reloading web app')
-      captureWebReloadState()
-      window.location.reload()
+      // Reloading while the network switches (Wi-Fi to cellular) lands on
+      // the browser's offline page with no way back. Reload only once the
+      // server answers again.
+      logger.info('WebSocket disconnected, waiting for server before reload')
+      setWebReconnecting(true)
+      void waitUntilBackendReachable().then(() => {
+        logger.info('WebSocket disconnected, reloading web app')
+        captureWebReloadState()
+        window.location.reload()
+      })
     })
   }, [captureWebReloadState, webBackend])
 
   // Headless background investigation - starts investigations on background
   // worktrees (CMD+Click) without opening the session modal
   useBackgroundInvestigation()
-
-  // Auto-archive worktrees when their PR is merged (if enabled in preferences)
-  useAutoArchiveOnMerge()
 
   // One-time: detect installed backends and set magic prompt defaults accordingly
   useMagicPromptAutoDefaults()
@@ -967,20 +928,49 @@ function App() {
 
     // Native desktop keeps its shell across remote socket drops, so a run
     // that finished during the gap would stay "sending" (no reload resync).
-    if (isNativeApp()) void reconcileSessionsAfterReconnect(queryClient)
+    if (isNativeApp()) {
+      void refreshRunStates(queryClient, { invalidateSessions: true })
+    }
   }, [wsConnected, queryClient, webBackend])
 
   // Same resync for every enabled remote server in native multi-server mode.
   useEffect(
     () =>
       serverConnectionManager.onRemoteReconnect(serverId => {
-        void reconcileSessionsAfterReconnect(
-          queryClient,
-          sessionId => parseServerResourceKey(sessionId)?.serverId === serverId
-        )
+        void refreshRunStates(queryClient, {
+          serverId,
+          invalidateSessions: true,
+        })
       }),
     [queryClient]
   )
+
+  // A server sends ws:resync when this client lagged and events were skipped
+  // on a socket that stays open, so the reconnect resync above never runs.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen('ws:resync', () => {
+      void refreshRunStates(queryClient, { invalidateSessions: true })
+    }).then(fn => {
+      unlisten = fn
+    })
+    return () => unlisten?.()
+  }, [queryClient])
+
+  // Run-state events can be missed while the window is hidden or the socket
+  // silently stalls. Resync from the backend snapshot when the user comes back.
+  useEffect(() => {
+    const onFocus = () => refreshRunStatesOnFocus(queryClient)
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onFocus()
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [queryClient])
 
   // Add native-app class to body for desktop-only CSS (cursor, user-select, etc.)
   useEffect(() => {
@@ -1210,6 +1200,7 @@ function App() {
   ])
 
   // Show feature tour after CLI onboarding completes (first launch or manual trigger)
+  // react-doctor-disable-next-line react-doctor/effect-needs-cleanup -- tourTimer is cleared in the returned cleanup
   useEffect(() => {
     let wasOpen = useUIStore.getState().onboardingOpen
     let tourTimer: ReturnType<typeof setTimeout> | undefined
@@ -1415,20 +1406,6 @@ function App() {
             queryClient.invalidateQueries({ queryKey: chatQueryKeys.all })
           }
 
-          const { sendingSessionIds, removeSendingSession } =
-            useChatStore.getState()
-          const resumableIds = new Set(resumable.map(r => r.session_id))
-          // Web bootstrap already restored the registry's authoritative running
-          // set. Recovery can omit a live run when its metadata snapshot is
-          // temporarily unavailable, so only reconcile stale local state here.
-          if (!webBackend) {
-            for (const sessionId of Object.keys(sendingSessionIds)) {
-              if (!resumableIds.has(sessionId)) {
-                removeSendingSession(sessionId)
-              }
-            }
-          }
-
           if (resumable.length === 0) return
 
           logger.info('Found resumable sessions', { count: resumable.length })
@@ -1441,7 +1418,8 @@ function App() {
             const store = useChatStore.getState()
             store.addSendingSession(
               session.session_id,
-              session.started_at * 1000
+              session.started_at * 1000,
+              false
             )
 
             let sessionSnapshot = queryClient.getQueryData<Session>(
@@ -1607,7 +1585,12 @@ function App() {
   // app underneath and covering it with an overlay. Native remote clients keep
   // the overlay: their local UI stays usable while a remote is unreachable.
   if (webBackend && wsAuthError && !getActiveRemoteConnection()) {
-    return <WsAuthErrorOverlay />
+    return (
+      <>
+        <WsAuthErrorOverlay />
+        <NetworkOfflineScreen />
+      </>
+    )
   }
 
   if (isPreloading || blockOnWs) {
@@ -1615,6 +1598,7 @@ function App() {
       <>
         <JeanLoadingScreen />
         {webBackend && <WsAuthErrorOverlay />}
+        <NetworkOfflineScreen />
         {isNativeApp() && <QuitConfirmationDialog />}
       </>
     )
@@ -1624,10 +1608,16 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <MainWindow />
-        {webBackend && wsCheckingConnection && (
-          <JeanLoadingScreen message="Checking connection to Jean..." onTop />
+        {webBackend && webReconnecting ? (
+          <JeanLoadingScreen message="Reconnecting to Jean..." onTop />
+        ) : (
+          webBackend &&
+          wsCheckingConnection && (
+            <JeanLoadingScreen message="Checking connection to Jean..." onTop />
+          )
         )}
         {webBackend && <WsAuthErrorOverlay />}
+        <NetworkOfflineScreen />
         {/* App-level dialog so quit confirmation wins over loading overlay
             even if MainWindow's copy is covered / not yet mounted. */}
         {isNativeApp() && <QuitConfirmationDialog />}

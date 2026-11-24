@@ -8,18 +8,22 @@ test.describe('Navigation', () => {
     })
 
     // Open sidebar panel if not visible
-    const projectsHeader = mockPage.getByText('PROJECTS')
+    const projectsHeader = mockPage.getByRole('tab', { name: 'Workspace' })
     if (!(await projectsHeader.isVisible().catch(() => false))) {
-      await mockPage.keyboard.press('Meta+b')
+      await mockPage.keyboard.press('ControlOrMeta+b')
       await mockPage.waitForTimeout(500)
     }
 
     // Sidebar should show project and worktrees
     await expect(projectsHeader).toBeVisible({ timeout: 3000 })
-    await expect(mockPage.getByText('fuzzy-tiger')).toBeVisible({
+    await expect(
+      mockPage.getByRole('button', { name: 'fuzzy-tiger Expand sessions' })
+    ).toBeVisible({
       timeout: 3000,
     })
-    await expect(mockPage.getByText('calm-dolphin')).toBeVisible({
+    await expect(
+      mockPage.getByRole('button', { name: 'calm-dolphin Expand sessions' })
+    ).toBeVisible({
       timeout: 3000,
     })
   })
@@ -30,14 +34,16 @@ test.describe('Navigation', () => {
     })
 
     // Open sidebar
-    const projectsHeader = mockPage.getByText('PROJECTS')
+    const projectsHeader = mockPage.getByRole('tab', { name: 'Workspace' })
     if (!(await projectsHeader.isVisible().catch(() => false))) {
-      await mockPage.keyboard.press('Meta+b')
+      await mockPage.keyboard.press('ControlOrMeta+b')
       await mockPage.waitForTimeout(500)
     }
 
     // Click a worktree
-    await mockPage.getByText('fuzzy-tiger').click()
+    await mockPage
+      .getByRole('button', { name: 'fuzzy-tiger Expand sessions' })
+      .click()
     await mockPage.waitForTimeout(1000)
 
     // Dashboard empty state should no longer be visible

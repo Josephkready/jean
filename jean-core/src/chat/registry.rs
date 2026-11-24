@@ -28,6 +28,8 @@ struct OpenCodeCancelEntry {
     flag: Arc<AtomicBool>,
     opencode_session_id: Option<String>,
     working_dir: Option<String>,
+    /// The turn runs on an OpenCode 2.x server that outlives Jean.
+    survivable: bool,
 }
 
 static CANCEL_FLAGS: Lazy<Mutex<HashMap<String, OpenCodeCancelEntry>>> =
@@ -65,6 +67,27 @@ static DETACHED_SESSIONS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new
 /// by a later `Drop` from the cancelled claim after a new claim was acquired.
 static ACTIVE_SENDS: Lazy<Mutex<HashMap<String, u64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SEND_CLAIM_GENERATION: AtomicU64 = AtomicU64::new(1);
+/// Claim generation of sends whose process, cancel flag, or turn was registered.
+/// A cancel with nothing registered is a pre-start cancel only while the
+/// current claim never registered anything; otherwise the send is tearing down.
+static STARTED_SENDS: Lazy<Mutex<HashMap<String, u64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn mark_send_started(session_id: &str) {
+    let active = lock_recover(&ACTIVE_SENDS, "ACTIVE_SENDS");
+    if let Some(generation) = active.get(session_id) {
+        lock_recover(&STARTED_SENDS, "STARTED_SENDS").insert(session_id.to_string(), *generation);
+    }
+}
+
+/// True when the current send of the session registered a process, flag, or turn.
+fn current_send_started(session_id: &str) -> bool {
+    let active = lock_recover(&ACTIVE_SENDS, "ACTIVE_SENDS");
+    let started = lock_recover(&STARTED_SENDS, "STARTED_SENDS");
+    matches!(
+        (active.get(session_id), started.get(session_id)),
+        (Some(a), Some(s)) if a == s
+    )
+}
 
 /// RAII claim on a session's send slot — released on drop (any return path).
 pub struct SendClaim {
@@ -92,6 +115,10 @@ impl Drop for SendClaim {
         let mut active = lock_recover(&ACTIVE_SENDS, "ACTIVE_SENDS");
         if active.get(&self.session_id) == Some(&self.generation) {
             active.remove(&self.session_id);
+        }
+        let mut started = lock_recover(&STARTED_SENDS, "STARTED_SENDS");
+        if started.get(&self.session_id) == Some(&self.generation) {
+            started.remove(&self.session_id);
         }
     }
 }
@@ -122,27 +149,24 @@ fn lock_recover<'a, T>(mutex: &'a Mutex<T>, name: &str) -> std::sync::MutexGuard
     }
 }
 
-pub(crate) fn emit_cancelled_event(
-    app: &AppHandle,
-    session_id: &str,
-    worktree_id: &str,
-    undo_send: bool,
-) {
+pub(crate) fn emit_cancelled_event(app: &AppHandle, session_id: &str, worktree_id: &str) {
     let emitted_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0);
-    let run_id = super::storage::load_metadata(app, session_id)
+    let metadata = super::storage::load_metadata(app, session_id)
         .ok()
-        .flatten()
+        .flatten();
+    let run_id = metadata
+        .as_ref()
         .and_then(|metadata| metadata.runs.last().map(|run| run.run_id.clone()));
 
     let event = CancelledEvent {
         session_id: session_id.to_string(),
         worktree_id: worktree_id.to_string(),
-        undo_send,
         emitted_at_ms,
         run_id,
+        status_version: metadata.map(|metadata| metadata.status_version),
     };
     if let Err(e) = app.emit_all("chat:cancelled", &event) {
         log::error!("Failed to emit chat:cancelled event: {e}");
@@ -316,7 +340,9 @@ pub fn register_process(session_id: String, pid: u32) -> bool {
         "[Registry] Registering process pid={pid} for session={session_id}, registry_keys={:?}",
         registry.keys().collect::<Vec<_>>()
     );
-    registry.insert(session_id, pid);
+    registry.insert(session_id.clone(), pid);
+    drop(registry);
+    mark_send_started(&session_id);
     true
 }
 
@@ -378,13 +404,15 @@ pub fn register_cancel_flag(session_id: String, flag: Arc<AtomicBool>) -> bool {
     }
 
     lock_recover(&CANCEL_FLAGS, "CANCEL_FLAGS").insert(
-        session_id,
+        session_id.clone(),
         OpenCodeCancelEntry {
             flag,
             opencode_session_id: None,
             working_dir: None,
+            survivable: false,
         },
     );
+    mark_send_started(&session_id);
     true
 }
 
@@ -403,6 +431,14 @@ pub fn update_cancel_flag_context(
     }
 }
 
+/// Mark the session's OpenCode turn as one that survives Jean quitting
+/// (OpenCode 2.x on Unix: the server keeps running and Jean re-attaches).
+pub fn mark_cancel_flag_survivable(session_id: &str) {
+    if let Some(entry) = lock_recover(&CANCEL_FLAGS, "CANCEL_FLAGS").get_mut(session_id) {
+        entry.survivable = true;
+    }
+}
+
 /// The OpenCode session id of the CURRENTLY RUNNING turn for this Jean session,
 /// as recorded by `update_cancel_flag_context`. Available mid-run — including the
 /// first turn of a brand-new session, before the id is persisted to session
@@ -415,15 +451,26 @@ pub fn get_opencode_session_id(session_id: &str) -> Option<String> {
 
 /// Fire-and-forget server-side abort for a running OpenCode session.
 ///
-/// OpenCode exposes `POST /session/{id}/abort`. Jean still keeps a local
+/// OpenCode 1.x exposes `POST /session/{id}/abort`, 2.x
+/// `POST /api/session/{id}/interrupt`. Jean still keeps a local
 /// cancellation flag so the in-process request can return promptly even if
 /// the server abort request is slow or fails.
 pub fn abort_opencode_session(opencode_session_id: String, working_dir: Option<String>) {
     std::thread::spawn(move || {
-        let Some(base_url) = crate::opencode_server::get_current_url() else {
+        let Some(server) = crate::opencode_server::current_server() else {
             log::warn!("OpenCode: no server URL available for abort");
             return;
         };
+        if server.api == crate::opencode_server::OpenCodeApi::V2 {
+            let result =
+                super::opencode_v2::V2Client::new(&server, std::time::Duration::from_secs(5))
+                    .and_then(|client| client.interrupt(&opencode_session_id));
+            if let Err(e) = result {
+                log::warn!("OpenCode interrupt failed: {e}");
+            }
+            return;
+        }
+        let base_url = server.url;
 
         let abort_url = format!("{base_url}/session/{opencode_session_id}/abort");
         log::info!("OpenCode: sending abort to {abort_url}");
@@ -464,7 +511,8 @@ pub fn register_codex_turn(session_id: String, thread_id: String, turn_id: Strin
     }
 
     lock_recover(&CODEX_TURN_REGISTRY, "CODEX_TURN_REGISTRY")
-        .insert(session_id, (thread_id, turn_id));
+        .insert(session_id.clone(), (thread_id, turn_id));
+    mark_send_started(&session_id);
     true
 }
 
@@ -614,10 +662,14 @@ pub fn get_actively_managed_sessions() -> HashSet<String> {
 ///
 /// Survivable: detached Claude CLI processes, host-backed Pi/Grok/Kimi ACP hosts,
 /// and Codex app-server turns on Unix (server/host runs independently of Jean).
-/// Non-survivable: OpenCode sessions (managed server dies with Jean), piped
+/// OpenCode 2.x turns marked by `mark_cancel_flag_survivable` also survive.
+/// Non-survivable: OpenCode 1.x sessions (managed server dies with Jean), piped
 /// CLI children (Cursor, Windows Grok/Pi/Kimi), and Codex turns on Windows.
 pub fn has_nonsurvivable_running_sessions() -> bool {
-    if !lock_recover(&CANCEL_FLAGS, "CANCEL_FLAGS").is_empty() {
+    if lock_recover(&CANCEL_FLAGS, "CANCEL_FLAGS")
+        .values()
+        .any(|entry| !entry.survivable)
+    {
         return true;
     }
 
@@ -656,6 +708,26 @@ mod tests {
         lock_recover(&CANCEL_FLAGS, "CANCEL_FLAGS").clear();
         lock_recover(&CODEX_TURN_REGISTRY, "CODEX_TURN_REGISTRY").clear();
         lock_recover(&ACTIVE_SENDS, "ACTIVE_SENDS").clear();
+        lock_recover(&STARTED_SENDS, "STARTED_SENDS").clear();
+    }
+
+    #[test]
+    fn a_send_that_registered_a_process_is_not_a_pre_start_cancel() {
+        let _guard = lock_recover(&TEST_LOCK, "TEST_LOCK");
+        clear_registries();
+
+        let claim = SendClaim::try_acquire("teardown").expect("claim");
+        assert!(!current_send_started("teardown"));
+        assert!(register_process("teardown".to_string(), u32::MAX));
+        unregister_process("teardown");
+        // Teardown: nothing registered any more, but this send did run.
+        assert!(current_send_started("teardown"));
+        drop(claim);
+
+        let next = SendClaim::try_acquire("teardown").expect("next claim");
+        assert!(!current_send_started("teardown"));
+        drop(next);
+        clear_registries();
     }
 
     #[test]
@@ -707,6 +779,61 @@ mod tests {
         clear_registries();
     }
 
+    fn run_entry(
+        run_id: &str,
+        status: super::super::types::RunStatus,
+    ) -> super::super::types::RunEntry {
+        super::super::types::RunEntry {
+            run_id: run_id.to_string(),
+            user_message_id: format!("user-{run_id}"),
+            user_message: "prompt".to_string(),
+            model: None,
+            execution_mode: None,
+            thinking_level: None,
+            effort_level: None,
+            backend: None,
+            custom_profile_name: None,
+            started_at: 1,
+            ended_at: None,
+            status,
+            assistant_message_id: None,
+            cancelled: false,
+            provider_rejected: false,
+            recovered: false,
+            claude_session_id: None,
+            pid: None,
+            usage: None,
+            codex_thread_id: None,
+            codex_turn_id: None,
+            opencode_turn: None,
+            cursor_chat_id: None,
+            grok_session_id: None,
+            kimi_session_id: None,
+            devin_session_id: None,
+            antigravity_session_id: None,
+            muse_session_id: None,
+            checkpoint_id: None,
+        }
+    }
+
+    #[test]
+    fn pending_cancel_withdraws_only_the_run_still_preparing() {
+        use super::super::types::RunStatus;
+        let runs = vec![
+            run_entry("done", RunStatus::Completed),
+            run_entry("withdrawn-earlier", RunStatus::Cancelled),
+            run_entry("preparing", RunStatus::Running),
+        ];
+        assert_eq!(running_run_id_in(&runs).as_deref(), Some("preparing"));
+
+        let idle = vec![
+            run_entry("done", RunStatus::Completed),
+            run_entry("withdrawn-earlier", RunStatus::Cancelled),
+        ];
+        assert_eq!(running_run_id_in(&idle), None);
+        assert_eq!(running_run_id_in(&[]), None);
+    }
+
     #[test]
     fn get_opencode_session_id_returns_live_id_after_context_update() {
         let _guard = lock_recover(&TEST_LOCK, "TEST_LOCK");
@@ -750,6 +877,31 @@ mod tests {
 
         unregister_codex_turn("codex-session");
         assert_eq!(get_codex_turn("codex-session"), None);
+
+        clear_registries();
+    }
+
+    #[test]
+    fn only_opencode_2x_turns_marked_survivable_let_jean_quit() {
+        let _guard = lock_recover(&TEST_LOCK, "TEST_LOCK");
+        clear_registries();
+
+        assert!(register_cancel_flag(
+            "opencode-v2".to_string(),
+            Arc::new(AtomicBool::new(false))
+        ));
+        assert!(
+            has_nonsurvivable_running_sessions(),
+            "1.x turns die with Jean"
+        );
+        mark_cancel_flag_survivable("opencode-v2");
+        assert!(!has_nonsurvivable_running_sessions());
+
+        assert!(register_cancel_flag(
+            "opencode-v1".to_string(),
+            Arc::new(AtomicBool::new(false))
+        ));
+        assert!(has_nonsurvivable_running_sessions());
 
         clear_registries();
     }
@@ -918,7 +1070,7 @@ pub fn cancel_process(
             if let Err(e) = run_log::mark_running_run_cancelled(app, session_id) {
                 log::warn!("Failed to mark run as cancelled in manifest: {e}");
             }
-            emit_cancelled_event(app, session_id, worktree_id, false);
+            emit_cancelled_event(app, session_id, worktree_id);
             return Ok(true);
         }
         log::trace!("Cancelling Claude process group {pid} for session: {session_id}");
@@ -957,7 +1109,7 @@ pub fn cancel_process(
         }
 
         // Emit cancelled event for responsive UI
-        emit_cancelled_event(app, session_id, worktree_id, false);
+        emit_cancelled_event(app, session_id, worktree_id);
 
         return Ok(true);
     }
@@ -981,7 +1133,7 @@ pub fn cancel_process(
             log::warn!("Failed to mark run as cancelled in manifest: {e}");
         }
 
-        emit_cancelled_event(app, session_id, worktree_id, false);
+        emit_cancelled_event(app, session_id, worktree_id);
 
         return Ok(true);
     }
@@ -1018,10 +1170,8 @@ pub fn cancel_process(
             log::warn!("Failed to mark run as cancelled in manifest: {e}");
         }
 
-        // Emit cancelled event with undo_send=false — content may have already
-        // streamed to the frontend via SSE events. The frontend will decide
-        // based on actual streamed content whether to undo or preserve.
-        emit_cancelled_event(app, session_id, worktree_id, false);
+        // Stop signal only; send_chat_message reports the prompt's fate later.
+        emit_cancelled_event(app, session_id, worktree_id);
 
         return Ok(true);
     }
@@ -1034,19 +1184,75 @@ pub fn cancel_process(
         pending.insert(session_id.to_string());
     }
 
+    // Nothing is registered now. If the current send registered something
+    // earlier, it is tearing down a turn that already ran: let send_chat_message
+    // report the real outcome instead of an early "withdrawn".
+    let unstarted_run = if current_send_started(session_id) {
+        None
+    } else {
+        running_run_id(app, session_id)
+    };
     // Try to mark run as cancelled (may not exist yet if still preparing, that's ok)
     let _ = run_log::mark_running_run_cancelled(app, session_id);
 
     // Emit cancelled event so frontend handles it immediately
-    emit_cancelled_event(app, session_id, worktree_id, true);
+    emit_cancelled_event(app, session_id, worktree_id);
+    if let Some(run_id) = unstarted_run {
+        emit_withdrawn_user_turn(app, session_id, worktree_id, &run_id);
+    }
 
     Ok(true)
+}
+
+/// The run the session is preparing, if any. Callers check first that the
+/// current send never registered a process, flag, or turn.
+fn running_run_id(app: &AppHandle, session_id: &str) -> Option<String> {
+    let metadata = storage::load_metadata(app, session_id).ok().flatten()?;
+    running_run_id_in(&metadata.runs)
+}
+
+fn running_run_id_in(runs: &[super::types::RunEntry]) -> Option<String> {
+    runs.iter()
+        .rev()
+        .find(|run| run.status == super::types::RunStatus::Running)
+        .map(|run| run.run_id.clone())
+}
+
+/// A pending cancel stops the run before its process exists, so the prompt
+/// is withdrawn no matter how the send's teardown ends. Say so now instead of
+/// after teardown; `send_chat_message` repeats the verdict for the same run
+/// and clients drop that duplicate by run id.
+fn emit_withdrawn_user_turn(app: &AppHandle, session_id: &str, worktree_id: &str, run_id: &str) {
+    let metadata = storage::load_metadata(app, session_id).ok().flatten();
+    let run = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.find_run(run_id));
+    let event = super::claude::UserTurnEvent {
+        session_id: session_id.to_string(),
+        worktree_id: worktree_id.to_string(),
+        run_id: run_id.to_string(),
+        user_message_id: run
+            .map(|run| run.user_message_id.clone())
+            .unwrap_or_default(),
+        user_turn: super::types::UserTurnOutcome::Withdrawn,
+        restore_draft: true,
+        failed: false,
+        emitted_at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0),
+        status_version: metadata.map_or(0, |metadata| metadata.status_version),
+    };
+    log::info!("[Registry] pending cancel withdraws session={session_id} run={run_id}");
+    if let Err(e) = app.emit_all("chat:user-turn", &event) {
+        log::error!("Failed to emit chat:user-turn event: {e}");
+    }
 }
 
 /// Cancel a running Claude process only if one is actively registered.
 /// Unlike `cancel_process`, this does NOT add to PENDING_CANCELS and does NOT emit
 /// `chat:cancelled` when the session is idle. Safe to call on idle sessions during
-/// close/archive operations to avoid spurious "Request cancelled" events.
+/// close operations to avoid spurious "Request cancelled" events.
 pub fn cancel_process_if_running(
     app: &AppHandle,
     session_id: &str,
@@ -1074,7 +1280,7 @@ pub fn cancel_process_if_running(
             if let Err(e) = run_log::mark_running_run_cancelled(app, session_id) {
                 log::warn!("Failed to mark run as cancelled in manifest: {e}");
             }
-            emit_cancelled_event(app, session_id, worktree_id, false);
+            emit_cancelled_event(app, session_id, worktree_id);
             return Ok(true);
         }
         log::trace!("Cancelling Claude process group {pid} for session: {session_id}");
@@ -1094,7 +1300,7 @@ pub fn cancel_process_if_running(
             log::warn!("Failed to mark run as cancelled in manifest: {e}");
         }
 
-        emit_cancelled_event(app, session_id, worktree_id, false);
+        emit_cancelled_event(app, session_id, worktree_id);
 
         return Ok(true);
     }
@@ -1120,7 +1326,7 @@ pub fn cancel_process_if_running(
             log::warn!("Failed to mark run as cancelled in manifest: {e}");
         }
 
-        emit_cancelled_event(app, session_id, worktree_id, false);
+        emit_cancelled_event(app, session_id, worktree_id);
 
         return Ok(true);
     }
@@ -1150,7 +1356,7 @@ pub fn cancel_process_if_running(
         // Match the regular OpenCode cancel path: streamed SSE content may already
         // exist, so let the frontend decide whether to restore or preserve based on
         // actual partial output rather than forcing undo-send.
-        emit_cancelled_event(app, session_id, worktree_id, false);
+        emit_cancelled_event(app, session_id, worktree_id);
 
         return Ok(true);
     }

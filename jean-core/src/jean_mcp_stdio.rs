@@ -33,26 +33,33 @@ fn response_timeout(tool_name: &str) -> Duration {
 }
 
 pub fn run_stdio_server() -> Result<(), String> {
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
+    serve(std::io::stdin().lock(), std::io::stdout())
+}
 
-    for line in stdin.lock().lines() {
+fn serve(input: impl BufRead, mut output: impl Write) -> Result<(), String> {
+    for line in input.lines() {
         let line = line.map_err(|e| format!("Failed to read stdin: {e}"))?;
         if line.trim().is_empty() {
             continue;
         }
-        let response = handle_message(&line);
-        if let Some(response) = response {
-            let encoded = serde_json::to_string(&response)
-                .map_err(|e| format!("Failed to encode MCP response: {e}"))?;
-            writeln!(stdout, "{encoded}").map_err(|e| format!("Failed to write stdout: {e}"))?;
-            stdout
-                .flush()
-                .map_err(|e| format!("Failed to flush stdout: {e}"))?;
+        let Some(response) = handle_message(&line) else {
+            continue;
+        };
+        // A client that closes its end (timeout, abandoned request) ends the
+        // session; that is not a failure (issue #894).
+        match write_response(&mut output, &response) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => return Err(format!("Failed to write stdout: {e}")),
         }
     }
 
     Ok(())
+}
+
+fn write_response(output: &mut impl Write, response: &Value) -> std::io::Result<()> {
+    writeln!(output, "{response}")?;
+    output.flush()
 }
 
 fn handle_message(line: &str) -> Option<Value> {
@@ -131,18 +138,12 @@ fn proxy_to_parent(
 ) -> Result<Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
-    use tokio::runtime::Builder;
     use tokio::time::timeout;
 
     let encoded = serde_json::to_string(&request)
         .map_err(|e| format!("Failed to encode Jean MCP pipe request: {e}"))?;
-    let runtime = Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|e| format!("Failed to create Jean MCP pipe runtime: {e}"))?;
 
-    let response = runtime.block_on(async {
+    let response = block_on_isolated(async {
         let mut pipe = ClientOptions::new()
             .open(socket)
             .map_err(|e| format!("Failed to connect Jean MCP named pipe {socket}: {e}"))?;
@@ -164,12 +165,39 @@ fn proxy_to_parent(
 
         serde_json::from_str::<Value>(&line)
             .map_err(|e| format!("Failed to parse Jean MCP pipe response: {e}"))
-    })?;
+    })??;
 
     if let Some(error) = parent_error_message(&response) {
         return Err(error);
     }
     Ok(response.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// Runs `future` on a new current-thread runtime in a scoped thread.
+///
+/// The stdio server runs inside the entry point's Tokio runtime. A nested
+/// `block_on` on that thread panics, and `panic = "abort"` turns the panic
+/// into a process abort (issue #934). A separate thread has no runtime
+/// context, so this works from inside or outside any runtime flavor.
+#[cfg(any(windows, test))]
+fn block_on_isolated<F>(future: F) -> Result<F::Output, String>
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                    .map_err(|e| format!("Failed to create Jean MCP pipe runtime: {e}"))?;
+                Ok(runtime.block_on(future))
+            })
+            .join()
+            .map_err(|_| "Jean MCP pipe thread panicked".to_string())?
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -197,8 +225,31 @@ fn parent_error_message(response: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::io::{self, Write};
 
-    use super::parent_error_message;
+    use super::{block_on_isolated, parent_error_message, serve};
+
+    async fn sleep_then(value: u32) -> u32 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        value
+    }
+
+    #[test]
+    fn block_on_isolated_works_outside_a_runtime() {
+        assert_eq!(block_on_isolated(sleep_then(1)), Ok(1));
+    }
+
+    // Regression for issue #934: the stdio server runs inside the entry
+    // point's multi-thread runtime, where a nested `block_on` panicked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn block_on_isolated_works_inside_a_multi_thread_runtime() {
+        assert_eq!(block_on_isolated(sleep_then(2)), Ok(2));
+    }
+
+    #[tokio::test]
+    async fn block_on_isolated_works_inside_a_current_thread_runtime() {
+        assert_eq!(block_on_isolated(sleep_then(3)), Ok(3));
+    }
 
     #[test]
     fn parent_error_message_handles_plain_error_string() {
@@ -218,5 +269,34 @@ mod tests {
             })),
             Some("No Jean session context present".to_string())
         );
+    }
+
+    struct ClosedPipe;
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const PING: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+
+    #[test]
+    fn closed_stdout_ends_session_cleanly() {
+        assert_eq!(serve(PING, ClosedPipe), Ok(()));
+    }
+
+    #[test]
+    fn writes_one_json_line_per_response() {
+        let mut out = Vec::new();
+        serve(PING, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let response: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(response["id"], 1);
     }
 }

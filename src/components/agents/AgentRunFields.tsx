@@ -24,7 +24,7 @@ import {
   withDefaultReasoningOption,
   type AgentRunDraft,
 } from './agent-config'
-import { HelpTip } from './agent-ui'
+import { HelpTip } from '@/components/ui/help-tip'
 
 interface AgentRunFieldsProps {
   value: AgentRunDraft
@@ -74,7 +74,7 @@ export function AgentRunFields({
     : value.backend
       ? [value.backend as CliBackend]
       : backendValues
-  const groups = useAllBackendSkills(undefined, skillBackend)
+  const groups = useAllBackendSkills(undefined, undefined, skillBackend)
   const skills = skillChoices(groups, value.backend)
   const efforts = effortOptionsForBackend(value.backend)
   const thinking = thinkingOptionsForBackend(value.backend)
@@ -170,7 +170,7 @@ export function AgentRunFields({
           )}
         </div>
         {value.backend === 'cursor' && (
-          <p className="text-xs text-amber-700 dark:text-amber-400">
+          <p className="text-xs text-warning">
             Cursor has no Build mode, so wake-ups run in Yolo mode without
             approval prompts.
           </p>

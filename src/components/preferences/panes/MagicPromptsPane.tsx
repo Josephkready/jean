@@ -110,6 +110,8 @@ import {
   type MagicPromptExecutionMode,
   type MagicCodeReviewConfig,
   type CliBackend,
+  getProviderAliasModelOptions,
+  toProviderAliasModel,
 } from '@/types/preferences'
 import { cn } from '@/lib/utils'
 import {
@@ -338,17 +340,11 @@ const PROMPT_SECTIONS: PromptSection[] = [
         backendKey: 'code_review_backend',
         label: 'Code Review',
         description:
-          'Prompt for AI-powered code review of your changes. Each reviewer row has its own Mode for sessions created when sending that reviewer’s findings to chat.',
+          'Prompt for Jean review. It is sent as a chat message to a new "Review" session, which uses the first reviewer below.',
         variables: [
           {
-            name: '{branch_info}',
-            description: 'Source and target branch names',
-          },
-          { name: '{commits}', description: 'Commit history' },
-          { name: '{diff}', description: 'Code changes diff' },
-          {
-            name: '{uncommitted_section}',
-            description: 'Unstaged changes if any',
+            name: '{base_branch}',
+            description: 'Base branch to compare against (e.g. origin/main)',
           },
         ],
         defaultValue: DEFAULT_CODE_REVIEW_PROMPT,
@@ -492,8 +488,13 @@ const PROMPT_SECTIONS: PromptSection[] = [
         key: 'pre_release_review',
         label: 'Pre-release Review',
         description:
-          'Prompt sent to the current session from Magic → Pre-release Review. Reviews all changes since the last production release. Uses the session’s current model and mode.',
-        variables: [],
+          'Prompt sent to the current session from Magic → Pre-release Review. Reviews all changes against the worktree’s base branch. Uses the session’s current model and mode.',
+        variables: [
+          {
+            name: '{base_branch}',
+            description: 'Base branch ref of the worktree (e.g., origin/main)',
+          },
+        ],
         defaultValue: DEFAULT_PRE_RELEASE_REVIEW_PROMPT,
       },
     ],
@@ -612,7 +613,28 @@ const PROMPT_CONFIGS = PROMPT_SECTIONS.flatMap(s => s.configs)
 const PROMPT_CONFIG_KEYS = new Set(PROMPT_CONFIGS.map(config => config.key))
 const MAGIC_PROMPT_HIGHLIGHT_DURATION_MS = 1800
 
-function getMagicPromptReasoningDefaults(
+const BULK_REASONING_EFFORT = 'medium'
+
+/** Medium when the model offers it, else the model default. */
+function getBulkReasoningEffort(
+  catalog: Parameters<typeof getMagicPromptModelReasoning>[0],
+  backend: CliBackend,
+  model: MagicPromptModel
+): string | null {
+  const reasoning = getMagicPromptModelReasoning(
+    catalog,
+    backend,
+    model,
+    null,
+    []
+  )
+  if (!reasoning) return null
+  return reasoning.levels.some(level => level.value === BULK_REASONING_EFFORT)
+    ? BULK_REASONING_EFFORT
+    : reasoning.default
+}
+
+function getBulkReasoningEfforts(
   catalog: Parameters<typeof getMagicPromptModelReasoning>[0],
   backend: CliBackend,
   models: MagicPromptModels
@@ -620,14 +642,11 @@ function getMagicPromptReasoningDefaults(
   const efforts = { ...DEFAULT_MAGIC_PROMPT_EFFORTS }
   for (const config of PROMPT_CONFIGS) {
     if (!config.modelKey || !config.effortKey) continue
-    efforts[config.effortKey] =
-      getMagicPromptModelReasoning(
-        catalog,
-        backend,
-        models[config.modelKey],
-        null,
-        []
-      )?.default ?? null
+    efforts[config.effortKey] = getBulkReasoningEffort(
+      catalog,
+      backend,
+      models[config.modelKey]
+    )
   }
   return efforts
 }
@@ -640,9 +659,7 @@ function makeCodeReviewConfig(
   return {
     backend,
     model,
-    reasoning_effort:
-      getMagicPromptModelReasoning(catalog, backend, model, null, [])
-        ?.default ?? null,
+    reasoning_effort: getBulkReasoningEffort(catalog, backend, model),
     fix_mode: DEFAULT_MAGIC_PROMPT_MODES.code_review_fix_mode,
   }
 }
@@ -681,6 +698,9 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     model: MagicPromptModel
     label: string
   } | null>(null)
+  // Claude custom provider (e.g. OpenRouter) for "Apply to all prompts".
+  // null = Anthropic / global default provider.
+  const [bulkProvider, setBulkProvider] = useState<string | null>(null)
   const [bulkFast, setBulkFast] = useState(false)
   const [bulkMode, setBulkMode] = useState<MagicPromptExecutionMode>('plan')
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -902,7 +922,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
         return true
     }
   }
-  const currentModel = (() => {
+  const backendModel = (() => {
     if (!rawCurrentModel) return undefined
     if (modelMatchesEffectiveBackend(rawCurrentModel)) return rawCurrentModel
     if (effectiveBackend === 'codex') return codexModelOptions[0]?.value
@@ -918,6 +938,15 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     if (effectiveBackend === 'muse') return museModelOptions[0]?.value
     return selectedConfig.defaultModel ?? rawCurrentModel
   })()
+  // A custom provider offers only the opus/sonnet/haiku aliases, so the
+  // first-party default (`claude-opus-5-5`) becomes its alias (`opus`).
+  const isCustomClaudeProvider =
+    effectiveBackend === 'claude' &&
+    !!profiles.find(p => p.name === currentProvider)?.settings_json
+  const currentModel =
+    backendModel && isCustomClaudeProvider
+      ? toProviderAliasModel(backendModel)
+      : backendModel
   const modelReasoning = currentModel
     ? getMagicPromptModelReasoning(
         modelCatalog,
@@ -970,28 +999,10 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     }
     const profile = profiles.find(p => p.name === currentProvider)
     if (!profile?.settings_json) return claudeModelOptions
-    try {
-      const settings = JSON.parse(profile.settings_json)
-      const env = settings?.env
-      if (!env) return claudeModelOptions
-      const suffix = (m?: string) => (m ? ` (${m})` : '')
-      return [
-        {
-          value: 'opus' as const,
-          label: `Opus${suffix(env.ANTHROPIC_DEFAULT_OPUS_MODEL || env.ANTHROPIC_MODEL)}`,
-        },
-        {
-          value: 'sonnet' as const,
-          label: `Sonnet${suffix(env.ANTHROPIC_DEFAULT_SONNET_MODEL || env.ANTHROPIC_MODEL)}`,
-        },
-        {
-          value: 'haiku' as const,
-          label: `Haiku${suffix(env.ANTHROPIC_DEFAULT_HAIKU_MODEL || env.ANTHROPIC_MODEL)}`,
-        },
-      ] as { value: MagicPromptModel; label: string }[]
-    } catch {
-      return claudeModelOptions
-    }
+    return getProviderAliasModelOptions(profile.settings_json) as {
+      value: MagicPromptModel
+      label: string
+    }[]
   }, [
     claudeModelOptions,
     currentProvider,
@@ -1184,6 +1195,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     }
   }, [])
 
+  // react-doctor-disable-next-line react-doctor/no-derived-state-effect -- scrolls to a search target and shows a highlight that a timer clears
   useEffect(() => {
     if (
       !searchTargetPromptKey ||
@@ -1193,6 +1205,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     }
 
     setSelectedKey(searchTargetPromptKey)
+    // react-doctor-disable-next-line react-doctor/no-derived-state -- transient highlight that a timer clears; not derivable from searchTargetPromptKey alone
     setHighlightedKey(searchTargetPromptKey)
 
     const targetElement = document.getElementById(
@@ -1491,14 +1504,47 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     [preferences, patchPreferences, currentModes, selectedConfig.modeKey]
   )
 
+  const getBulkModelOptions = (
+    backend: CliBackend,
+    provider: string | null
+  ): { value: string; label: string }[] => {
+    if (backend !== 'claude') return getReviewModelOptions(backend)
+    const settingsJson = provider
+      ? profiles.find(p => p.name === provider)?.settings_json
+      : undefined
+    return settingsJson
+      ? getProviderAliasModelOptions(settingsJson)
+      : claudeModelOptions
+  }
+
+  const selectBulkModel = (
+    backend: CliBackend,
+    model: string,
+    provider: string | null
+  ) => {
+    const label =
+      getBulkModelOptions(backend, provider).find(
+        option => option.value === model
+      )?.label ?? model
+    setBulkSelection({ backend, model: model as MagicPromptModel, label })
+  }
+
   const handleBulkModelChange = (backend: CliBackend, model: string) => {
-    const options =
-      backend === 'claude' ? claudeModelOptions : getReviewModelOptions(backend)
-    setBulkSelection({
-      backend,
-      model: model as MagicPromptModel,
-      label: options.find(option => option.value === model)?.label ?? model,
-    })
+    const provider = backend === 'claude' ? bulkProvider : null
+    setBulkProvider(provider)
+    selectBulkModel(backend, model, provider)
+  }
+
+  const handleBulkProviderChange = (value: string) => {
+    const provider = value === '__anthropic__' ? null : value
+    setBulkProvider(provider)
+    // Provider model lists differ (a custom provider only maps the
+    // opus/sonnet/haiku aliases), so start from a model it supports.
+    selectBulkModel(
+      'claude',
+      provider ? 'sonnet' : (claudeModelOptions[0]?.value ?? 'sonnet'),
+      provider
+    )
   }
 
   const bulkFastModel = bulkSelection
@@ -1518,10 +1564,13 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
     const models = { ...currentModels }
     const backends = { ...currentBackends }
     const modes = { ...currentModes, code_review_fix_mode: bulkMode }
+    const providers = { ...DEFAULT_MAGIC_PROMPT_PROVIDERS }
+    const provider = backend === 'claude' ? bulkProvider : null
     for (const config of PROMPT_CONFIGS) {
       if (config.modelKey) models[config.modelKey] = model
       if (config.backendKey) backends[config.backendKey] = backend
       if (config.modeKey) modes[config.modeKey] = bulkMode
+      if (config.providerKey) providers[config.providerKey] = provider
     }
     patchPreferences.mutate({
       magic_prompt_models: models,
@@ -1531,10 +1580,10 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
           fix_mode: bulkMode,
         },
       ],
-      magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
+      magic_prompt_providers: providers,
       magic_prompt_backends: backends,
       magic_prompt_modes: modes,
-      magic_prompt_efforts: getMagicPromptReasoningDefaults(
+      magic_prompt_efforts: getBulkReasoningEfforts(
         modelCatalog,
         backend,
         models
@@ -1543,6 +1592,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
   }, [
     preferences,
     bulkSelection,
+    bulkProvider,
     bulkFast,
     bulkFastModel,
     bulkMode,
@@ -1605,8 +1655,11 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
             >
               {bulkSelection ? (
                 <>
-                  {getBackendPlainLabel(bulkSelection.backend)} ·{' '}
-                  {bulkSelection.label}
+                  {getBackendPlainLabel(bulkSelection.backend)}
+                  {bulkSelection.backend === 'claude' && bulkProvider
+                    ? ` (${bulkProvider})`
+                    : ''}{' '}
+                  · {bulkSelection.label}
                 </>
               ) : (
                 'Select model'
@@ -1624,9 +1677,12 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
                 bulkSelection?.backend ?? installedBackends[0] ?? 'claude'
               }
               selectedModel={bulkSelection?.model ?? ''}
-              selectedProvider={null}
+              selectedProvider={bulkProvider}
               installedBackends={installedBackends}
               customCliProfiles={profiles}
+              onProviderChange={
+                profiles.length > 0 ? handleBulkProviderChange : undefined
+              }
               onModelChange={model =>
                 handleBulkModelChange(
                   bulkSelection?.backend ?? installedBackends[0] ?? 'claude',
@@ -1711,7 +1767,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
         >
           {PROMPT_SECTIONS.map((section, sectionIdx) => (
             <div key={section.label} className={sectionIdx > 0 ? 'mt-3' : ''}>
-              <h4 className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1 px-2">
+              <h4 className="text-2xs font-medium text-muted-foreground uppercase tracking-wider mb-1 px-2">
                 {section.label}
               </h4>
               {section.configs.map(config => {
@@ -2532,7 +2588,7 @@ export const MagicPromptsPane: React.FC<MagicPromptsPaneProps> = ({
               {selectedConfig.variables.map(v => (
                 <span
                   key={v.name}
-                  className="inline-flex items-center gap-1 text-[11px]"
+                  className="inline-flex items-center gap-1 text-2xs"
                   title={v.description}
                 >
                   <code className="bg-muted px-1 py-0.5 rounded font-mono">

@@ -732,6 +732,7 @@ fn extract_usage(value: &Value) -> Option<UsageData> {
         output_tokens,
         cache_read_input_tokens,
         cache_creation_input_tokens,
+        cost_usd: None,
     })
 }
 
@@ -1112,6 +1113,7 @@ fn usage_from_acp_meta(meta: &Value) -> Option<UsageData> {
         output_tokens,
         cache_read_input_tokens,
         cache_creation_input_tokens: 0,
+        cost_usd: None,
     })
 }
 
@@ -4377,6 +4379,13 @@ fn send_grok_acp_prompt(
             == 0
         {
             flush_coalesced_chunks(app, jean_session_id, worktree_id, &mut chunk_coalescer);
+            if !super::registry::is_process_running(jean_session_id) {
+                // Stopped by the user: hand back what already streamed so the
+                // turn stays in history as cancelled-with-content.
+                response.cancelled = true;
+                response.content = response.content.trim().to_string();
+                return Ok(response);
+            }
             return Err("Grok ACP exited before prompt completed".to_string());
         }
         let trimmed = line.trim();
@@ -5773,6 +5782,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: Some("grok-hist-err".to_string()),
             kimi_session_id: None,
@@ -6718,6 +6728,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: Some("grok-hist-1".to_string()),
             kimi_session_id: None,
@@ -6759,6 +6770,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: Some("s".to_string()),
             kimi_session_id: None,
@@ -6840,6 +6852,7 @@ Ship the feature end-to-end with tests and clear handoff notes for YOLO.
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: Some("s".to_string()),
             kimi_session_id: None,

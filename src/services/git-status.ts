@@ -9,6 +9,7 @@ import { invoke, useWsConnectionStatus } from '@/lib/transport'
 import { listen, type UnlistenFn } from '@/lib/transport'
 import { useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { create } from 'zustand'
 
 import {
   isTauri,
@@ -25,6 +26,34 @@ import type { GitDiff, CommitHistoryResult } from '@/types/git-diff'
 import { toastActionLabel } from '@/lib/toast-action-label'
 import { logger } from '@/lib/logger'
 import { queryClient } from '@/lib/query-client'
+
+// ============================================================================
+// Git sync activity (pull/push in progress per worktree)
+// ============================================================================
+
+/** Count of running pull/push operations per worktree id (nesting-safe). */
+const useGitSyncActivityStore = create<{ counts: Record<string, number> }>(
+  () => ({ counts: {} })
+)
+
+function beginGitSync(worktreeId: string | undefined): () => void {
+  if (!worktreeId) return () => undefined
+  const adjust = (delta: number) =>
+    useGitSyncActivityStore.setState(({ counts }) => {
+      const next = (counts[worktreeId] ?? 0) + delta
+      const { [worktreeId]: _, ...rest } = counts
+      return { counts: next > 0 ? { ...rest, [worktreeId]: next } : rest }
+    })
+  adjust(1)
+  return () => adjust(-1)
+}
+
+/** True while a pull, push, or sync runs on the worktree. */
+export function useIsGitSyncing(worktreeId: string | undefined): boolean {
+  return useGitSyncActivityStore(state =>
+    worktreeId ? (state.counts[worktreeId] ?? 0) > 0 : false
+  )
+}
 
 function invalidateJeanConfigQueries() {
   queryClient.invalidateQueries({ queryKey: ['run-scripts'] })
@@ -196,6 +225,7 @@ export async function triggerImmediateGitPoll(): Promise<void> {
  * @returns Output from git pull command
  */
 export async function gitPull(
+  worktreeId: string,
   worktreePath: string,
   baseBranch: string,
   remote?: string
@@ -204,6 +234,7 @@ export async function gitPull(
     throw new Error('Git pull only available in Tauri')
   }
   return invoke<string>('git_pull', {
+    worktreeId,
     worktreePath,
     baseBranch,
     remote: remote ?? null,
@@ -213,21 +244,27 @@ export async function gitPull(
 /**
  * Stash all local changes including untracked files.
  */
-export async function gitStash(worktreePath: string): Promise<string> {
+export async function gitStash(
+  worktreeId: string,
+  worktreePath: string
+): Promise<string> {
   if (!isTauri()) {
     throw new Error('Git stash only available in Tauri')
   }
-  return invoke<string>('git_stash', { worktreePath })
+  return invoke<string>('git_stash', { worktreeId, worktreePath })
 }
 
 /**
  * Pop the most recent stash.
  */
-export async function gitStashPop(worktreePath: string): Promise<string> {
+export async function gitStashPop(
+  worktreeId: string,
+  worktreePath: string
+): Promise<string> {
   if (!isTauri()) {
     throw new Error('Git stash pop only available in Tauri')
   }
-  return invoke<string>('git_stash_pop', { worktreePath })
+  return invoke<string>('git_stash_pop', { worktreeId, worktreePath })
 }
 
 // ============================================================================
@@ -290,6 +327,7 @@ export async function performGitPull(opts: GitPullOptions): Promise<boolean> {
   if (worktreeId) {
     setWorktreeLoading(worktreeId, 'commit')
   }
+  const endGitSync = beginGitSync(worktreeId)
   const label = branchLabel || baseBranch
   const toastId =
     existingToastId ??
@@ -299,7 +337,7 @@ export async function performGitPull(opts: GitPullOptions): Promise<boolean> {
   }
 
   try {
-    await gitPull(worktreePath, baseBranch, remote)
+    await gitPull(worktreeId, worktreePath, baseBranch, remote)
     await triggerImmediateGitPoll()
     invalidateJeanConfigQueries()
     if (projectId) fetchWorktreesStatus(projectId)
@@ -332,10 +370,10 @@ export async function performGitPull(opts: GitPullOptions): Promise<boolean> {
 
       toast.loading('Auto-stashing local changes...', { id: toastId })
       try {
-        await gitStash(worktreePath)
-        await gitPull(worktreePath, baseBranch, remote)
+        await gitStash(worktreeId, worktreePath)
+        await gitPull(worktreeId, worktreePath, baseBranch, remote)
         toast.loading('Restoring stashed changes...', { id: toastId })
-        await gitStashPop(worktreePath)
+        await gitStashPop(worktreeId, worktreePath)
         await triggerImmediateGitPoll()
         invalidateJeanConfigQueries()
         if (projectId) fetchWorktreesStatus(projectId)
@@ -420,6 +458,7 @@ export async function performGitPull(opts: GitPullOptions): Promise<boolean> {
     if (worktreeId) {
       clearWorktreeLoading(worktreeId)
     }
+    endGitSync()
   }
 }
 
@@ -442,11 +481,24 @@ export interface GitSyncOptions {
  * Skips push if pull was requested and failed.
  */
 export async function performGitSync(opts: GitSyncOptions): Promise<void> {
-  const { needsPull, needsPush, pull, prNumber, pushRemote } = opts
+  const { needsPull, needsPush, pull } = opts
   const shouldPush = needsPush || needsPull
 
   if (!needsPull && !needsPush) return
 
+  // Covers the gap between pull and push so the indicator does not flicker
+  const endGitSync = beginGitSync(pull.worktreeId)
+  try {
+    await runGitSync(opts, shouldPush)
+  } finally {
+    endGitSync()
+  }
+}
+
+async function runGitSync(
+  { needsPull, pull, prNumber, pushRemote }: GitSyncOptions,
+  shouldPush: boolean
+): Promise<void> {
   const [{ toast }] = await Promise.all([import('sonner')])
   const label = pull.branchLabel || pull.baseBranch
   const toastId = toast.loading(`Syncing ${label}...`)
@@ -510,17 +562,27 @@ export async function gitPush(
   if (!isTauri()) {
     throw new Error('Git push only available in Tauri')
   }
-  return invoke<GitPushResponse>('git_push', {
-    worktreePath,
-    prNumber: prNumber ?? null,
-    remote: remote ?? null,
-    worktreeId: ownerId,
-  })
+  const endGitSync = beginGitSync(ownerId)
+  try {
+    return await invoke<GitPushResponse>('git_push', {
+      worktreePath,
+      prNumber: prNumber ?? null,
+      remote: remote ?? null,
+      worktreeId: ownerId,
+    })
+  } finally {
+    endGitSync()
+  }
 }
 
 export interface GitRemote {
   name: string
 }
+
+/** The worktree or project whose path a repository command receives. */
+export type GitRepoOwner =
+  | { worktreeId: string; projectId?: never }
+  | { projectId: string; worktreeId?: never }
 
 function sortRemotesOriginFirst(remotes: GitRemote[]): GitRemote[] {
   const origin = remotes.find(remote => remote.name === 'origin')
@@ -531,8 +593,15 @@ function sortRemotesOriginFirst(remotes: GitRemote[]): GitRemote[] {
 /**
  * Get all git remotes for a repository.
  */
-export async function getGitRemotes(repoPath: string): Promise<GitRemote[]> {
-  const remotes = await invoke<GitRemote[]>('get_git_remotes', { repoPath })
+export async function getGitRemotes(
+  owner: GitRepoOwner,
+  repoPath: string
+): Promise<GitRemote[]> {
+  const remotes = await invoke<GitRemote[]>('get_git_remotes', {
+    worktreeId: owner.worktreeId,
+    projectId: owner.projectId,
+    repoPath,
+  })
   return sortRemotesOriginFirst(remotes)
 }
 
@@ -540,10 +609,16 @@ export async function getGitRemotes(repoPath: string): Promise<GitRemote[]> {
  * Remove a git remote from a repository.
  */
 export async function removeGitRemote(
+  owner: GitRepoOwner,
   repoPath: string,
   remoteName: string
 ): Promise<void> {
-  await invoke('remove_git_remote', { repoPath, remoteName })
+  await invoke('remove_git_remote', {
+    worktreeId: owner.worktreeId,
+    projectId: owner.projectId,
+    repoPath,
+    remoteName,
+  })
 }
 
 /**
@@ -565,15 +640,9 @@ export async function fetchWorktreesStatus(projectId: string): Promise<void> {
 // ============================================================================
 
 /**
- * Set all worktrees with open PRs for background sweep polling.
- *
- * The sweep polls these worktrees round-robin at a slow interval (5 min)
- * to detect PR merges even when the worktree isn't actively selected.
- */
-/**
  * Set all worktrees for background git status sweep polling.
  *
- * The sweep polls these worktrees round-robin at a slow interval (60s)
+ * Every 2 minutes the sweep refreshes all of them except the active one,
  * to keep uncommitted diff stats up to date even when not actively selected.
  */
 export async function setAllWorktreesForPolling(
@@ -587,6 +656,12 @@ export async function setAllWorktreesForPolling(
   await invoke('set_all_worktrees_for_polling', { worktrees })
 }
 
+/**
+ * Set all worktrees with open PRs for background sweep polling.
+ *
+ * Every 5 minutes the sweep refreshes all of them except the active one,
+ * to detect PR merges even when the worktree isn't actively selected.
+ */
 export async function setPrWorktreesForPolling(
   worktrees: {
     worktreeId: string
@@ -637,7 +712,7 @@ export async function getGitDiff(
   if (!isTauri()) {
     throw new Error('Git diff only available in Tauri')
   }
-  return invoke<GitDiff>(
+  const diff = await invoke<GitDiff>(
     'get_git_diff',
     withWorktreeOwner(worktreeId, {
       worktreePath,
@@ -645,6 +720,48 @@ export async function getGitDiff(
       baseBranch,
       baseRemote,
     })
+  )
+  if (worktreeId) syncGitStatusDiffTotals(worktreeId, diff)
+  return diff
+}
+
+/**
+ * Write fresh diff totals into the polled git status, so header counts match
+ * the diff the user just opened instead of waiting for the next poll.
+ */
+function syncGitStatusDiffTotals(worktreeId: string, diff: GitDiff) {
+  const added = diff.total_additions
+  const removed = diff.total_deletions
+  queryClient.setQueryData<GitStatusEvent | null>(
+    gitStatusQueryKeys.worktree(worktreeId),
+    status => {
+      if (!status) return status
+      if (diff.diff_type === 'uncommitted') {
+        if (
+          status.uncommitted_added === added &&
+          status.uncommitted_removed === removed
+        )
+          return status
+        return {
+          ...status,
+          uncommitted_added: added,
+          uncommitted_removed: removed,
+        }
+      }
+      // Branch totals only match when the diff used the same base as the poll
+      const statusBase = `${status.base_remote ?? 'origin'}/${status.base_branch}`
+      if (diff.base_ref !== statusBase) return status
+      if (
+        status.branch_diff_added === added &&
+        status.branch_diff_removed === removed
+      )
+        return status
+      return {
+        ...status,
+        branch_diff_added: added,
+        branch_diff_removed: removed,
+      }
+    }
   )
 }
 

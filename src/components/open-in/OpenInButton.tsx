@@ -44,6 +44,7 @@ import {
 } from '@/components/projects/servers/server-open'
 
 interface OpenInButtonProps {
+  worktreeId: string
   worktreePath: string
   serverId?: string
   branch?: string | null
@@ -53,6 +54,7 @@ interface OpenInButtonProps {
 }
 
 export function OpenInButton({
+  worktreeId,
   worktreePath,
   serverId,
   branch: worktreeBranch,
@@ -67,7 +69,8 @@ export function OpenInButton({
   const openInFinder = useOpenWorktreeInFinder()
   const openOnGitHub = useOpenBranchOnGitHub()
   const { data: gitProviderInfo } = useProjectGitProvider(
-    server ? null : worktreePath
+    server ? null : worktreePath,
+    { worktreeId }
   )
   const gitProvider = gitProviderInfo?.provider ?? 'github'
   const forgeName = providerLabels(gitProvider).name
@@ -93,19 +96,29 @@ export function OpenInButton({
         case 'terminal':
           openInTerminal.mutate({
             worktreePath,
+            worktreeId,
             terminal: preferences?.terminal,
           })
           break
         case 'finder':
-          openInFinder.mutate(worktreePath)
+          openInFinder.mutate({ worktreePath, worktreeId })
           break
         case 'github':
-          if (branch) openOnGitHub.mutate({ repoPath: worktreePath, branch })
+          if (branch)
+            openOnGitHub.mutate({ repoPath: worktreePath, worktreeId, branch })
           else
-            openInEditor.mutate({ worktreePath, editor: preferences?.editor })
+            openInEditor.mutate({
+              worktreePath,
+              worktreeId,
+              editor: preferences?.editor,
+            })
           break
         default:
-          openInEditor.mutate({ worktreePath, editor: preferences?.editor })
+          openInEditor.mutate({
+            worktreePath,
+            worktreeId,
+            editor: preferences?.editor,
+          })
       }
     },
     [
@@ -113,6 +126,7 @@ export function OpenInButton({
       openInTerminal,
       openInFinder,
       openOnGitHub,
+      worktreeId,
       worktreePath,
       branch,
       server,
@@ -148,6 +162,17 @@ export function OpenInButton({
           preferences?.terminal
         )
 
+  const DefaultIcon =
+    effectiveDefault === 'github'
+      ? gitProvider === 'gitlab'
+        ? GitLabIcon
+        : Github
+      : effectiveDefault === 'terminal'
+        ? Terminal
+        : effectiveDefault === 'finder'
+          ? FolderOpen
+          : Code
+
   if (!canEditor && !canTerminal && !canFinder) return null
 
   return (
@@ -164,10 +189,14 @@ export function OpenInButton({
         <TooltipTrigger asChild>
           <Button
             variant="ghost"
-            className="h-full rounded-r-none border-0 px-2.5 text-xs text-primary-foreground/85 hover:bg-primary-foreground/10 hover:text-primary-foreground dark:text-muted-foreground dark:hover:text-foreground"
+            className="h-full gap-1.5 rounded-r-none border-0 px-2 text-xs text-primary-foreground/85 hover:bg-primary-foreground/10 hover:text-primary-foreground dark:text-muted-foreground dark:hover:text-foreground"
             onClick={() => openAction(effectiveDefault)}
+            aria-label={`Open in ${defaultLabel}`}
           >
-            Open in {defaultLabel}
+            <DefaultIcon className="size-4 @5xl/header:hidden" />
+            <span className="hidden @5xl/header:inline">
+              Open in {defaultLabel}
+            </span>
           </Button>
         </TooltipTrigger>
         <TooltipContent>Open in {defaultLabel}</TooltipContent>
@@ -178,9 +207,10 @@ export function OpenInButton({
           <Button
             variant="ghost"
             size="icon"
-            className="h-full w-6 rounded-l-none border-0 px-0 text-primary-foreground/85 hover:bg-primary-foreground/10 hover:text-primary-foreground dark:text-muted-foreground dark:hover:text-foreground"
+            className="h-full w-5 rounded-l-none border-0 px-0 text-primary-foreground/85 hover:bg-primary-foreground/10 hover:text-primary-foreground dark:text-muted-foreground dark:hover:text-foreground"
+            aria-label="More open options"
           >
-            <ChevronDown className="h-3 w-3" />
+            <ChevronDown className="size-3" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">

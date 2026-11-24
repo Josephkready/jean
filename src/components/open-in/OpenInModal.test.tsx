@@ -113,6 +113,7 @@ vi.mock('@/lib/environment', () => ({
 
 vi.mock('@/lib/platform', () => ({
   openExternal: mocks.openExternal,
+  getModifierSymbol: () => '⌘',
   isMacOS: true,
   isWindows: false,
   isLinux: false,
@@ -156,6 +157,22 @@ vi.mock('@/services/projects', () => ({
 vi.mock('@/services/github', () => ({
   useLoadedIssueContexts: () => ({ data: [] }),
   useLoadedPRContexts: () => ({ data: [] }),
+  useLoadedDiscussionContexts: vi.fn(
+    (sessionId: string, worktreeId: string) => ({
+      data:
+        sessionId === 'session-1' && worktreeId === 'wt-1'
+          ? [
+              {
+                number: 42,
+                title: 'Loaded discussion',
+                commentCount: 3,
+                repoOwner: 'acme',
+                repoName: 'app',
+              },
+            ]
+          : [],
+    })
+  ),
   useLoadedSecurityContexts: vi.fn((sessionId: string, worktreeId: string) => ({
     data:
       sessionId === 'session-1' && worktreeId === 'wt-1'
@@ -285,6 +302,32 @@ describe('OpenInModal', () => {
     )
   })
 
+  it('opens a port with Cmd/Ctrl + its number key', async () => {
+    openInState.ports = [
+      { port: 3000, label: 'API' },
+      { port: 1420, label: 'App' },
+    ]
+
+    render(<OpenInModal />)
+
+    await screen.findByText('App (localhost:1420)')
+    await userEvent.keyboard('{Meta>}2{/Meta}')
+    expect(mocks.openExternal).toHaveBeenCalledWith('http://localhost:1420')
+  })
+
+  it('opens the context, not the port, with a plain number key', async () => {
+    openInState.ports = [{ port: 3000, label: 'API' }]
+
+    render(<OpenInModal />)
+
+    await screen.findByText('API (localhost:3000)')
+    await userEvent.keyboard('1')
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      'https://github.com/acme/app/security/dependabot/7'
+    )
+    expect(mocks.openExternal).not.toHaveBeenCalledWith('http://localhost:3000')
+  })
+
   it('shows worktree and loaded security/advisory context URLs', async () => {
     render(<OpenInModal />)
 
@@ -296,5 +339,14 @@ describe('OpenInModal', () => {
     expect(
       screen.getByText('Advisory GHSA-loaded-1234-5678')
     ).toBeInTheDocument()
+  })
+
+  it('opens a loaded discussion context on its web URL', async () => {
+    render(<OpenInModal />)
+
+    await userEvent.click(await screen.findByText('Discussion #42'))
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      'https://github.com/acme/app/discussions/42'
+    )
   })
 })

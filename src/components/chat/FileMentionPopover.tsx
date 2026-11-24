@@ -17,7 +17,11 @@ import {
 } from '@/components/ui/command'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { Popover, PopoverContent, PopoverAnchor } from '@/components/ui/popover'
-import { useWorktreeFiles, fileQueryKeys } from '@/services/files'
+import {
+  useWorktreeFiles,
+  fileQueryKeys,
+  type FileListOwner,
+} from '@/services/files'
 import type { WorktreeFile, PendingFile } from '@/types/chat'
 import { useProjects } from '@/services/projects'
 import { isFolder } from '@/types/projects'
@@ -38,6 +42,8 @@ export interface FileMentionPopoverHandle {
 interface FileMentionPopoverProps {
   /** Worktree path for file listing */
   worktreePath: string | null
+  /** Id of the worktree that owns `worktreePath` */
+  worktreeId: string | null
   /** Current project ID, used to show linked projects as selectable scopes */
   currentProjectId?: string | null
   /** Whether the popover is open */
@@ -60,11 +66,13 @@ interface FileMentionScope {
   id: string
   name: string
   rootPath: string
+  owner: FileListOwner
   isCurrent: boolean
 }
 
 export function FileMentionPopover({
   worktreePath,
+  worktreeId,
   currentProjectId,
   open,
   onOpenChange,
@@ -79,7 +87,6 @@ export function FileMentionPopover({
   const [selectedRootPath, setSelectedRootPath] = useState<string | null>(
     worktreePath
   )
-  const { data: files = [] } = useWorktreeFiles(selectedRootPath)
   const listRef = useRef<HTMLDivElement>(null)
   const scopeListRef = useRef<HTMLDivElement>(null)
   // File row index only. Project scopes live outside the command list so
@@ -98,6 +105,7 @@ export function FileMentionPopover({
             id: currentProject?.id ?? 'current',
             name: currentProject?.name ?? 'Current worktree',
             rootPath: worktreePath,
+            owner: { worktreeId: worktreeId ?? undefined },
             isCurrent: true,
           },
         ]
@@ -111,6 +119,7 @@ export function FileMentionPopover({
               id: p.id,
               name: p.name,
               rootPath: p.path,
+              owner: { projectId: p.id },
               isCurrent: false,
             },
           ]
@@ -118,11 +127,15 @@ export function FileMentionPopover({
     )
 
     return [...currentScopes, ...linkedScopes]
-  }, [currentProject, projects, worktreePath])
+  }, [currentProject, projects, worktreePath, worktreeId])
 
   const selectedScope = useMemo(
     () => scopes.find(scope => scope.rootPath === selectedRootPath) ?? null,
     [scopes, selectedRootPath]
+  )
+  const { data: files = [] } = useWorktreeFiles(
+    selectedRootPath,
+    selectedScope?.owner ?? {}
   )
 
   const selectedScopeIndex = useMemo(
@@ -130,18 +143,24 @@ export function FileMentionPopover({
     [scopes, selectedRootPath]
   )
 
-  // On open, reset scope and invalidate so newly added files appear.
-  // Invalidate in the same place we set selectedRootPath to avoid effect chains.
-  useEffect(() => {
-    if (!open) return
-    setSelectedRootPath(worktreePath)
-    setSelectedIndex(0)
-    if (worktreePath) {
-      queryClient.invalidateQueries({
-        queryKey: fileQueryKeys.worktreeFiles(worktreePath),
-      })
+  // On open, reset scope (adjusted during render so the stale scope never
+  // paints) and invalidate so newly added files appear.
+  const [resetDeps, setResetDeps] = useState({ open, worktreePath })
+  if (resetDeps.open !== open || resetDeps.worktreePath !== worktreePath) {
+    setResetDeps({ open, worktreePath })
+    if (open) {
+      setSelectedRootPath(worktreePath)
+      setSelectedIndex(0)
     }
-  }, [open, worktreePath, queryClient])
+  }
+  useEffect(() => {
+    if (!open || !worktreePath) return
+    queryClient.invalidateQueries({
+      queryKey: fileQueryKeys.worktreeFiles(worktreePath, {
+        worktreeId: worktreeId ?? undefined,
+      }),
+    })
+  }, [open, worktreePath, worktreeId, queryClient])
 
   // Filter files based on search query (fuzzy match)
   const filteredFiles = useMemo(
@@ -160,7 +179,7 @@ export function FileMentionPopover({
       setSelectedRootPath(scope.rootPath)
       setSelectedIndex(0)
       queryClient.invalidateQueries({
-        queryKey: fileQueryKeys.worktreeFiles(scope.rootPath),
+        queryKey: fileQueryKeys.worktreeFiles(scope.rootPath, scope.owner),
       })
     },
     [queryClient]
@@ -282,10 +301,10 @@ export function FileMentionPopover({
                 className="gap-0.5"
                 aria-label="Use Control Shift Left or Right to switch scope"
               >
-                <Kbd className="h-4 min-w-4 px-1 text-[10px]">Ctrl</Kbd>
-                <Kbd className="h-4 min-w-4 px-1 text-[10px]">Shift</Kbd>
-                <Kbd className="h-4 min-w-4 px-1 text-[10px]">←</Kbd>
-                <Kbd className="h-4 min-w-4 px-1 text-[10px]">→</Kbd>
+                <Kbd className="h-4 min-w-4 px-1 text-2xs">Ctrl</Kbd>
+                <Kbd className="h-4 min-w-4 px-1 text-2xs">Shift</Kbd>
+                <Kbd className="h-4 min-w-4 px-1 text-2xs">←</Kbd>
+                <Kbd className="h-4 min-w-4 px-1 text-2xs">→</Kbd>
               </KbdGroup>
             )}
           </div>

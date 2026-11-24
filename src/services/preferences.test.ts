@@ -120,10 +120,6 @@ const createServerWrapper = (queryClient: QueryClient, serverId: string) => {
 }
 
 describe('model option helpers', () => {
-  it('enables compact chat view by default', () => {
-    expect(defaultPreferences.compact_chat_view_enabled).toBe(true)
-  })
-
   it('syncs desktop and mobile zoom by default', () => {
     expect(defaultPreferences.zoom_level).toBe(ZOOM_LEVEL_DEFAULT)
     expect(defaultPreferences.mobile_zoom_level).toBe(ZOOM_LEVEL_DEFAULT)
@@ -135,6 +131,7 @@ describe('model option helpers', () => {
       'claude-opus-5-5',
       'claude-sonnet-5-5',
       'claude-haiku-5-5',
+      'claude-fable-5-2',
       'claude-fable-5-1',
       'claude-fable-5',
       'claude-opus-5',
@@ -298,10 +295,7 @@ describe('model option helpers', () => {
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'Always implement the simplest maintainable solution'
     )
-    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Clickable References')
-    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
-      'include clickable links when available'
-    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain('Clickable References')
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       "At the start of a new task, replace '.ai/todo.md' instead of appending to it"
     )
@@ -536,10 +530,8 @@ describe('preferences service', () => {
         ui_font: 'geist',
         chat_font: 'geist',
         keybindings: DEFAULT_KEYBINDINGS,
-        archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
         syntax_theme_light: 'github-light',
-        compact_chat_view_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
         magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
@@ -559,8 +551,6 @@ describe('preferences service', () => {
         http_server_auto_start: false,
         http_server_localhost_only: true,
         http_server_token_required: true,
-        removal_behavior: 'archive',
-        auto_archive_on_pr_merged: true,
         debug_mode_enabled: false,
 
         default_effort_level: 'high',
@@ -581,10 +571,7 @@ describe('preferences service', () => {
         favorite_models: [],
         fast_mode_models: [],
 
-        auto_save_context: false,
         auto_pull_base_branch: true,
-        confirm_session_close: true,
-        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -602,8 +589,11 @@ describe('preferences service', () => {
         pi_auto_steer_enabled: true,
         pi_agent_owns_policy: false,
         claude_auto_steer_enabled: true,
+        claude_auto_compact_window: null,
+        codex_auto_compact_token_limit: null,
+        opencode_auto_compact: null,
+        pi_auto_compact: null,
         grok_auto_steer_enabled: true,
-        close_original_on_clear_context: true,
         build_model: null,
         yolo_model: null,
         build_backend: null,
@@ -625,14 +615,16 @@ describe('preferences service', () => {
         wsl_distro: '',
         pi_cli_source: 'jean',
         coderabbit_cli_source: 'jean',
-        expand_tool_calls_by_default: false,
         window_vibrancy: false,
         terminal_background: 'auto',
         terminal_background_custom: null,
+        custom_themes: [],
+        custom_theme: null,
         auto_update_ai_backends: true,
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        commandcode_max_turns: 30,
         agent_browser_enabled: false,
       }
       vi.mocked(invoke).mockResolvedValueOnce(mockPreferences)
@@ -696,14 +688,11 @@ describe('preferences service', () => {
         chat_font: 'geist',
         keybindings: {
           toggle_left_sidebar: 'mod+1', // Old default
-          restore_last_archived: 'mod+alt+shift+t', // Broken modifier order
           clear_session_context: 'mod+shift+k', // Old default, now unbound
           toggle_zen_mode: 'mod+alt+z', // Custom binding
         },
-        archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
         syntax_theme_light: 'github-light',
-        compact_chat_view_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
         magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
@@ -723,8 +712,6 @@ describe('preferences service', () => {
         http_server_auto_start: false,
         http_server_localhost_only: true,
         http_server_token_required: true,
-        removal_behavior: 'archive',
-        auto_archive_on_pr_merged: true,
         debug_mode_enabled: false,
 
         default_effort_level: 'high',
@@ -745,10 +732,7 @@ describe('preferences service', () => {
         favorite_models: [],
         fast_mode_models: [],
 
-        auto_save_context: false,
         auto_pull_base_branch: true,
-        confirm_session_close: true,
-        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -766,8 +750,11 @@ describe('preferences service', () => {
         pi_auto_steer_enabled: true,
         pi_agent_owns_policy: false,
         claude_auto_steer_enabled: true,
+        claude_auto_compact_window: null,
+        codex_auto_compact_token_limit: null,
+        opencode_auto_compact: null,
+        pi_auto_compact: null,
         grok_auto_steer_enabled: true,
-        close_original_on_clear_context: true,
         build_model: null,
         yolo_model: null,
         build_backend: null,
@@ -789,14 +776,16 @@ describe('preferences service', () => {
         wsl_distro: '',
         pi_cli_source: 'jean',
         coderabbit_cli_source: 'jean',
-        expand_tool_calls_by_default: false,
         window_vibrancy: false,
         terminal_background: 'auto',
         terminal_background_custom: null,
+        custom_themes: [],
+        custom_theme: null,
         auto_update_ai_backends: true,
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        commandcode_max_turns: 30,
         agent_browser_enabled: false,
       }
       vi.mocked(invoke).mockResolvedValueOnce(prefsWithOldBinding)
@@ -810,9 +799,6 @@ describe('preferences service', () => {
       // Should migrate to new default
       expect(result.current.data?.keybindings?.toggle_left_sidebar).toBe(
         'mod+b'
-      )
-      expect(result.current.data?.keybindings?.restore_last_archived).toBe(
-        'mod+shift+alt+t'
       )
       expect(result.current.data?.keybindings?.clear_session_context).toBe('')
       expect(result.current.data?.keybindings?.toggle_zen_mode).toBe(
@@ -887,10 +873,8 @@ describe('preferences service', () => {
         ui_font: 'geist',
         chat_font: 'geist',
         keybindings: DEFAULT_KEYBINDINGS,
-        archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
         syntax_theme_light: 'github-light',
-        compact_chat_view_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
         magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
@@ -910,8 +894,6 @@ describe('preferences service', () => {
         http_server_auto_start: false,
         http_server_localhost_only: true,
         http_server_token_required: true,
-        removal_behavior: 'archive',
-        auto_archive_on_pr_merged: true,
         debug_mode_enabled: false,
 
         default_effort_level: 'high',
@@ -932,10 +914,7 @@ describe('preferences service', () => {
         favorite_models: [],
         fast_mode_models: [],
 
-        auto_save_context: false,
         auto_pull_base_branch: true,
-        confirm_session_close: true,
-        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -954,8 +933,11 @@ describe('preferences service', () => {
         pi_auto_steer_enabled: true,
         pi_agent_owns_policy: false,
         claude_auto_steer_enabled: true,
+        claude_auto_compact_window: null,
+        codex_auto_compact_token_limit: null,
+        opencode_auto_compact: null,
+        pi_auto_compact: null,
         grok_auto_steer_enabled: true,
-        close_original_on_clear_context: true,
         build_model: null,
         yolo_model: null,
         build_backend: null,
@@ -977,14 +959,16 @@ describe('preferences service', () => {
         wsl_distro: '',
         pi_cli_source: 'jean',
         coderabbit_cli_source: 'jean',
-        expand_tool_calls_by_default: false,
         window_vibrancy: false,
         terminal_background: 'auto',
         terminal_background_custom: null,
+        custom_themes: [],
+        custom_theme: null,
         auto_update_ai_backends: true,
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        commandcode_max_turns: 30,
         agent_browser_enabled: false,
       }
       vi.mocked(invoke).mockResolvedValueOnce(prefsWithDeprecatedFastModel)
@@ -1020,10 +1004,8 @@ describe('preferences service', () => {
         ui_font: 'geist',
         chat_font: 'geist',
         keybindings: DEFAULT_KEYBINDINGS,
-        archive_retention_days: 7,
         syntax_theme_dark: 'vitesse-black',
         syntax_theme_light: 'github-light',
-        compact_chat_view_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
         magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
@@ -1043,8 +1025,6 @@ describe('preferences service', () => {
         http_server_auto_start: false,
         http_server_localhost_only: true,
         http_server_token_required: true,
-        removal_behavior: 'archive',
-        auto_archive_on_pr_merged: true,
         debug_mode_enabled: false,
 
         default_effort_level: 'high',
@@ -1065,10 +1045,7 @@ describe('preferences service', () => {
         favorite_models: [],
         fast_mode_models: [],
 
-        auto_save_context: false,
         auto_pull_base_branch: true,
-        confirm_session_close: true,
-        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -1086,8 +1063,11 @@ describe('preferences service', () => {
         pi_auto_steer_enabled: true,
         pi_agent_owns_policy: false,
         claude_auto_steer_enabled: true,
+        claude_auto_compact_window: null,
+        codex_auto_compact_token_limit: null,
+        opencode_auto_compact: null,
+        pi_auto_compact: null,
         grok_auto_steer_enabled: true,
-        close_original_on_clear_context: true,
         build_model: null,
         yolo_model: null,
         build_backend: null,
@@ -1109,14 +1089,16 @@ describe('preferences service', () => {
         wsl_distro: '',
         pi_cli_source: 'jean',
         coderabbit_cli_source: 'jean',
-        expand_tool_calls_by_default: false,
         window_vibrancy: false,
         terminal_background: 'auto',
         terminal_background_custom: null,
+        custom_themes: [],
+        custom_theme: null,
         auto_update_ai_backends: true,
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        commandcode_max_turns: 30,
         agent_browser_enabled: false,
       }
 
@@ -1154,10 +1136,8 @@ describe('preferences service', () => {
         ui_font: 'geist',
         chat_font: 'geist',
         keybindings: DEFAULT_KEYBINDINGS,
-        archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
         syntax_theme_light: 'github-light',
-        compact_chat_view_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
         magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
@@ -1177,8 +1157,6 @@ describe('preferences service', () => {
         http_server_auto_start: false,
         http_server_localhost_only: true,
         http_server_token_required: true,
-        removal_behavior: 'archive',
-        auto_archive_on_pr_merged: true,
         debug_mode_enabled: false,
 
         default_effort_level: 'high',
@@ -1199,10 +1177,7 @@ describe('preferences service', () => {
         favorite_models: [],
         fast_mode_models: [],
 
-        auto_save_context: false,
         auto_pull_base_branch: true,
-        confirm_session_close: true,
-        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -1220,8 +1195,11 @@ describe('preferences service', () => {
         pi_auto_steer_enabled: true,
         pi_agent_owns_policy: false,
         claude_auto_steer_enabled: true,
+        claude_auto_compact_window: null,
+        codex_auto_compact_token_limit: null,
+        opencode_auto_compact: null,
+        pi_auto_compact: null,
         grok_auto_steer_enabled: true,
-        close_original_on_clear_context: true,
         build_model: null,
         yolo_model: null,
         build_backend: null,
@@ -1243,14 +1221,16 @@ describe('preferences service', () => {
         wsl_distro: '',
         pi_cli_source: 'jean',
         coderabbit_cli_source: 'jean',
-        expand_tool_calls_by_default: false,
         window_vibrancy: false,
         terminal_background: 'auto',
         terminal_background_custom: null,
+        custom_themes: [],
+        custom_theme: null,
         auto_update_ai_backends: true,
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        commandcode_max_turns: 30,
         agent_browser_enabled: false,
       }
 
@@ -1330,10 +1310,8 @@ describe('preferences service', () => {
         ui_font: 'geist',
         chat_font: 'geist',
         keybindings: DEFAULT_KEYBINDINGS,
-        archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
         syntax_theme_light: 'github-light',
-        compact_chat_view_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
         magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
@@ -1353,8 +1331,6 @@ describe('preferences service', () => {
         http_server_auto_start: false,
         http_server_localhost_only: true,
         http_server_token_required: true,
-        removal_behavior: 'archive',
-        auto_archive_on_pr_merged: true,
         debug_mode_enabled: false,
 
         default_effort_level: 'high',
@@ -1375,10 +1351,7 @@ describe('preferences service', () => {
         favorite_models: [],
         fast_mode_models: [],
 
-        auto_save_context: false,
         auto_pull_base_branch: true,
-        confirm_session_close: true,
-        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -1396,8 +1369,11 @@ describe('preferences service', () => {
         pi_auto_steer_enabled: true,
         pi_agent_owns_policy: false,
         claude_auto_steer_enabled: true,
+        claude_auto_compact_window: null,
+        codex_auto_compact_token_limit: null,
+        opencode_auto_compact: null,
+        pi_auto_compact: null,
         grok_auto_steer_enabled: true,
-        close_original_on_clear_context: true,
         build_model: null,
         yolo_model: null,
         build_backend: null,
@@ -1419,14 +1395,16 @@ describe('preferences service', () => {
         wsl_distro: '',
         pi_cli_source: 'jean',
         coderabbit_cli_source: 'jean',
-        expand_tool_calls_by_default: false,
         window_vibrancy: false,
         terminal_background: 'auto',
         terminal_background_custom: null,
+        custom_themes: [],
+        custom_theme: null,
         auto_update_ai_backends: true,
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        commandcode_max_turns: 30,
         agent_browser_enabled: false,
       }
 
@@ -1462,10 +1440,8 @@ describe('preferences service', () => {
         ui_font: 'geist',
         chat_font: 'geist',
         keybindings: DEFAULT_KEYBINDINGS,
-        archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
         syntax_theme_light: 'github-light',
-        compact_chat_view_enabled: false,
         magic_prompts: DEFAULT_MAGIC_PROMPTS,
         magic_prompt_models: DEFAULT_MAGIC_PROMPT_MODELS,
         magic_prompt_providers: DEFAULT_MAGIC_PROMPT_PROVIDERS,
@@ -1485,8 +1461,6 @@ describe('preferences service', () => {
         http_server_auto_start: false,
         http_server_localhost_only: true,
         http_server_token_required: true,
-        removal_behavior: 'archive',
-        auto_archive_on_pr_merged: true,
         debug_mode_enabled: false,
 
         default_effort_level: 'high',
@@ -1507,10 +1481,7 @@ describe('preferences service', () => {
         favorite_models: [],
         fast_mode_models: [],
 
-        auto_save_context: false,
         auto_pull_base_branch: true,
-        confirm_session_close: true,
-        close_confirm_bypass_modifier: 'shift',
         default_execution_mode: 'plan',
         default_backend: 'claude',
         default_new_session_kind: 'chat',
@@ -1528,8 +1499,11 @@ describe('preferences service', () => {
         pi_auto_steer_enabled: true,
         pi_agent_owns_policy: false,
         claude_auto_steer_enabled: true,
+        claude_auto_compact_window: null,
+        codex_auto_compact_token_limit: null,
+        opencode_auto_compact: null,
+        pi_auto_compact: null,
         grok_auto_steer_enabled: true,
-        close_original_on_clear_context: true,
         build_model: null,
         yolo_model: null,
         build_backend: null,
@@ -1551,14 +1525,16 @@ describe('preferences service', () => {
         wsl_distro: '',
         pi_cli_source: 'jean',
         coderabbit_cli_source: 'jean',
-        expand_tool_calls_by_default: false,
         window_vibrancy: false,
         terminal_background: 'auto',
         terminal_background_custom: null,
+        custom_themes: [],
+        custom_theme: null,
         auto_update_ai_backends: true,
         jean_mcp_enabled: false,
         jean_mcp_max_depth: 3,
         jean_mcp_rate_limit_per_minute: 20,
+        commandcode_max_turns: 30,
         agent_browser_enabled: false,
       }
 
@@ -1658,28 +1634,6 @@ describe('preferences service', () => {
 
       clearClientZoomForTests()
     }, 15_000)
-  })
-
-  describe('AppearancePane compact chat view', () => {
-    it('shows the switch on before preferences load, matching the default', async () => {
-      const { invoke } = await import('@/lib/transport')
-      vi.mocked(invoke).mockImplementation(
-        () => new Promise(() => undefined) as Promise<never>
-      )
-
-      render(
-        createElement(
-          QueryClientProvider,
-          { client: queryClient },
-          createElement(AppearancePane)
-        )
-      )
-
-      const switchEl = await screen.findByRole('switch', {
-        name: 'Compact chat view',
-      })
-      expect(switchEl).toHaveAttribute('aria-checked', 'true')
-    })
   })
 
   describe('AppearancePane finished session animation', () => {

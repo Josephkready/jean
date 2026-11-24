@@ -12,7 +12,6 @@ import {
   firstAvailableBackend,
   formatAutoFixRelativeTime,
   hasAutoFixSettingsChanges,
-  MR_ROBOT_SETTINGS_BADGE,
   normalizeAutoFixProvider,
   resolveAutoFixBackend,
 } from './AutoFixPane'
@@ -280,10 +279,6 @@ describe('AutoFixPane', () => {
     )
   })
 
-  it('labels Mr. Robot settings as beta', () => {
-    expect(MR_ROBOT_SETTINGS_BADGE).toBe('Beta')
-  })
-
   it('renders with project auto-fix settings', () => {
     renderPane()
 
@@ -434,14 +429,14 @@ describe('AutoFixPane', () => {
       screen.getByRole('button', { name: 'Choose planning backend and model' })
     )
     await user.click(await screen.findByRole('tab', { name: 'Codex' }))
-    await user.click(await screen.findByText('GPT 5.4'))
+    await user.click(await screen.findByText('GPT 5.5'))
 
     expect(
       screen.getByRole('button', { name: 'Choose planning backend and model' })
     ).toHaveTextContent('Codex')
     expect(
       screen.getByRole('button', { name: 'Choose planning backend and model' })
-    ).toHaveTextContent('GPT 5.4')
+    ).toHaveTextContent('GPT 5.5')
   })
 
   it('selects a yolo backend and model from the combined picker', async () => {

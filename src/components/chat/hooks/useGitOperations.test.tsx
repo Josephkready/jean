@@ -90,7 +90,8 @@ const project: Project = {
 
 function renderGitOperations(
   preferenceOverrides = {},
-  worktreeOverrides: Partial<Worktree> = {}
+  worktreeOverrides: Partial<Worktree> = {},
+  thinkingLevel: ThinkingLevel = 'off'
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -123,8 +124,9 @@ function renderGitOperations(
         setSessionBackend: { mutate: vi.fn() },
         setSessionProvider: { mutate: vi.fn() },
         sendMessage,
-        selectedThinkingLevelRef: ref('off' as ThinkingLevel),
+        selectedThinkingLevelRef: ref(thinkingLevel),
         selectedEffortLevelRef: ref('medium' as EffortLevel),
+        cliVersion: '2.5.0',
         mcpServersDataRef: ref([] as McpServerInfo[]),
         enabledMcpServersRef: ref([]),
       }),
@@ -189,11 +191,7 @@ describe('useGitOperations conflict resolution', () => {
     )
     expect(
       queryClient
-        .getQueryData<{ sessions: Session[] }>([
-          'chat',
-          'sessions',
-          'wt-1',
-        ])
+        .getQueryData<{ sessions: Session[] }>(['chat', 'sessions', 'wt-1'])
         ?.sessions.map(session => session.id)
     ).toContain('conflict-session')
     expect(sendMessage.mutate).toHaveBeenCalledWith(
@@ -213,6 +211,45 @@ describe('useGitOperations conflict resolution', () => {
       'I have merge conflicts that need to be resolved.'
     )
     expect(sentArgs?.message).toContain('Resolve and finish.')
+  })
+
+  it('sends effort, not the session thinking level, for Claude effort models', async () => {
+    const { result, sendMessage } = renderGitOperations(
+      {
+        magic_prompt_backends: { resolve_conflicts_backend: 'claude' },
+        magic_prompt_models: { resolve_conflicts_model: 'claude-opus-5-5' },
+      },
+      {},
+      'ultrathink'
+    )
+
+    await act(async () => {
+      await result.current.handleResolveConflicts()
+    })
+
+    const sentArgs = sendMessage.mutate.mock.calls[0]?.[0]
+    expect(sentArgs?.model).toBe('claude-opus-5-5')
+    expect(sentArgs?.thinkingLevel).toBeUndefined()
+    expect(sentArgs?.effortLevel).toBe('medium')
+  })
+
+  it('keeps the thinking level for Claude thinking models', async () => {
+    const { result, sendMessage } = renderGitOperations(
+      {
+        magic_prompt_backends: { resolve_conflicts_backend: 'claude' },
+        magic_prompt_models: { resolve_conflicts_model: 'claude-sonnet-4-6' },
+      },
+      {},
+      'ultrathink'
+    )
+
+    await act(async () => {
+      await result.current.handleResolveConflicts()
+    })
+
+    const sentArgs = sendMessage.mutate.mock.calls[0]?.[0]
+    expect(sentArgs?.thinkingLevel).toBe('ultrathink')
+    expect(sentArgs?.effortLevel).toBeUndefined()
   })
 
   it('opens an already-linked PR instead of creating a new one', async () => {
@@ -311,7 +348,7 @@ describe('useGitOperations conflict resolution', () => {
 
     expect(mocks.invoke).toHaveBeenCalledWith(
       'cancel_create_pr_with_ai_content',
-      { worktreePath: '/repo/worktree' }
+      { worktreeId: 'wt-1', worktreePath: '/repo/worktree' }
     )
     expect(mocks.toastInfo).toHaveBeenCalledWith('Cancelling PR creation...', {
       id: 'toast-1',
@@ -471,7 +508,10 @@ describe('useGitOperations conflict resolution', () => {
       base_remote: 'fork',
     }
     const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
     })
     const sendMessage = { mutate: vi.fn() }
     const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -500,6 +540,7 @@ describe('useGitOperations conflict resolution', () => {
           sendMessage,
           selectedThinkingLevelRef: ref('off' as ThinkingLevel),
           selectedEffortLevelRef: ref('medium' as EffortLevel),
+          cliVersion: '2.5.0',
           mcpServersDataRef: ref([] as McpServerInfo[]),
           enabledMcpServersRef: ref([]),
         }),
@@ -542,7 +583,7 @@ describe('useGitOperations conflict resolution', () => {
             worktreeId: 'wt-1',
             worktreePath: '/repo/worktree',
             sessionId: 'review-session',
-            source: 'ai',
+            source: 'coderabbit-cli',
             status: 'running',
             createdAt: 1,
             updatedAt: 1,
@@ -556,7 +597,7 @@ describe('useGitOperations conflict resolution', () => {
           worktreeId: 'wt-1',
           worktreePath: '/repo/worktree',
           sessionId: 'review-session',
-          source: 'ai',
+          source: 'coderabbit-cli',
           status: 'completed',
           findingCount: 2,
           createdAt: 1,
@@ -589,7 +630,7 @@ describe('useGitOperations conflict resolution', () => {
     })
 
     await act(async () => {
-      await result.current.handleReview()
+      await result.current.handleCodeRabbitReview()
     })
 
     expect(mocks.listen).toHaveBeenCalledWith(
@@ -598,9 +639,11 @@ describe('useGitOperations conflict resolution', () => {
     )
     expect(mocks.invoke).toHaveBeenCalledWith('get_review_job', {
       jobId: 'job-1',
+      worktreeId: 'wt-1',
+      worktreePath: '/repo/worktree',
     })
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      'Review done on Project/feature (2 findings)',
+      'CodeRabbit CLI review done on Project/feature (2 findings)',
       expect.objectContaining({
         action: expect.objectContaining({ onClick: expect.any(Function) }),
       })
@@ -630,7 +673,7 @@ describe('useGitOperations conflict resolution', () => {
       worktreePath: '/repo/worktree',
     })
     expect(mocks.toastLoading).toHaveBeenLastCalledWith(
-      'Review running for Project/feature...',
+      'CodeRabbit CLI review running for Project/feature...',
       expect.objectContaining({
         cancel: expect.objectContaining({ label: 'Cancel' }),
       })
@@ -648,7 +691,7 @@ describe('useGitOperations conflict resolution', () => {
             worktreeId: 'wt-1',
             worktreePath: '/repo/worktree',
             sessionId: 'review-session',
-            source: 'ai',
+            source: 'coderabbit-cli',
             status: 'running',
             createdAt: 1,
             updatedAt: 1,
@@ -662,7 +705,7 @@ describe('useGitOperations conflict resolution', () => {
           worktreeId: 'wt-1',
           worktreePath: '/repo/worktree',
           sessionId: 'review-session',
-          source: 'ai',
+          source: 'coderabbit-cli',
           status: 'running',
           createdAt: 1,
           updatedAt: 1,
@@ -674,7 +717,7 @@ describe('useGitOperations conflict resolution', () => {
     const { result } = renderGitOperations()
 
     await act(async () => {
-      await result.current.handleReview()
+      await result.current.handleCodeRabbitReview()
     })
 
     expect(mocks.toastDismiss).not.toHaveBeenCalled()
@@ -687,111 +730,59 @@ describe('useGitOperations conflict resolution', () => {
     vi.useRealTimers()
   })
 
-  it('passes the code review magic prompt backend to review jobs', async () => {
+  it('starts Jean review as a chat prompt in a new Review session', async () => {
     mocks.invoke.mockImplementation((command: string) => {
-      if (command === 'start_review_job') {
+      if (command === 'create_session') {
         return Promise.resolve({
-          job: {
-            id: 'job-1',
-            reviewRunId: 'run-1',
-            worktreeId: 'wt-1',
-            worktreePath: '/repo/worktree',
-            sessionId: 'review-session',
-            source: 'ai',
-            status: 'running',
-            createdAt: 1,
-            updatedAt: 1,
-          },
-        })
-      }
-      if (command === 'get_review_job') {
-        return Promise.resolve({
-          id: 'job-1',
-          reviewRunId: 'run-1',
-          worktreeId: 'wt-1',
-          worktreePath: '/repo/worktree',
-          sessionId: 'review-session',
-          source: 'ai',
-          status: 'running',
-          createdAt: 1,
-          updatedAt: 1,
-        })
-      }
-      return Promise.resolve(undefined)
-    })
-
-    const { result } = renderGitOperations()
-
-    await act(async () => {
-      await result.current.handleReview()
-    })
-
-    expect(mocks.invoke).toHaveBeenCalledWith(
-      'start_review_job',
-      expect.objectContaining({
-        backend: 'claude',
-      })
-    )
-  })
-
-  it('starts one review job for each configured backend and model', async () => {
-    let jobIndex = 0
-    mocks.invoke.mockImplementation((command: string) => {
-      if (command === 'start_review_job') {
-        jobIndex += 1
-        return Promise.resolve({
-          job: {
-            id: `job-${jobIndex}`,
-            reviewRunId: `run-${jobIndex}`,
-            worktreeId: 'wt-1',
-            worktreePath: '/repo/worktree',
-            sessionId: `review-session-${jobIndex}`,
-            source: 'ai',
-            status: 'running',
-            createdAt: 1,
-            updatedAt: 1,
-          },
-        })
-      }
-      if (command === 'get_review_job') return Promise.resolve(null)
-      return Promise.resolve(undefined)
-    })
-
-    const { result } = renderGitOperations({
-      magic_code_review_configs: [
-        {
-          backend: 'codex',
-          model: 'gpt-5.6-sol',
-          reasoning_effort: 'low',
-        },
-        {
+          id: 'review-session',
+          name: 'Review',
+          order: 1,
+          created_at: 1,
+          updated_at: 1,
+          messages: [],
           backend: 'claude',
-          model: 'claude-opus-4-8[1m]',
-          reasoning_effort: 'high',
-        },
-      ],
+        } satisfies Session)
+      }
+      return Promise.resolve(undefined)
     })
+
+    const { result } = renderGitOperations(
+      {
+        magic_code_review_configs: [
+          { backend: 'codex', model: 'gpt-5.6-sol', reasoning_effort: 'low' },
+          { backend: 'claude', model: 'claude-opus-4-8[1m]' },
+        ],
+      },
+      { base_branch: 'next', base_remote: 'upstream' }
+    )
 
     await act(async () => {
       await result.current.handleReview()
     })
 
-    expect(mocks.invoke).toHaveBeenCalledWith(
+    expect(mocks.invoke).toHaveBeenCalledWith('create_session', {
+      worktreeId: 'wt-1',
+      worktreePath: '/repo/worktree',
+      name: 'Review',
+    })
+    expect(mocks.invoke).not.toHaveBeenCalledWith(
       'start_review_job',
-      expect.objectContaining({
-        backend: 'codex',
-        model: 'gpt-5.6-sol',
-        reasoningEffort: 'low',
-      })
+      expect.anything()
     )
-    expect(mocks.invoke).toHaveBeenCalledWith(
-      'start_review_job',
-      expect.objectContaining({
-        backend: 'claude',
-        model: 'claude-opus-4-8[1m]',
-        reasoningEffort: 'high',
-        sessionId: 'review-session-1',
-      })
+    const queued = mocks.invoke.mock.calls.find(
+      ([command]) => command === 'start_background_investigation'
+    )?.[1] as Record<string, unknown> | undefined
+    expect(queued).toMatchObject({
+      sessionId: 'review-session',
+      backend: 'codex',
+      model: 'gpt-5.6-sol',
+      effortLevel: 'low',
+      executionMode: 'plan',
+    })
+    expect(queued?.message).toContain('`upstream/next`')
+    expect(queued?.message).not.toContain('{base_branch}')
+    expect(useChatStore.getState().activeSessionIds['wt-1']).toBe(
+      'review-session'
     )
   })
 })

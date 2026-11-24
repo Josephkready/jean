@@ -1,6 +1,5 @@
 import { toast } from 'sonner'
 import {
-  Archive,
   Copy,
   Pencil,
   Play,
@@ -26,7 +25,6 @@ interface SessionContextMenuItemsProps {
   onToggleLabel: () => void
   onOpenInNativeClient?: () => void
   onReconnect?: () => void
-  onArchive: () => void
   onDelete: () => void
 }
 
@@ -43,7 +41,6 @@ export function SessionContextMenuItems({
   onToggleLabel,
   onOpenInNativeClient,
   onReconnect,
-  onArchive,
   onDelete,
 }: SessionContextMenuItemsProps) {
   return (
@@ -98,10 +95,6 @@ export function SessionContextMenuItems({
         Copy Session Info
       </ContextMenuItem>
       <ContextMenuSeparator />
-      <ContextMenuItem onSelect={onArchive}>
-        <Archive className="mr-2 h-4 w-4" />
-        Archive Session
-      </ContextMenuItem>
       <ContextMenuItem variant="destructive" onSelect={onDelete}>
         <Trash2 className="mr-2 h-4 w-4" />
         Delete Session

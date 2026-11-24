@@ -9,7 +9,7 @@ import { useChatStore } from '@/store/chat-store'
 import { isPanelTerminal, useTerminalStore } from '@/store/terminal-store'
 import { useBrowserStore } from '@/store/browser-store'
 import { projectsQueryKeys } from '@/services/projects'
-import { chatQueryKeys } from '@/services/chat'
+import { chatQueryKeys, restoreReturnedQueuedMessage } from '@/services/chat'
 import { MCP_SERVERS_KEY } from '@/services/mcp'
 import { claudeCliQueryKeys } from '@/services/claude-cli'
 import type {
@@ -40,11 +40,6 @@ import {
   type KeybindingsMap,
 } from '@/types/keybindings'
 import { installWindowKeyboardFocusRestore } from '@/lib/restore-keyboard-focus'
-import {
-  stripShortcutModifier,
-  type CloseSessionOrWorktreeDetail,
-} from '@/lib/confirm-bypass'
-import type { CloseConfirmBypassModifier } from '@/types/preferences'
 import { useIsMobile } from '@/hooks/use-mobile'
 
 const PLAN_DIALOG_APPROVAL_ACTIONS = new Set<KeybindingAction>([
@@ -182,34 +177,9 @@ export function findKeybindingAction(
 }
 
 /**
- * Resolve a shortcut to an action, honoring the close-confirmation bypass
- * modifier. The held modifier serializes into a different shortcut string
- * (e.g. `mod+shift+w` vs `mod+w`), so when the raw string matches nothing we
- * strip the configured modifier and retry — but accept the retry ONLY for the
- * close action, or a held modifier could shadow unrelated bindings.
- */
-export function resolveShortcutWithBypass(
-  shortcut: string,
-  keybindings: KeybindingsMap,
-  bypassModifier: CloseConfirmBypassModifier | undefined
-): { matchedAction: KeybindingAction | null; bypassConfirm: boolean } {
-  const direct = findKeybindingAction(shortcut, keybindings)
-  if (direct) return { matchedAction: direct, bypassConfirm: false }
-
-  const stripped = stripShortcutModifier(shortcut, bypassModifier)
-  const candidate = stripped
-    ? findKeybindingAction(stripped, keybindings)
-    : null
-  if (candidate === 'close_session_or_worktree') {
-    return { matchedAction: candidate, bypassConfirm: true }
-  }
-  return { matchedAction: null, bypassConfirm: false }
-}
-
-/**
  * The Agents page is open (section selected and Agents on for a server, the
- * same rule as useShowAgents). It has no closable session or worktree, so
- * the close shortcut must not reach the project close handlers.
+ * same rule as useShowAgents). It has one fixed session and no worktree, so
+ * the new-session and close shortcuts must not reach the project handlers.
  */
 export function isAgentsViewActive(queryClient: QueryClient): boolean {
   if (useUIStore.getState().railSection !== 'agents') return false
@@ -248,6 +218,8 @@ const KEYBINDING_ACTIONS_ALLOWING_REPEAT = new Set<KeybindingAction>([
   'scroll_chat_down_small',
   'next_session',
   'previous_session',
+  'next_recent_session',
+  'previous_recent_session',
 ])
 
 /** Whether OS key-repeat should re-execute this keybinding action. */
@@ -333,6 +305,12 @@ export function applyCacheInvalidationKeys(
         queryClient.invalidateQueries({
           queryKey: ['saved-contexts'],
         })
+        break
+      case 'secret-request':
+        queryClient.invalidateQueries({ queryKey: ['secret-request'] })
+        break
+      case 'diff-viewed':
+        queryClient.invalidateQueries({ queryKey: ['diff-viewed'] })
         break
     }
   }
@@ -618,14 +596,10 @@ export function toggleBrowserKeybinding(): void {
 function executeKeybindingAction(
   action: KeybindingAction,
   commandContext: ReturnType<typeof useCommandContext>,
-  queryClient: QueryClient,
-  bypassConfirm = false
+  queryClient: QueryClient
 ) {
   // Canvas-only actions: blocked when the session chat modal is open
-  const CANVAS_ONLY_ACTIONS = new Set<KeybindingAction>([
-    'restore_last_archived',
-    'focus_canvas_search',
-  ])
+  const CANVAS_ONLY_ACTIONS = new Set<KeybindingAction>(['focus_canvas_search'])
   if (
     CANVAS_ONLY_ACTIONS.has(action) &&
     useUIStore.getState().sessionChatModalOpen
@@ -703,9 +677,12 @@ function executeKeybindingAction(
             useProjectsStore.getState().selectedWorktreeId)
 
       // Resolve path: chat store first, then fall back to worktrees query cache (canvas)
+      // The path must belong to targetWorktreeId: both go to get_run_scripts.
       let targetWorktreePath = targetWorktreeId
-        ? (chatStore.activeWorktreePath ??
-          chatStore.worktreePaths[targetWorktreeId])
+        ? (chatStore.worktreePaths[targetWorktreeId] ??
+          (targetWorktreeId === chatStore.activeWorktreeId
+            ? chatStore.activeWorktreePath
+            : null))
         : null
 
       if (!targetWorktreePath && targetWorktreeId) {
@@ -732,10 +709,11 @@ function executeKeybindingAction(
         let runScripts: string[] = []
         try {
           runScripts = await queryClient.fetchQuery<string[]>({
-            queryKey: ['run-scripts', resolvedWorktreePath],
+            queryKey: ['run-scripts', targetWorktreeId, resolvedWorktreePath],
             queryFn: () =>
               invoke<string[]>('get_run_scripts', {
                 worktreePath: resolvedWorktreePath,
+                worktreeId: targetWorktreeId,
               }),
             staleTime: 0,
           })
@@ -837,17 +815,20 @@ function executeKeybindingAction(
         new CustomEvent('switch-session', { detail: { direction: 'previous' } })
       )
       break
+    case 'next_recent_session':
+    case 'previous_recent_session':
+      window.dispatchEvent(
+        new CustomEvent('open-adjacent-recent-session', {
+          detail: { direction: action === 'next_recent_session' ? 1 : -1 },
+        })
+      )
+      break
     case 'close_session_or_worktree': {
       // When terminal is focused, CMD+W should close the active terminal tab.
       if (closeActiveTerminalTabForShortcut()) break
       // Default: close session/worktree
       logger.debug('Keybinding: close_session_or_worktree')
-      window.dispatchEvent(
-        new CustomEvent<CloseSessionOrWorktreeDetail>(
-          'close-session-or-worktree',
-          { detail: { bypassConfirm } }
-        )
-      )
+      window.dispatchEvent(new CustomEvent('close-session-or-worktree'))
       break
     }
     case 'new_worktree':
@@ -874,6 +855,10 @@ function executeKeybindingAction(
       window.dispatchEvent(new CustomEvent('approve-plan-yolo'))
       break
     }
+    case 'deny_permission':
+      logger.debug('Keybinding: deny_permission')
+      window.dispatchEvent(new CustomEvent('deny-permission'))
+      break
     case 'approve_plan_clear_context': {
       logger.debug('Keybinding: approve_plan_clear_context')
       const planDialogOpenClear = useUIStore.getState().planDialogOpen
@@ -902,10 +887,6 @@ function executeKeybindingAction(
       window.dispatchEvent(new CustomEvent('approve-plan-worktree-yolo'))
       break
     }
-    case 'restore_last_archived':
-      logger.debug('Keybinding: restore_last_archived')
-      window.dispatchEvent(new CustomEvent('restore-last-archived'))
-      break
     case 'focus_canvas_search':
       logger.debug('Keybinding: focus_canvas_search')
       window.dispatchEvent(new CustomEvent('focus-canvas-search'))
@@ -1036,11 +1017,6 @@ export function useMainWindowEventListeners() {
   // Keep keybindings in a ref so the event handler always has the latest
   const keybindingsRef = useRef<KeybindingsMap>(DEFAULT_KEYBINDINGS)
 
-  // Modifier that, held with the close shortcut, skips the confirmation dialog.
-  const bypassModifierRef = useRef<CloseConfirmBypassModifier | undefined>(
-    undefined
-  )
-
   // Update ref when preferences change
   useEffect(() => {
     keybindingsRef.current = {
@@ -1048,10 +1024,6 @@ export function useMainWindowEventListeners() {
       ...(preferences?.keybindings ?? {}),
     }
   }, [preferences?.keybindings])
-
-  useEffect(() => {
-    bypassModifierRef.current = preferences?.close_confirm_bypass_modifier
-  }, [preferences?.close_confirm_bypass_modifier])
 
   // After alt-tab / OS window reactivation, WebViews often leave the document
   // without keyboard focus until a click. Restore the last focused element
@@ -1089,11 +1061,7 @@ export function useMainWindowEventListeners() {
       if (isPlainSessionTerminalFocused()) return
 
       const keybindings = keybindingsRef.current
-      const { matchedAction, bypassConfirm } = resolveShortcutWithBypass(
-        shortcut,
-        keybindings,
-        bypassModifierRef.current
-      )
+      const matchedAction = findKeybindingAction(shortcut, keybindings)
 
       if (
         matchedAction &&
@@ -1127,7 +1095,9 @@ export function useMainWindowEventListeners() {
       }
 
       if (
-        matchedAction === 'close_session_or_worktree' &&
+        (matchedAction === 'close_session_or_worktree' ||
+          matchedAction === 'new_session' ||
+          matchedAction === 'open_new_session_modal') &&
         isAgentsViewActive(queryClient)
       ) {
         e.preventDefault()
@@ -1194,11 +1164,7 @@ export function useMainWindowEventListeners() {
             addTerminalTabForShortcut()
             return
           }
-          // Match the resolved action, not the raw shortcut string: with the
-          // bypass modifier held the string is e.g. `mod+shift+w`, which the
-          // strip-and-retry above already mapped to this action. Comparing the
-          // raw string would miss it and the `else` below would swallow the key.
-          if (matchedAction === 'close_session_or_worktree') {
+          if (shortcut === kb.close_session_or_worktree) {
             e.preventDefault()
             e.stopPropagation()
             closeActiveTerminalTabForShortcut()
@@ -1294,6 +1260,15 @@ export function useMainWindowEventListeners() {
         ) {
           return
         }
+        // Recent navigation applies only while the Recent list is visible.
+        // Elsewhere the keys keep their normal behavior (text selection).
+        if (
+          (action === 'next_recent_session' ||
+            action === 'previous_recent_session') &&
+          !isRecentSessionsShortcutActive()
+        ) {
+          return
+        }
         // Scope small-scroll arrow keys to ChatWindow context
         // so canvas/list arrow navigation still works elsewhere
         if (
@@ -1309,12 +1284,7 @@ export function useMainWindowEventListeners() {
         }
         e.preventDefault()
         e.stopPropagation()
-        executeKeybindingAction(
-          action,
-          commandContextRef.current,
-          queryClient,
-          bypassConfirm
-        )
+        executeKeybindingAction(action, commandContextRef.current, queryClient)
         return
       }
     }
@@ -1578,6 +1548,28 @@ export function useMainWindowEventListeners() {
             }))
           }
         ),
+
+        // The backend queue drain could not run a queued prompt. It is not in
+        // history, so it comes back to the composer.
+        listen<{ sessionId: string; message: QueuedMessage }>(
+          'queue:returned',
+          event => {
+            const { sessionId, message } = event.payload
+            if (restoreReturnedQueuedMessage(sessionId, message)) {
+              toast.info('Queued message returned to input')
+            }
+          }
+        ),
+
+        // A provider rejection (usage limit, auth, API error) pauses the
+        // queue instead of draining it into the same failure. Cleared as soon
+        // as a turn produces output.
+        listen<{ sessionId: string; reason: string }>('queue:held', event => {
+          useChatStore.getState().setQueueHeld(event.payload.sessionId, true)
+        }),
+        listen<{ sessionId: string }>('queue:released', event => {
+          useChatStore.getState().setQueueHeld(event.payload.sessionId, false)
+        }),
 
         // Real-time cache sync between native + web clients.
         // Debounce: collect keys over a 250ms window, then flush once.

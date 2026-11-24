@@ -256,14 +256,7 @@ pub async fn remove_server_project(app: AppHandle, project_id: String) -> Result
         }
         Some(_) => {}
     }
-    let worktree_ids: Vec<String> = data
-        .worktrees_for_project(&project_id)
-        .into_iter()
-        .map(|w| w.id.clone())
-        .collect();
-    for worktree_id in worktree_ids {
-        super::close_base_session_clean(app.clone(), worktree_id).await?;
-    }
+    // remove_project drops the base session with the project.
     super::remove_project(app.clone(), project_id.clone()).await?;
     // Delete only Jean's own scratch folder, never any other path.
     if let Ok(scratch) = server_scratch_path(&app, &project_id) {
@@ -612,6 +605,7 @@ mod tests {
             user: user.map(str::to_string),
             port,
             identity_file: None,
+            forward_agent: false,
             jean_connection_id: None,
             local: false,
         }
@@ -637,6 +631,12 @@ mod tests {
             keyed.ssh_command(),
             "ssh -o BatchMode=yes -o IdentitiesOnly=yes -i '/home/me/.ssh/id work' root@10.0.0.5"
         );
+        let mut forwarding = server(Some("deploy"), Some(2222));
+        forwarding.forward_agent = true;
+        assert_eq!(
+            forwarding.ssh_command(),
+            "ssh -o BatchMode=yes -A -p 2222 deploy@10.0.0.5"
+        );
     }
 
     #[test]
@@ -656,6 +656,7 @@ mod tests {
             user: Some("  ".to_string()),
             port: None,
             identity_file: Some(" ".to_string()),
+            forward_agent: false,
             jean_connection_id: Some(" ".to_string()),
             local: false,
         })

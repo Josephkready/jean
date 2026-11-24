@@ -145,8 +145,8 @@ export function ContextsTab({
             No saved contexts or sessions available.
             <br />
             <span className="text-sm">
-              Use &quot;Save Context&quot; for a summary, or inject another
-              session as an MCP pointer from this tab.
+              Sessions with messages appear here to inject as an MCP pointer or
+              summarize into a saved context.
             </span>
           </div>
         ) : (
@@ -188,7 +188,7 @@ export function ContextsTab({
                 <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/30 mt-2">
                   Sessions
                 </div>
-                <div className="px-3 pb-1 text-[11px] text-muted-foreground">
+                <div className="px-3 pb-1 text-2xs text-muted-foreground">
                   Click to inject an MCP pointer (agent fetches messages on
                   demand). File icon generates a full AI summary instead.
                 </div>

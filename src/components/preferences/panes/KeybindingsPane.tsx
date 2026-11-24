@@ -3,7 +3,6 @@ import { Label } from '@/components/ui/label'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import { cn } from '@/lib/utils'
 import { KeyRecorder } from '../KeyRecorder'
-import { SettingsSection } from '../SettingsSection'
 import {
   KEYBINDING_DEFINITIONS,
   DEFAULT_KEYBINDINGS,
@@ -38,18 +37,22 @@ const KeybindingRow: React.FC<{
     id={rowId}
     data-settings-target={definition.action}
     className={cn(
-      'grid gap-2 rounded-md px-2 py-1.5 transition-colors sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center',
+      'grid gap-x-3 gap-y-1 rounded-md px-2 py-1 transition-colors sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center',
       highlighted ? 'bg-accent/60 ring-1 ring-inset ring-border' : ''
     )}
   >
-    <div className="min-w-0 space-y-1">
-      <div className="flex flex-wrap items-center gap-2">
-        <Label className="text-sm text-foreground">{definition.label}</Label>
-        <span className="rounded-sm bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="min-w-0 space-y-0.5">
+      <div className="text-sm leading-5 text-foreground">
+        <Label className="inline text-sm text-foreground">
+          {definition.label}
+        </Label>
+        <span className="ml-1.5 inline-block rounded-sm bg-muted px-1 align-[1px] text-2xs font-medium uppercase leading-4 tracking-wide text-muted-foreground">
           {categoryTitles[definition.category] ?? definition.category}
         </span>
       </div>
-      <p className="text-xs text-muted-foreground">{definition.description}</p>
+      <p className="text-xs leading-4 text-muted-foreground">
+        {definition.description}
+      </p>
     </div>
     <KeyRecorder
       value={value}
@@ -138,6 +141,7 @@ export const KeybindingsPane: React.FC<KeybindingsPaneProps> = ({
     }
   }, [])
 
+  // react-doctor-disable-next-line react-doctor/no-derived-state-effect -- scrolls to a search target and shows a highlight that a timer clears
   useEffect(() => {
     if (!searchTargetAction) return
 
@@ -145,6 +149,7 @@ export const KeybindingsPane: React.FC<KeybindingsPaneProps> = ({
     const target = document.getElementById(targetId)
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 
+    // react-doctor-disable-next-line react-doctor/no-derived-state -- transient highlight that a timer clears; not derivable from searchTargetAction alone
     setHighlightedAction(searchTargetAction)
     if (highlightTimeoutRef.current) {
       clearTimeout(highlightTimeoutRef.current)
@@ -159,11 +164,8 @@ export const KeybindingsPane: React.FC<KeybindingsPaneProps> = ({
 
   return (
     <div className="space-y-4">
-      <SettingsSection
-        title="Keybindings"
-        anchorId="pref-keybindings-section-keybindings"
-      >
-        <div className="grid gap-x-4 gap-y-0.5 xl:grid-cols-2">
+      <div id="pref-keybindings-section-keybindings" className="space-y-4">
+        <div className="grid gap-x-6 xl:grid-cols-2">
           {sortedBindings.map(def => (
             <KeybindingRow
               key={def.action}
@@ -179,7 +181,7 @@ export const KeybindingsPane: React.FC<KeybindingsPaneProps> = ({
             />
           ))}
         </div>
-      </SettingsSection>
+      </div>
     </div>
   )
 }

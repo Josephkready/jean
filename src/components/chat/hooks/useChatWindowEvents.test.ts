@@ -64,6 +64,7 @@ describe('useChatWindowEvents worktree approval shortcuts', () => {
       activeWorktreeId: 'worktree-1',
       activeWorktreePath: '/tmp/worktree-1',
       isModal: false,
+      allowPlanMode: true,
       session: null,
       gitStatus: null,
       setDiffRequest: vi.fn(),
@@ -76,7 +77,6 @@ describe('useChatWindowEvents worktree approval shortcuts', () => {
       patchPreferences: {
         mutate: vi.fn(),
       },
-      handleSaveContext: vi.fn(),
       handleLoadContext: vi.fn(),
       runScripts: [],
       hasPendingPlanApproval: true,
@@ -233,6 +233,7 @@ describe('useChatWindowEvents worktree approval shortcuts', () => {
       expect(invoke).toHaveBeenCalledWith('save_pasted_text', {
         content: 'Selected DOM element from embedded browser',
         filename: 'dom-button-save.txt',
+        sessionId: 'session-1',
       })
     })
     expect(useChatStore.getState().pendingTextFiles['session-1']).toEqual([

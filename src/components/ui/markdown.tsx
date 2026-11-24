@@ -1,5 +1,4 @@
 import {
-  lazy,
   Suspense,
   memo,
   useState,
@@ -20,6 +19,7 @@ import rehypeRaw from 'rehype-raw'
 import remarkGfm from 'remark-gfm'
 import remend from 'remend'
 import { remarkFixInterruptedLists } from '@/lib/remark-fix-interrupted-lists'
+import { remarkLinkInlineCodeUrls } from '@/lib/remark-link-inline-code-urls'
 import { Copy, Check, ListChecks, Thumbtack } from '@/components/icons/reicon'
 import { MarkdownIcon } from '@/components/icons/MarkdownIcon'
 import { toast } from 'sonner'
@@ -38,11 +38,12 @@ import { cn } from '@/lib/utils'
 import { useChatStore } from '@/store/chat-store'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { parseServerResourceKey } from '@/lib/server-resource'
+import { lazyWithPreload } from '@/lib/lazy-preload'
 import { tableToMarkdown, setTableRowInPrompt } from '@/lib/table-rows-prompt'
 import { useImageSrc } from './use-image-src'
 import { ScreenshotGallery, parseScreenshotPaths } from './screenshot-gallery'
 
-const MermaidBlock = lazy(() =>
+export const MermaidBlock = lazyWithPreload(() =>
   import('./mermaid-block').then(module => ({ default: module.MermaidBlock }))
 )
 const MarkdownStreamingContext = createContext(false)
@@ -130,11 +131,15 @@ function openLocalFileLink(href: string | undefined): boolean {
   return openLocalFile(path)
 }
 
+function openFilePath(path: string) {
+  if (!openLocalFile(path)) toast.error('Cannot resolve file path')
+}
+
 function handleFilePathClick(event: React.MouseEvent<HTMLElement>) {
   // Keep drag-to-select usable: only a plain click opens the file.
   if (window.getSelection()?.toString().trim()) return
   const path = event.currentTarget.dataset.filePath
-  if (path && !openLocalFile(path)) toast.error('Cannot resolve file path')
+  if (path) openFilePath(path)
 }
 
 function CodeBlock({ children }: { children: ReactNode }) {
@@ -225,12 +230,36 @@ function tableToTsv(data: string[][]): string {
   return data.map(row => row.join('\t')).join('\n')
 }
 
-function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+function MarkdownImage({
+  src,
+  alt,
+  width,
+  height,
+}: {
+  src?: string
+  alt?: string
+  width?: string | number
+  height?: string | number
+}) {
   const { sessionId } = useContext(MarkdownTableContext)
   const serverId = sessionId
     ? parseServerResourceKey(sessionId)?.serverId
     : undefined
   const imageSrc = useImageSrc(src, serverId)
+
+  // Raw HTML images with an explicit size are inline icons (for example the
+  // CodeRabbit severity and <summary> icons). Keep them on the text line.
+  if (width || height) {
+    return (
+      <img
+        src={imageSrc}
+        alt={alt || ''}
+        width={width}
+        height={height}
+        className="inline-block align-text-bottom max-w-full"
+      />
+    )
+  }
 
   return (
     <img
@@ -343,7 +372,7 @@ function PromptRow({ row, rowIndex, inPrompt, note, onSave }: PromptRowProps) {
           ref: rowRef,
           className: cn(
             row.props.className,
-            'cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60',
+            'cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50',
             inPrompt
               ? 'bg-primary/10 shadow-[inset_3px_0_0_var(--primary)] hover:bg-primary/15'
               : 'hover:bg-muted/50 focus-visible:bg-muted/50'
@@ -471,7 +500,7 @@ function ChecklistAwareThead({ children }: { children?: ReactNode }) {
         cloneRowWithLeadingCells(row, [CHECKLIST_THEAD_LEADING])
       )
     : children
-  return <thead className="bg-muted/50">{augmented}</thead>
+  return <thead className="bg-muted/30">{augmented}</thead>
 }
 
 function ChecklistAwareTbody({ children }: { children?: ReactNode }) {
@@ -690,10 +719,17 @@ function TableBlock({
 
   return (
     <div
-      className="my-5 scroll-mt-12 rounded-md"
+      className="group/table my-5 scroll-mt-12 rounded-md"
       data-table-key={tableKey ?? undefined}
     >
-      <div className="mb-2 flex items-center justify-end gap-0.5">
+      <div
+        className={cn(
+          'mb-2 flex items-center justify-end gap-0.5',
+          // Touch screens have no hover, so keep the toolbar visible there.
+          !isMobile &&
+            'opacity-0 transition-opacity group-focus-within/table:opacity-100 group-hover/table:opacity-100'
+        )}
+      >
         {promptRows && (
           <span className="mr-auto text-xs text-muted-foreground">
             {isMobile ? 'Tap' : 'Click'} a row to add it to the prompt
@@ -845,7 +881,16 @@ const components: Components = {
             'underline decoration-dotted underline-offset-2 hover:text-foreground'
         )}
         data-file-path={filePath ?? undefined}
-        onClick={filePath ? handleFilePathClick : undefined}
+        {...(filePath && {
+          role: 'button',
+          tabIndex: 0,
+          onClick: handleFilePathClick,
+          onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            openFilePath(filePath)
+          },
+        })}
       >
         {children}
       </code>
@@ -952,7 +997,7 @@ const components: Components = {
   // Spread props so PromptRow can add its click handler and row classes.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   tr: ({ children, className, node, ...props }) => (
-    <tr {...props} className={cn('border-b border-border', className)}>
+    <tr {...props} className={cn('border-b border-border/20', className)}>
       {children}
     </tr>
   ),
@@ -1032,7 +1077,11 @@ const compactComponents: Components = {
 // Module-level plugin arrays keep references stable across renders.
 // remarkFixInterruptedLists runs after GFM so task lists are already parsed,
 // then nests orphan sibling ULs under the preceding OL item (issue #200).
-const remarkPlugins = [remarkGfm, remarkFixInterruptedLists]
+const remarkPlugins = [
+  remarkGfm,
+  remarkFixInterruptedLists,
+  remarkLinkInlineCodeUrls,
+]
 // rehype-raw re-parses the full accumulated text as HTML on every render —
 // the dominant per-frame cost while streaming — so streaming mode skips it
 // and only completed (non-streaming) renders apply it.

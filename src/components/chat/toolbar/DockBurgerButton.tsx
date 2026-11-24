@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Archive,
   BarChart3,
   Command,
   Menu,
+  Plug,
   Plus,
   Github,
   Heart,
@@ -34,11 +34,16 @@ import {
 } from '@/components/usage/usage-entries'
 
 interface DockBurgerButtonProps {
+  /** Number of enabled MCP servers; shown as a badge next to the MCP item. */
+  activeMcpCount?: number
   /** Extra classes merged onto the trigger button (e.g. responsive visibility). */
   className?: string
 }
 
-export function DockBurgerButton({ className }: DockBurgerButtonProps = {}) {
+export function DockBurgerButton({
+  activeMcpCount = 0,
+  className,
+}: DockBurgerButtonProps = {}) {
   const isMobile = useIsMobile()
   const { data: preferences } = usePreferences()
 
@@ -105,14 +110,6 @@ export function DockBurgerButton({ className }: DockBurgerButtonProps = {}) {
           Add Project
         </DropdownMenuItem>
         <DropdownMenuItem
-          onClick={() =>
-            window.dispatchEvent(new CustomEvent('command:open-archived-modal'))
-          }
-        >
-          <Archive className="mr-2 h-4 w-4" />
-          Archives
-        </DropdownMenuItem>
-        <DropdownMenuItem
           onClick={() => useUIStore.getState().setCommandPaletteOpen(true)}
         >
           <Command className="mr-2 h-4 w-4" />
@@ -123,6 +120,24 @@ export function DockBurgerButton({ className }: DockBurgerButtonProps = {}) {
             </DropdownMenuShortcut>
           )}
         </DropdownMenuItem>
+        {!isMobile && (
+          <DropdownMenuItem
+            onClick={() =>
+              useUIStore.getState().openPreferencesPane('mcp-servers')
+            }
+          >
+            <Plug
+              className={cn(
+                'mr-2 h-4 w-4',
+                activeMcpCount > 0 && 'text-success'
+              )}
+            />
+            MCP Servers
+            {activeMcpCount > 0 && (
+              <DropdownMenuShortcut>{activeMcpCount}</DropdownMenuShortcut>
+            )}
+          </DropdownMenuItem>
+        )}
         {isMobile && (
           <>
             <DropdownMenuSeparator />
@@ -135,7 +150,7 @@ export function DockBurgerButton({ className }: DockBurgerButtonProps = {}) {
             <DropdownMenuItem
               onClick={() => openExternal('https://jean.build/sponsorships/')}
             >
-              <Heart className="mr-2 h-4 w-4 text-pink-600 dark:text-pink-500" />
+              <Heart className="mr-2 h-4 w-4" />
               Sponsor Jean
             </DropdownMenuItem>
           </>

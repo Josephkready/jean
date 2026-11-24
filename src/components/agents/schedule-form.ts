@@ -4,7 +4,7 @@ import type {
   ScheduleInput,
   ScheduleKind,
 } from '@/services/agents'
-import { formatRelative } from './AgentActivity'
+import { formatRelative } from '@/lib/relative-time'
 
 export const MIN_INTERVAL_MINUTES = 5
 export const MAX_INTERVAL_MINUTES = 60 * 24 * 30
@@ -13,7 +13,6 @@ const RUN_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
 export const SCHEDULE_EVENTS: { id: ScheduleEvent; label: string }[] = [
   { id: 'session_finished', label: 'Session finished' },
   { id: 'session_failed', label: 'Session failed' },
-  { id: 'worktree_archived', label: 'Worktree archived' },
   { id: 'pr_merged', label: 'Pull request merged' },
   { id: 'approval_resolved', label: 'Approval resolved' },
 ]

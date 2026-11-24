@@ -14,6 +14,9 @@ export const AGENT_COLOR_CHOICES = [
   'yellow',
 ] as const
 
+/** Colors Jean can pick: its crowned default first, then the others. */
+export const JEAN_COLOR_CHOICES = ['jean', ...AGENT_COLOR_CHOICES] as const
+
 /** Agent by ID, or the first agent (Jean) when the ID is unknown. */
 export function findAgent(
   agents: AgentSummary[] | undefined,
@@ -85,18 +88,14 @@ export function agentSubtitle(agent: AgentSummary): string {
 
 /** Short status text for an agent row and header; null when idle. */
 export function agentStatusLabel(agent: AgentSummary): string | null {
-  if (agent.pendingApprovals > 0)
-    return `Needs approval (${agent.pendingApprovals})`
   if (agent.unreadNotifications > 0)
     return `${agent.unreadNotifications} new notification${agent.unreadNotifications === 1 ? '' : 's'}`
   if (agent.status === 'working')
     return agent.runningTasks > 0
-      ? `Working (${agent.runningTasks} task${agent.runningTasks === 1 ? '' : 's'})`
+      ? `Working (${agent.runningTasks} run${agent.runningTasks === 1 ? '' : 's'})`
       : 'Working'
   if (agent.status === 'waiting') return 'Waiting for you'
   if (agent.budgetReached) return 'Hourly limit reached'
-  if (agent.activeDelegations > 0)
-    return `Following ${agent.activeDelegations} session${agent.activeDelegations === 1 ? '' : 's'}`
   return null
 }
 

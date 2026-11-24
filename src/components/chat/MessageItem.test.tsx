@@ -108,6 +108,49 @@ describe('MessageItem', () => {
     expect(screen.queryByText('Prompt sent')).not.toBeInTheDocument()
   })
 
+  it('renders a session update as one muted line instead of a user bubble', () => {
+    render(
+      <MessageItem
+        {...baseProps}
+        message={{
+          id: 'user-update',
+          session_id: 'session-1',
+          role: 'user',
+          content: [
+            '[Jean session update]',
+            'session: child-1',
+            'worktree: wt-child',
+            'name: Fix login',
+            'status: question',
+            '---',
+            'Which provider should I use?',
+            '',
+            '[Jean session update]',
+            'session: child-2',
+            'worktree: wt-child',
+            'name: Check CI',
+            'status: done',
+            '---',
+            'CI is green.',
+            '',
+            'Use read_session_messages for a full transcript. Reply briefly; the user sees sub-session status in the side panel.',
+          ].join('\n'),
+          timestamp: 1,
+          tool_calls: [],
+        }}
+      />
+    )
+
+    expect(screen.getByTestId('session-update-line')).toHaveTextContent(
+      'Fix login asking a question, Check CI finished'
+    )
+    expect(screen.queryByText(/Jean session update/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/Which provider should I use/)
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/Reply briefly/)).not.toBeInTheDocument()
+  })
+
   it('hides prompt metadata and message actions in zen mode', () => {
     useUIStore.setState({ zenMode: true })
     render(
@@ -131,7 +174,7 @@ describe('MessageItem', () => {
     expect(screen.getByText('Keep only this prompt')).toBeVisible()
     expect(screen.queryByText(/GPT 5.6/i)).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Copy message to input' })
+      screen.queryByRole('button', { name: 'Copy prompt' })
     ).not.toBeInTheDocument()
   })
 
@@ -151,7 +194,7 @@ describe('MessageItem', () => {
 
     expect(screen.getByText('Zen response')).toBeVisible()
     expect(
-      screen.queryByRole('button', { name: 'Copy response to clipboard' })
+      screen.queryByRole('button', { name: 'Copy response' })
     ).not.toBeInTheDocument()
   })
 
@@ -598,7 +641,7 @@ describe('MessageItem', () => {
       />
     )
 
-    screen.getByRole('button', { name: 'Copy response to clipboard' }).click()
+    screen.getByRole('button', { name: 'Copy response' }).click()
 
     await waitFor(() => {
       expect(mocks.copyToClipboard).toHaveBeenCalledWith(
@@ -628,45 +671,13 @@ describe('MessageItem', () => {
       />
     )
 
-    screen.getByRole('button', { name: 'Copy response to clipboard' }).click()
+    screen.getByRole('button', { name: 'Copy response' }).click()
 
     await waitFor(() => {
       expect(mocks.copyToClipboard).toHaveBeenCalledWith(
         'First response block.\nSecond response block.'
       )
     })
-  })
-
-  it('copies steered prompts rendered in full native messages', () => {
-    const onCopyToInput = vi.fn()
-
-    render(
-      <MessageItem
-        {...baseProps}
-        onCopyToInput={onCopyToInput}
-        message={{
-          ...baseMessage,
-          id: 'assistant-steered',
-          content: '',
-          tool_calls: [],
-          content_blocks: [
-            { type: 'text', text: 'Before steer' },
-            { type: 'user_input', text: 'copy this steered prompt' },
-            { type: 'text', text: 'After steer' },
-          ],
-        }}
-      />
-    )
-
-    screen.getByRole('button', { name: 'Copy steered prompt' }).click()
-
-    expect(onCopyToInput).toHaveBeenCalledTimes(1)
-    expect(onCopyToInput).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: 'user',
-        content: 'copy this steered prompt',
-      })
-    )
   })
 
   it('constrains long user prompts so mobile viewports do not clip the left edge', () => {

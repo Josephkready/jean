@@ -109,6 +109,10 @@ pub struct UsageData {
     /// Cache creation tokens (cached for future requests)
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+    /// Cost in USD as reported by the CLI itself (Claude `total_cost_usd`,
+    /// OpenCode message/step `cost`). None when the backend reports no cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 // ============================================================================
@@ -590,7 +594,7 @@ pub struct CodexPermissionRequestEvent {
 /// OpenCode emits `permission.asked` / `permission.v2.asked` SSE events when a
 /// tool needs approval (e.g. external_directory access outside the worktree).
 /// Jean surfaces these to the frontend and replies via the OpenCode Permission API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenCodePermissionRequest {
     /// OpenCode permission request ID (used in POST /permission/{id}/reply)
     pub request_id: String,
@@ -681,7 +685,7 @@ pub struct DeniedMessageContext {
 
 /// A content block in a message - text, tool use, or thinking
 /// Used to preserve the order of content in Claude's response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
@@ -923,12 +927,11 @@ pub struct Session {
     /// Prevents re-triggering on app restart
     #[serde(default)]
     pub session_naming_completed: bool,
-    /// Unix timestamp when session was archived (None = not archived)
+    /// Unix timestamp when the session was closed (soft deleted). None = live.
+    /// The name is historical; the retention purge removes the session once this
+    /// is older than `DELETED_ITEM_RETENTION_DAYS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
-    /// Whether this session was archived by the base close operation (vs user action)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_by_base_close: Option<bool>,
     /// Unix timestamp when session was last opened/viewed by the user
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<u64>,
@@ -1061,6 +1064,78 @@ pub struct Session {
     /// Fires the stored prompt into this session after fire_at_unix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_wakeup: Option<ScheduledWakeup>,
+
+    /// The chat session that last sent work here through Jean MCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_by: Option<SessionDelegatedBy>,
+}
+
+/// Link from a session to the chat session that sent it work through Jean
+/// MCP `send_chat_message`. While `armed`, the end of this session's next run
+/// is reported back to the origin as a queued message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionDelegation {
+    pub origin_session_id: String,
+    pub origin_worktree_id: String,
+    /// Distance from the session that started the chain: 1 for a direct send.
+    pub hop: u8,
+    pub armed: bool,
+    pub created_at: u64,
+    /// End of the last armed run. Stays until a lead update carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<DelegationOutcome>,
+}
+
+/// How a delegated run ended, as reported to the lead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationStatus {
+    Done,
+    Failed,
+    Cancelled,
+    WaitingPlan,
+    Question,
+}
+
+impl DelegationStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::WaitingPlan => "waiting_plan",
+            Self::Question => "question",
+        }
+    }
+
+    /// The user still has to answer, so the run after their answer reports too.
+    pub fn needs_user(self) -> bool {
+        matches!(self, Self::WaitingPlan | Self::Question)
+    }
+}
+
+/// Recorded end of an armed run on the child's link.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationOutcome {
+    pub status: DelegationStatus,
+    /// Error line and the child's last reply, truncated.
+    pub body: String,
+    pub ended_at: u64,
+    /// When a lead update carried this outcome; `None` while one is owed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<u64>,
+}
+
+/// `Session` view of [`SessionDelegation`] for "Started by" and the lead's
+/// sub-session panel in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionDelegatedBy {
+    pub origin_session_id: String,
+    pub origin_worktree_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<DelegationOutcome>,
 }
 
 /// A ScheduleWakeup request originated from the Claude CLI tool.
@@ -1237,7 +1312,6 @@ impl Session {
             selected_permission_mode: Some("yolo".to_string()),
             session_naming_completed: false,
             archived_at: None,
-            archived_by_base_close: None,
             last_opened_at: None,
             primary_surface: None,
             terminal_command: None,
@@ -1275,6 +1349,7 @@ impl Session {
             total_runs: 0,
             loaded_run_start_index: 0,
             scheduled_wakeup: None,
+            delegated_by: None,
         }
     }
 
@@ -1385,7 +1460,7 @@ pub struct SessionIndexEntry {
     /// Message count (for badge display)
     #[serde(default)]
     pub message_count: u32,
-    /// Unix timestamp when session was archived (None = not archived)
+    /// Unix timestamp when the session was closed (soft deleted). None = live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
     /// Optional for backwards compatibility with indexes written before the
@@ -1503,6 +1578,21 @@ fn default_version() -> u32 {
 }
 
 impl SessionMetadata {
+    /// Any approval, permission, or user-input request a client shows as
+    /// "waiting" while the turn is still running. The run-state snapshot and
+    /// the session payload must agree on this, or a snapshot clears a badge
+    /// the session list just set.
+    pub fn has_pending_approval(&self) -> bool {
+        !self.pending_permission_denials.is_empty()
+            || !self.pending_codex_permission_requests.is_empty()
+            || !self.pending_opencode_permission_requests.is_empty()
+            || self.has_pending_acp_approval()
+            || !self.pending_codex_command_approval_requests.is_empty()
+            || !self.pending_codex_user_input_requests.is_empty()
+            || !self.pending_codex_mcp_elicitation_requests.is_empty()
+            || !self.pending_codex_dynamic_tool_call_requests.is_empty()
+    }
+
     pub fn has_pending_acp_approval(&self) -> bool {
         self.pending_acp_permission_requests.iter().any(|request| {
             self.runs.iter().any(|run| {
@@ -1513,7 +1603,7 @@ impl SessionMetadata {
         })
     }
 
-    fn has_pending_plan_waiting(&self) -> bool {
+    pub(crate) fn has_pending_plan_waiting(&self) -> bool {
         let Some(message_id) = self.pending_plan_message_id.as_ref() else {
             return false;
         };
@@ -1543,22 +1633,13 @@ impl SessionMetadata {
                 RunStatus::Completed | RunStatus::Cancelled | RunStatus::Crashed
             )
         });
-        let has_pending_approval = !self.pending_permission_denials.is_empty()
-            || !self.pending_codex_permission_requests.is_empty()
-            || !self.pending_opencode_permission_requests.is_empty()
-            || self.has_pending_acp_approval()
-            || !self.pending_codex_command_approval_requests.is_empty()
-            || !self.pending_codex_user_input_requests.is_empty()
-            || !self.pending_codex_mcp_elicitation_requests.is_empty()
-            || !self.pending_codex_dynamic_tool_call_requests.is_empty();
-
         SessionUnreadSummary {
             updated_at: self.updated_at(),
             last_opened_at: self.last_opened_at,
             has_unread_activity: has_finished_run
                 || self.waiting_for_input
                 || self.has_pending_plan_waiting()
-                || has_pending_approval
+                || self.has_pending_approval()
                 || has_review_unread_activity(self.is_reviewing, self.review_results.as_ref()),
         }
     }
@@ -1614,7 +1695,6 @@ impl SessionMetadata {
             selected_permission_mode: self.selected_permission_mode.clone(),
             session_naming_completed: self.session_naming_completed,
             archived_at: self.archived_at,
-            archived_by_base_close: self.archived_by_base_close,
             last_opened_at: self.last_opened_at,
             primary_surface: self.primary_surface.clone(),
             terminal_command: self.terminal_command.clone(),
@@ -1658,6 +1738,12 @@ impl SessionMetadata {
             total_runs: self.runs.len(),
             loaded_run_start_index: self.runs.len(),
             scheduled_wakeup: self.scheduled_wakeup.clone(),
+            delegated_by: self.delegated_by.as_ref().map(|link| SessionDelegatedBy {
+                origin_session_id: link.origin_session_id.clone(),
+                origin_worktree_id: link.origin_worktree_id.clone(),
+                origin_name: None,
+                outcome: link.outcome.clone(),
+            }),
         }
     }
 
@@ -1689,7 +1775,6 @@ impl SessionMetadata {
         self.selected_permission_mode = session.selected_permission_mode.clone();
         self.session_naming_completed = session.session_naming_completed;
         self.archived_at = session.archived_at;
-        self.archived_by_base_close = session.archived_by_base_close;
         self.primary_surface = session.primary_surface.clone();
         self.terminal_command = session.terminal_command.clone();
         self.terminal_command_args = session.terminal_command_args.clone();
@@ -1895,6 +1980,36 @@ pub enum RunStatus {
     Resumable,
 }
 
+/// What happened to the user's prompt once a send finished.
+///
+/// The composer restores the typed text exactly when the prompt is not in
+/// history. `NotAccepted` is never carried by an event: a rejected
+/// `send_chat_message` invoke means the backend never recorded the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserTurnOutcome {
+    /// Rejected before a run was recorded.
+    NotAccepted,
+    /// A run was recorded, then hidden from history.
+    Withdrawn,
+    /// The prompt stays in history, with or without assistant output.
+    Persisted,
+}
+
+impl UserTurnOutcome {
+    pub fn restore_draft(self) -> bool {
+        self != Self::Persisted
+    }
+}
+
+/// An OpenCode 2.x turn on the server: its session and the inbox id of its
+/// prompt (2.x uses that id for the user message too).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenCodeTurnRef {
+    pub session_id: String,
+    pub prompt_id: String,
+}
+
 /// Metadata for a single Claude CLI execution (stored in manifest)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunEntry {
@@ -1962,6 +2077,10 @@ pub struct RunEntry {
     /// Presence indicates a turn was active when Jean crashed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_turn_id: Option<String>,
+    /// OpenCode 2.x turn that runs on the server: set when the prompt is
+    /// queued. Lets a restarted Jean re-attach to the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_turn: Option<OpenCodeTurnRef>,
     /// Cursor chat ID — persisted per-run so future runs can resume the same chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_chat_id: Option<String>,
@@ -2014,6 +2133,25 @@ impl RunEntry {
         } else {
             1 // user only (no assistant output yet)
         }
+    }
+
+    /// Outcome of the user turn once the run log is final. Derived from the
+    /// same rule history rendering uses, so the event can never disagree
+    /// with what a reload shows.
+    pub fn user_turn_outcome(&self) -> UserTurnOutcome {
+        if self.is_renderable_in_chat_history() {
+            UserTurnOutcome::Persisted
+        } else {
+            UserTurnOutcome::Withdrawn
+        }
+    }
+
+    /// The prompt stays in history but the backend never answered it: a
+    /// provider rejection or a crash before any assistant output. The sender
+    /// gets the prompt back in the composer so a retry is one keystroke away.
+    pub fn user_turn_failed(&self) -> bool {
+        self.assistant_message_id.is_none()
+            && (self.provider_rejected || self.status == RunStatus::Crashed)
     }
 
     pub fn renders_assistant_message(&self) -> bool {
@@ -2118,12 +2256,11 @@ pub struct SessionMetadata {
     /// Whether session naming has been attempted
     #[serde(default)]
     pub session_naming_completed: bool,
-    /// Unix timestamp when session was archived (None = not archived)
+    /// Unix timestamp when the session was closed (soft deleted). None = live.
+    /// The name is historical; the retention purge removes the session once this
+    /// is older than `DELETED_ITEM_RETENTION_DAYS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
-    /// Whether this session was archived by the base close operation (vs user action)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_by_base_close: Option<bool>,
 
     // Session-specific UI state
     /// Tool call IDs that have been answered (for AskUserQuestion)
@@ -2241,6 +2378,20 @@ pub struct SessionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_wakeup: Option<ScheduledWakeup>,
 
+    /// The chat session that last sent work here through Jean MCP, and
+    /// whether the end of the next run is still owed to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_by: Option<SessionDelegation>,
+
+    /// Monotonic counter of run-state transitions. Bumped by the storage
+    /// layer whenever [`SessionMetadata::run_state_signature`] changes between
+    /// the on-disk copy and the copy being written, so every transition path
+    /// (start, complete, cancel, crash, orphan repair, recovery, waiting
+    /// flags) is covered without per-site bookkeeping. Clients drop any
+    /// run-state event or snapshot older than the version they already hold.
+    #[serde(default)]
+    pub status_version: u64,
+
     /// Storage format version for migrations
     #[serde(default = "default_manifest_version")]
     pub version: u32,
@@ -2248,6 +2399,56 @@ pub struct SessionMetadata {
 
 fn default_manifest_version() -> u32 {
     1
+}
+
+/// Version and run-state signature of a metadata copy, captured before a
+/// mutation so the write path can decide whether the version must advance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunStateStamp {
+    pub version: u64,
+    pub signature: u64,
+}
+
+/// Lifecycle of a session's latest run as the backend sees it right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStateStatus {
+    /// A process or send is managed by this backend instance.
+    Running,
+    /// The last run never finished and no process is managed here; a client
+    /// must call `resume_session` to tail it.
+    Resumable,
+    Cancelled,
+    Error,
+    Idle,
+}
+
+impl RunStateStatus {
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Running | Self::Resumable)
+    }
+}
+
+/// Versioned run-state snapshot for one session. Built only by
+/// [`SessionMetadata::run_state`], shared by `get_session_status`,
+/// `get_run_states`, and the web bootstrap payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunState {
+    pub session_id: String,
+    pub worktree_id: String,
+    pub status: RunStateStatus,
+    pub status_version: u64,
+    pub actively_managed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<String>,
+    pub waiting_for_input: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_input_type: Option<String>,
 }
 
 // ============================================================================
@@ -2346,7 +2547,6 @@ impl SessionMetadata {
             selected_permission_mode: None,
             session_naming_completed: false,
             archived_at: None,
-            archived_by_base_close: None,
             answered_questions: vec![],
             submitted_answers: HashMap::new(),
             fixed_findings: vec![],
@@ -2382,7 +2582,102 @@ impl SessionMetadata {
             review_activity_at: None,
             runs: vec![],
             scheduled_wakeup: None,
+            delegated_by: None,
+            status_version: 0,
             version: 1,
+        }
+    }
+
+    /// Hash of everything a client's running/waiting indicators depend on.
+    /// Two copies with equal signatures need no version bump.
+    pub fn run_state_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for run in &self.runs {
+            run.run_id.hash(&mut hasher);
+            std::mem::discriminant(&run.status).hash(&mut hasher);
+            run.cancelled.hash(&mut hasher);
+            run.provider_rejected.hash(&mut hasher);
+            run.assistant_message_id.is_some().hash(&mut hasher);
+        }
+        self.waiting_for_input.hash(&mut hasher);
+        self.waiting_for_input_type.hash(&mut hasher);
+        self.pending_plan_message_id.hash(&mut hasher);
+        self.approved_plan_message_ids.hash(&mut hasher);
+        self.pending_acp_permission_requests.len().hash(&mut hasher);
+        self.pending_permission_denials.len().hash(&mut hasher);
+        self.pending_codex_permission_requests
+            .len()
+            .hash(&mut hasher);
+        self.pending_opencode_permission_requests
+            .len()
+            .hash(&mut hasher);
+        self.pending_codex_command_approval_requests
+            .len()
+            .hash(&mut hasher);
+        self.pending_codex_user_input_requests
+            .len()
+            .hash(&mut hasher);
+        self.pending_codex_mcp_elicitation_requests
+            .len()
+            .hash(&mut hasher);
+        self.pending_codex_dynamic_tool_call_requests
+            .len()
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn run_state_stamp(&self) -> RunStateStamp {
+        RunStateStamp {
+            version: self.status_version,
+            signature: self.run_state_signature(),
+        }
+    }
+
+    /// Version this copy must carry when written over `prior`. Never lower
+    /// than either side; one higher when the run state differs.
+    pub fn next_status_version(&self, prior: Option<RunStateStamp>) -> u64 {
+        let Some(prior) = prior else {
+            return self.status_version;
+        };
+        let base = prior.version.max(self.status_version);
+        if prior.signature == self.run_state_signature() {
+            base
+        } else {
+            base + 1
+        }
+    }
+
+    /// The run-state snapshot clients reconcile against. `actively_managed`
+    /// is the registry's view and wins over persisted status.
+    pub fn run_state(&self, actively_managed: bool) -> RunState {
+        let latest_run = self.runs.last();
+        let status = if actively_managed {
+            RunStateStatus::Running
+        } else {
+            match latest_run.map(|run| &run.status) {
+                Some(RunStatus::Running) | Some(RunStatus::Resumable) => RunStateStatus::Resumable,
+                Some(RunStatus::Cancelled) => RunStateStatus::Cancelled,
+                Some(RunStatus::Crashed) => RunStateStatus::Error,
+                Some(RunStatus::Completed) | None => RunStateStatus::Idle,
+            }
+        };
+        let live_run = latest_run.filter(|run| {
+            status.is_live() && matches!(run.status, RunStatus::Running | RunStatus::Resumable)
+        });
+        RunState {
+            session_id: self.id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            status,
+            status_version: self.status_version,
+            actively_managed,
+            run_id: latest_run.map(|run| run.run_id.clone()),
+            started_at: live_run.map(|run| run.started_at),
+            execution_mode: live_run.and_then(|run| run.execution_mode.clone()),
+            waiting_for_input: self.waiting_for_input
+                || self.has_pending_plan_waiting()
+                || self.has_pending_approval(),
+            waiting_for_input_type: self.waiting_for_input_type.clone(),
         }
     }
 
@@ -2424,6 +2719,149 @@ impl SessionMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_state_fixture(status: RunStatus) -> SessionMetadata {
+        let mut metadata = SessionMetadata::new(
+            "sess-1".to_string(),
+            "wt-1".to_string(),
+            "Test".to_string(),
+            0,
+        );
+        metadata.status_version = 7;
+        metadata.runs.push(RunEntry {
+            run_id: "run-1".to_string(),
+            user_message_id: "msg-1".to_string(),
+            user_message: "Hello".to_string(),
+            model: None,
+            execution_mode: Some("build".to_string()),
+            thinking_level: None,
+            effort_level: None,
+            backend: None,
+            custom_profile_name: None,
+            started_at: 1700,
+            ended_at: None,
+            status,
+            assistant_message_id: None,
+            cancelled: false,
+            provider_rejected: false,
+            recovered: false,
+            claude_session_id: None,
+            pid: None,
+            usage: None,
+            codex_thread_id: None,
+            codex_turn_id: None,
+            opencode_turn: None,
+            cursor_chat_id: None,
+            grok_session_id: None,
+            kimi_session_id: None,
+            devin_session_id: None,
+            antigravity_session_id: None,
+            muse_session_id: None,
+            checkpoint_id: None,
+        });
+        metadata
+    }
+
+    #[test]
+    fn run_state_follows_registry_then_persisted_status() {
+        let running = run_state_fixture(RunStatus::Running).run_state(true);
+        assert_eq!(running.status, RunStateStatus::Running);
+        assert_eq!(running.status_version, 7);
+        assert_eq!(running.run_id.as_deref(), Some("run-1"));
+        assert_eq!(running.started_at, Some(1700));
+        assert_eq!(running.execution_mode.as_deref(), Some("build"));
+        assert!(running.actively_managed);
+
+        let orphaned = run_state_fixture(RunStatus::Running).run_state(false);
+        assert_eq!(orphaned.status, RunStateStatus::Resumable);
+        assert_eq!(orphaned.started_at, Some(1700));
+
+        let cancelled = run_state_fixture(RunStatus::Cancelled).run_state(false);
+        assert_eq!(cancelled.status, RunStateStatus::Cancelled);
+        assert_eq!(cancelled.started_at, None);
+        assert_eq!(cancelled.execution_mode, None);
+
+        let crashed = run_state_fixture(RunStatus::Crashed).run_state(false);
+        assert_eq!(crashed.status, RunStateStatus::Error);
+
+        let idle = run_state_fixture(RunStatus::Completed).run_state(false);
+        assert_eq!(idle.status, RunStateStatus::Idle);
+        assert_eq!(idle.run_id.as_deref(), Some("run-1"));
+
+        let empty = SessionMetadata::new("s".into(), "w".into(), "n".into(), 0).run_state(false);
+        assert_eq!(empty.status, RunStateStatus::Idle);
+        assert_eq!(empty.run_id, None);
+    }
+
+    #[test]
+    fn run_state_waiting_includes_pending_codex_requests_and_bumps_signature() {
+        let mut metadata = run_state_fixture(RunStatus::Running);
+        let before = metadata.run_state_signature();
+        assert!(!metadata.run_state(true).waiting_for_input);
+
+        metadata
+            .pending_codex_user_input_requests
+            .push(CodexUserInputRequest {
+                rpc_id: 1,
+                item_id: "item".into(),
+                questions: serde_json::json!([]),
+                thread_id: None,
+                turn_id: None,
+            });
+        assert!(metadata.run_state(true).waiting_for_input);
+        assert_ne!(metadata.run_state_signature(), before);
+
+        metadata.pending_codex_user_input_requests.clear();
+        metadata.pending_codex_command_approval_requests.push(
+            serde_json::from_value(serde_json::json!({
+                "rpc_id": 2,
+                "item_id": "cmd",
+                "thread_id": "t",
+                "turn_id": "u",
+            }))
+            .unwrap(),
+        );
+        assert!(metadata.run_state(false).waiting_for_input);
+    }
+
+    #[test]
+    fn run_state_serializes_camel_case_contract() {
+        let json =
+            serde_json::to_value(run_state_fixture(RunStatus::Running).run_state(true)).unwrap();
+        assert_eq!(json["sessionId"], "sess-1");
+        assert_eq!(json["worktreeId"], "wt-1");
+        assert_eq!(json["status"], "running");
+        assert_eq!(json["statusVersion"], 7);
+        assert_eq!(json["runId"], "run-1");
+        assert_eq!(json["startedAt"], 1700);
+        assert_eq!(json["executionMode"], "build");
+        assert_eq!(json["waitingForInput"], false);
+    }
+
+    #[test]
+    fn next_status_version_advances_only_on_run_state_change() {
+        let mut metadata = run_state_fixture(RunStatus::Running);
+        let prior = metadata.run_state_stamp();
+
+        metadata.name = "Renamed".to_string();
+        assert_eq!(metadata.next_status_version(Some(prior)), 7);
+
+        metadata.runs[0].status = RunStatus::Completed;
+        assert_eq!(metadata.next_status_version(Some(prior)), 8);
+
+        metadata.waiting_for_input = true;
+        let mut stale_copy = metadata.clone();
+        stale_copy.status_version = 2;
+        // A stale in-memory copy written over a newer disk copy never lowers it.
+        assert_eq!(
+            stale_copy.next_status_version(Some(RunStateStamp {
+                version: 9,
+                signature: prior.signature
+            })),
+            10
+        );
+        assert_eq!(metadata.next_status_version(None), 7);
+    }
 
     #[test]
     fn session_metadata_ignores_removed_provider_account_id() {
@@ -2714,6 +3152,7 @@ mod tests {
             output_tokens: 200,
             cache_read_input_tokens: 50,
             cache_creation_input_tokens: 25,
+            cost_usd: None,
         };
 
         let json = serde_json::to_string(&usage).unwrap();
@@ -3210,6 +3649,7 @@ mod tests {
             usage: None,
             codex_thread_id: Some("thread-1".to_string()),
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -3258,6 +3698,7 @@ mod tests {
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -3269,6 +3710,100 @@ mod tests {
 
         assert!(metadata.find_run("run-1").is_some());
         assert!(metadata.find_run("run-nonexistent").is_none());
+    }
+
+    fn finished_run(
+        status: RunStatus,
+        assistant_message_id: Option<&str>,
+        provider_rejected: bool,
+    ) -> RunEntry {
+        RunEntry {
+            run_id: "run-1".to_string(),
+            user_message_id: "user-1".to_string(),
+            user_message: "do the thing".to_string(),
+            model: None,
+            execution_mode: None,
+            thinking_level: None,
+            effort_level: None,
+            backend: Some(Backend::Claude),
+            custom_profile_name: None,
+            started_at: 1,
+            ended_at: Some(2),
+            status: status.clone(),
+            assistant_message_id: assistant_message_id.map(str::to_string),
+            cancelled: status == RunStatus::Cancelled,
+            provider_rejected,
+            recovered: false,
+            claude_session_id: None,
+            pid: None,
+            usage: None,
+            codex_thread_id: None,
+            codex_turn_id: None,
+            opencode_turn: None,
+            cursor_chat_id: None,
+            grok_session_id: None,
+            kimi_session_id: None,
+            devin_session_id: None,
+            antigravity_session_id: None,
+            muse_session_id: None,
+            checkpoint_id: None,
+        }
+    }
+
+    #[test]
+    fn user_turn_outcome_follows_history_visibility() {
+        let cancelled_before_output = finished_run(RunStatus::Cancelled, None, false);
+        assert_eq!(
+            cancelled_before_output.user_turn_outcome(),
+            UserTurnOutcome::Withdrawn
+        );
+        assert!(cancelled_before_output.user_turn_outcome().restore_draft());
+
+        let cancelled_with_output = finished_run(RunStatus::Cancelled, Some("asst"), false);
+        assert_eq!(
+            cancelled_with_output.user_turn_outcome(),
+            UserTurnOutcome::Persisted
+        );
+
+        let provider_rejected = finished_run(RunStatus::Cancelled, None, true);
+        assert_eq!(
+            provider_rejected.user_turn_outcome(),
+            UserTurnOutcome::Persisted
+        );
+        assert!(!provider_rejected.user_turn_outcome().restore_draft());
+
+        let crashed = finished_run(RunStatus::Crashed, None, false);
+        assert_eq!(crashed.user_turn_outcome(), UserTurnOutcome::Persisted);
+
+        let completed = finished_run(RunStatus::Completed, Some("asst"), false);
+        assert_eq!(completed.user_turn_outcome(), UserTurnOutcome::Persisted);
+    }
+
+    #[test]
+    fn user_turn_failed_only_for_unanswered_rejections_and_crashes() {
+        assert!(finished_run(RunStatus::Cancelled, None, true).user_turn_failed());
+        assert!(finished_run(RunStatus::Crashed, None, false).user_turn_failed());
+
+        assert!(!finished_run(RunStatus::Cancelled, None, false).user_turn_failed());
+        assert!(!finished_run(RunStatus::Cancelled, Some("asst"), false).user_turn_failed());
+        assert!(!finished_run(RunStatus::Crashed, Some("asst"), false).user_turn_failed());
+        assert!(!finished_run(RunStatus::Completed, Some("asst"), false).user_turn_failed());
+    }
+
+    #[test]
+    fn user_turn_outcome_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&UserTurnOutcome::NotAccepted).unwrap(),
+            "\"not_accepted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&UserTurnOutcome::Withdrawn).unwrap(),
+            "\"withdrawn\""
+        );
+        assert_eq!(
+            serde_json::to_string(&UserTurnOutcome::Persisted).unwrap(),
+            "\"persisted\""
+        );
     }
 
     #[test]
@@ -3295,6 +3830,7 @@ mod tests {
             usage: None,
             codex_thread_id: Some("thread-1".to_string()),
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -3393,6 +3929,7 @@ mod tests {
             usage: None,
             codex_thread_id: Some("thread-1".to_string()),
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -3423,6 +3960,7 @@ mod tests {
             usage: None,
             codex_thread_id: Some("thread-1".to_string()),
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -3471,6 +4009,7 @@ mod tests {
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -3505,6 +4044,7 @@ mod tests {
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,

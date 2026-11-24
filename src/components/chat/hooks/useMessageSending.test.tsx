@@ -1,4 +1,5 @@
 import { act, renderHook } from '@testing-library/react'
+import { targetUsesEffort } from '@/lib/model-utils'
 import { QueryClient } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useChatStore } from '@/store/chat-store'
@@ -170,8 +171,7 @@ function renderUseMessageSending({
       selectedThinkingLevelRef: { current: 'off' },
       selectedEffortLevelRef: { current: selectedEffortLevel },
       executionModeRef,
-      useAdaptiveThinkingRef: { current: false },
-      isCodexBackendRef: { current: selectedBackend === 'codex' },
+      usesEffortFor: (backend, model) => targetUsesEffort({ backend, model }),
       mcpServersDataRef: { current: [] },
       enabledMcpServersRef: { current: [] },
       selectedBackendRef: { current: selectedBackend },
@@ -1452,6 +1452,28 @@ describe('useMessageSending Codex auto-steer', () => {
 
     expect(steerClaudeTurn).not.toHaveBeenCalled()
     expect(persistEnqueue).toHaveBeenCalled()
+    expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
+  })
+
+  it('queues claude prompts with forceQueue even when claude steering is enabled', async () => {
+    const { result } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      claudeAutoSteer: true,
+      inputValue: 'run this after',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit(
+        { preventDefault: vi.fn() } as unknown as React.FormEvent,
+        { forceQueue: true }
+      )
+    })
+
+    expect(steerClaudeTurn).not.toHaveBeenCalled()
+    // noSteer keeps the backend queue drain from steering it anyway
+    expect(vi.mocked(persistEnqueue).mock.calls[0]?.[3]).toMatchObject({
+      noSteer: true,
+    })
     expect(useChatStore.getState().messageQueues['session-1']).toHaveLength(1)
   })
 

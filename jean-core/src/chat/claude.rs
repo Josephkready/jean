@@ -20,117 +20,22 @@ use crate::projects::storage::load_projects_data;
 // Constants
 // =============================================================================
 
-/// Default global system prompt (must match DEFAULT_GLOBAL_SYSTEM_PROMPT in preferences.ts)
-const DEFAULT_GLOBAL_SYSTEM_PROMPT: &str = "\
-Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
-\n\
-### 1. Planning Guidance\n\
-- For non-trivial tasks (3+ steps or architectural decisions), prefer planning before implementation when the current execution mode has not already authorized execution.\n\
-- If something goes sideways, STOP and re-plan immediately - don't keep pushing\n\
-- Use plan mode for verification steps when the current execution mode is plan; in build/full access, verify directly after implementing.\n\
-- Write detailed specs upfront to reduce ambiguity\n\
-- Keep plans concise but complete enough for zero-context handoff (Full access/Build in a new worktree must not require re-scanning the repo). Prefer short wording over thin checklists.\n\
-- When the current execution mode is plan, use the backend's native plan tool/UI call when available (Claude ExitPlanMode, Codex `<proposed_plan>` / collaboration Plan mode, Cursor/OpenCode equivalent), not plain text only.\n\
-- For unresolved questions while planning, prefer the backend-native interactive question UI instead of plain text when available: Claude AskUserQuestion, Codex request_user_input, OpenCode question. If no such interactive question tool is present in your current tool set (headless/`--print` runs may omit Claude AskUserQuestion), do NOT skip the question and do NOT dead-end on a tool search — instead ask inline in this exact format: one line with the question, then the line `Reply with a number:`, then a numbered list (`1.`, `2.`, `3.`...) of 2 to 8 short options, one option per line. Jean shows these options as buttons.\n\
-- For Codex specifically, when the current execution mode is plan: do not write plan files or code; when the plan is ready wrap it in `<proposed_plan>...</proposed_plan>` so Jean can show the approval UI. Do not use the `update_plan` checklist tool in plan mode.\n\
-- Every Codex response that contains or revises a plan while the current execution mode is plan must use a complete `<proposed_plan>` block (or a native plan item); do not provide plain-text-only plans, and do not attempt file writes.\n\
-- Use a plain-text Unresolved Questions section only for non-actionable notes or when the backend cannot ask interactively.\n\
-\n\
-### 2. Documentation First\n\
-- Before designing or coding against any external library/framework/SDK/API/CLI, run WebSearch for current docs.\n\
-- Verify version, API shape, and breaking changes — training data may be stale.\n\
-- Cite the source URL in your plan or commit reasoning when behavior is non-obvious.\n\
-- Skip only for trivial edits to code already read this session.\n\
-- Do NOT use Context7 — WebSearch only.\n\
-\n\
-### 3. Self-Improvement Loop\n\
-- Only update '.ai/lessons.md' for general, project-wide learning that applies across features\n\
-- Do not add feature-specific, bug-fix-specific, or small/local lessons\n\
-- Remove narrow or specific entries when you detect them\n\
-- Review lessons at session start for relevant project\n\
-- Keep '.ai/lessons.md' concise by merging duplicate rules and removing obsolete entries\n\
-\n\
-### 4. Verification Before Done\n\
-- Never mark a task complete without proving it works\n\
-- Diff behavior between main and your changes when relevant\n\
-- Ask yourself: \"Would a staff engineer approve this?\"\n\
-- Scale verification to risk: run the narrowest check that proves the change (one test file/name, one crate/package, or a typecheck of the touched area)\n\
-- Do NOT run the full test suite, full lint, or project-wide check scripts after every edit. Run broad checks once, at the end, only for cross-cutting changes (shared types, persistence, public APIs, large refactors) or when the user asks.\n\
-- Skip tests for docs, copy, comments, styling-only, and prompt/config text changes; say that you skipped them.\n\
-- Do not re-run a passing check when the code it covers has not changed since.\n\
-- Write new tests only for behavior that can break silently: business logic, parsing/serialization, state transitions, persistence, and a regression test for each fixed bug.\n\
-- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called.\n\
-- ALWAYS use a browser when the user asks for it, or when the task is visual: copy or match a style from a reference, compare with another page or screenshot, or fix a layout or visual bug.\n\
-- Also use a browser when the change has runtime UI behavior that typecheck, lint, or tests cannot prove: new or changed user flows, or state/interaction logic.\n\
-- In all other cases, do NOT open a browser. Examples: small copy/text edits, small class or prop tweaks that you did not have to match to a reference, refactors with no behavior change, backend-only changes. For these, a typecheck or the narrowest test is enough.\n\
-- Before you open a browser on your own decision (not a user request), state in one line why a cheaper check is not enough.\n\
-- If a UI check needs a browser and no other browser tool is available, use the Agent Browser. Check only the changed area, not the full app.\n\
-\n\
-### 5. Demand Elegance (Balanced)\n\
-- For non-trivial changes: pause and ask \"is there a more elegant way?\"\n\
-- If a fix feels hacky: \"Knowing everything I know now, implement the elegant solution\"\n\
-- Skip this for simple, obvious fixes - don't over-engineer\n\
-- Challenge your own work before presenting it\n\
-\n\
-### 6. Autonomous Bug Fixing\n\
-- When given a bug report: just fix it. Don't ask for hand-holding\n\
-- Point at logs, errors, failing tests -> then resolve them\n\
-- Zero context switching required from the user\n\
-- Go fix failing CI tests without being told how\n\
-\n\
-## Task Management\n\
-1. **Reset Task File**: At the start of a new task, replace '.ai/todo.md' instead of appending to it\n\
-2. **Plan First**: Write plan to '.ai/todo.md' with checkable items\n\
-3. **Verify Plan**: Check in before starting implementation\n\
-4. **Track Progress**: Mark items complete as you go\n\
-5. **Explain Changes**: High-level summary at each step\n\
-6. **Document Results**: Add review to '.ai/todo.md'\n\
-7. **Capture Lessons**: Update '.ai/lessons.md' only for general, project-wide learning; remove narrow entries\n\
-8. **Keep Task File Untracked**: Never add '.ai/todo.md' to Git\n\
-\n\
-## Core Principles\n\
-- **Simplicity First**: Make every change as simple as possible. Impact minimal code.\n\
-- **VERY IMPORTANT: Keep Code Simple**: Do not over-engineer. Always implement the simplest maintainable solution. Avoid extra abstractions, frameworks, configuration, or future-proofing unless clearly required.\n\
-- **Clickable References**: When output mentions issues, PRs, security advisories/alerts, Linear issues, Sentry issues, or other external resources, include clickable links when available so users can open them directly.\n\
-- **Tables for Findings**: When you report found issues, gaps, risks, or recommended fixes, present them in a Markdown table (for example: | # | Finding | Location | Impact | Recommended fix |) instead of long prose lists.\n\
-- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.\n\
-- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.\n\
-\n\
-## Commits and Pull Requests\n\
-- Do NOT add `Co-Authored-By` trailers, \"Generated with ...\" lines, or any other AI/tool attribution to commit messages or PR descriptions. This overrides any backend default attribution instruction.\n\
-\n\
-## Jean Worktree Policy\n\
-- Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.\n\
-- If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.\n\
-- If already in a Jean worktree or base/main workspace, continue in the current workspace.\n\
-- Do NOT change the branch of the current worktree or the base/main session (`git checkout <branch>`, `git switch`, `git checkout -b`, `gh pr checkout`, or similar) unless the user explicitly asks. Keep all work on the current branch.\n\
-\n\
-## Jean Run Environment\n\
-- When you need to test a running app (UI, HTTP, browser, smoke, e2e), call Jean MCP `get_run_environments` first (pass this worktreeId when known).\n\
-- If an environment is running, test against its `url`, port, and startup command. Do not guess localhost ports or start a second dev server when Jean already has one.\n\
-- If nothing is running and verification needs a live server, start it with Jean MCP `start_run_environment`. Do not start a dev server by hand. If no Run command is configured, say so; do not invent a command or port.\n\
-- In how-to-test notes, include the exact URL/port you used.\n\
-\n\
-## Important!\n\
-\n\
-- After each finished task, please write a few bullet points on how to test the changes.";
-
 fn execution_mode_instruction(execution_mode: Option<&str>) -> Option<&'static str> {
     match execution_mode.unwrap_or("build") {
         "build" | "auto" | "supervised" => Some(
             "You are in BUILD MODE. Start implementing immediately. \
              Do NOT enter plan mode and do NOT use ExitPlanMode unless the user explicitly asks \
              for a new plan. If a required decision is missing, use AskUserQuestion instead of \
-             ExitPlanMode; if AskUserQuestion is not in your tool set, ask inline: the question, \
-             then the line `Reply with a number:`, then a numbered list (1., 2., 3.) of options.",
+             ExitPlanMode; if AskUserQuestion is not in your tool set, ask inline: one line \
+             with the question, then `Reply with a number:`, then 2-8 numbered short options.",
         ),
         "yolo" => Some(
             "You are in FULL ACCESS MODE. Start implementing immediately. \
              Do NOT enter plan mode and do NOT use ExitPlanMode unless the user explicitly asks \
              for a new plan. Do not ask for confirmation before routine implementation steps. \
              If a required decision is missing, use AskUserQuestion instead of ExitPlanMode; \
-             if AskUserQuestion is not in your tool set, ask inline: the question, then the line \
-             `Reply with a number:`, then a numbered list (1., 2., 3.) of options.",
+             if AskUserQuestion is not in your tool set, ask inline: one line with the \
+             question, then `Reply with a number:`, then 2-8 numbered short options.",
         ),
         _ => None,
     }
@@ -192,15 +97,46 @@ pub struct ErrorEvent {
     pub error: String,
 }
 
-/// Payload for cancelled events sent to frontend
+/// Payload for cancelled events sent to frontend.
+///
+/// Emitted as soon as the process or turn is stopped, before the run log is
+/// final. It only tells the client to stop rendering the live turn; what
+/// happened to the user's prompt arrives later in `chat:user-turn`.
 #[derive(serde::Serialize, Clone)]
 pub struct CancelledEvent {
     pub session_id: String,
     pub worktree_id: String, // Kept for backward compatibility
-    pub undo_send: bool,     // True when the user turn should be removed from history
     pub emitted_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// Session run-state version when known. Cancel fires before the run log
+    /// is final, so the registry sends the version it can read at that time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_version: Option<u64>,
+}
+
+/// Payload for `chat:user-turn`, the final word on a finished send.
+///
+/// Emitted once by `send_chat_message` after the run log and session state are
+/// final, at every exit that follows `start_run`. `restore_draft` is true when
+/// the prompt is not in history and the composer should get it back.
+#[derive(serde::Serialize, Clone)]
+pub struct UserTurnEvent {
+    pub session_id: String,
+    pub worktree_id: String,
+    pub run_id: String,
+    /// Id of the user message this verdict is about. `chat:sending` carries
+    /// the same id, so a client can match the verdict to the send it made.
+    pub user_message_id: String,
+    pub user_turn: super::types::UserTurnOutcome,
+    pub restore_draft: bool,
+    /// The prompt stays in history but got no answer (provider rejection or
+    /// crash before output). The sender restores it to the composer too.
+    pub failed: bool,
+    pub emitted_at_ms: u64,
+    /// Run-state version of the final metadata, so clients drop a snapshot
+    /// taken before this verdict.
+    pub status_version: u64,
 }
 
 /// Payload for tool block position events sent to frontend
@@ -263,6 +199,18 @@ struct ToolEventEvent {
 struct CompactingEvent {
     session_id: String,
     worktree_id: String,
+}
+
+/// Payload for Claude CLI `api_retry` events sent to frontend.
+/// Signals the CLI is retrying a failed API request (e.g. unreachable base URL).
+#[derive(serde::Serialize, Clone)]
+struct ApiRetryEvent {
+    session_id: String,
+    worktree_id: String,
+    attempt: u64,
+    max_retries: u64,
+    retry_delay_ms: u64,
+    error: Option<String>,
 }
 
 /// Payload for compaction-complete events sent to frontend
@@ -532,6 +480,16 @@ pub fn extract_claude_structured_output(output: &str) -> Option<serde_json::Valu
 }
 
 const SYSTEM_PROMPT_SNAPSHOT_FLAG: &str = "--system-prompt-snapshot";
+const AUTOCOMPACT_FLAG: &str = "--autocompact";
+
+/// `auto`, or a token count with an optional `k`/`M` suffix (CLI accepts 100k–1M).
+fn is_valid_auto_compact_window(value: &str) -> bool {
+    if value == "auto" {
+        return true;
+    }
+    let digits = value.strip_suffix(['k', 'M']).unwrap_or(value);
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
 
 fn help_text_mentions_flag(help: &str, flag: &str) -> bool {
     help.split(|c: char| c.is_whitespace() || c == ',')
@@ -981,10 +939,6 @@ fn build_claude_args(
     // prompt has the last word. An empty parallel prompt is fan-out off.
     // The previous built-in default, which embedded the sub-agent section, is
     // treated as "use the current default" so that section stays on the toggle.
-    debug_assert_eq!(
-        DEFAULT_GLOBAL_SYSTEM_PROMPT,
-        crate::default_global_system_prompt()
-    );
     let global_prompt = crate::get_preferences_path(app)
         .ok()
         .and_then(|prefs_path| std::fs::read_to_string(prefs_path).ok())
@@ -1043,27 +997,7 @@ fn build_claude_args(
     // GitHub CLI: path hint when installed; forbid discovery when it is not.
     crate::gh_cli::config::append_gh_cli_system_prompt(&mut system_prompt_parts, app);
 
-    // Embedded Claude CLI path - tell Claude to use the app's bundled binary
-    if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(app) {
-        if claude_binary.exists() {
-            system_prompt_parts.push(format!(
-                "When running Claude CLI commands, use the full path to the embedded binary: {}\n\
-                 Do NOT use bare `claude` — always use the full path above.",
-                claude_binary.display()
-            ));
-        }
-    }
-
-    // Embedded Codex CLI path - tell Claude to use the app's bundled binary
-    if let Ok(codex_binary) = crate::codex_cli::get_cli_binary_path(app) {
-        if codex_binary.exists() {
-            system_prompt_parts.push(format!(
-                "When running Codex CLI commands, use the full path to the embedded binary: {}\n\
-                 Do NOT use bare `codex` — always use the full path above.",
-                codex_binary.display()
-            ));
-        }
-    }
+    super::push_embedded_cli_paths(&mut system_prompt_parts, app);
 
     // Collect all context files (issues and PRs) and concatenate into a single file
     let mut all_context_paths: Vec<std::path::PathBuf> = Vec::new();
@@ -1399,6 +1333,19 @@ fn build_claude_args(
     if claude_cli_supports_flag(&cli_path, SYSTEM_PROMPT_SNAPSHOT_FLAG) {
         args.push(SYSTEM_PROMPT_SNAPSHOT_FLAG.to_string());
         args.push("off".to_string());
+    }
+
+    // Auto-compact window. Jean spawns a fresh CLI per turn, so a changed
+    // value applies from the next message of a running session.
+    if let Some(window) = crate::load_preferences_sync(app)
+        .ok()
+        .and_then(|p| p.claude_auto_compact_window)
+        .filter(|w| is_valid_auto_compact_window(w))
+    {
+        if claude_cli_supports_flag(&cli_path, AUTOCOMPACT_FLAG) {
+            args.push(AUTOCOMPACT_FLAG.to_string());
+            args.push(window);
+        }
     }
 
     // Background tasks (Agent/Bash `run_in_background`) stay enabled: with
@@ -2162,14 +2109,17 @@ pub fn tail_claude_output(
                         content_blocks.push(ContentBlock::UserInput {
                             text: text.to_string(),
                         });
-                        let _ = app.emit_all(
-                            "chat:steered",
-                            &serde_json::json!({
-                                "session_id": session_id,
-                                "worktree_id": worktree_id,
-                                "text": text,
-                            }),
-                        );
+                        // Skip when already shown at the time Jean sent the steer.
+                        if !super::claude_host::take_announced_steer(session_id, text) {
+                            let _ = app.emit_all(
+                                "chat:steered",
+                                &serde_json::json!({
+                                    "session_id": session_id,
+                                    "worktree_id": worktree_id,
+                                    "text": text,
+                                }),
+                            );
+                        }
                     }
                 }
                 "assistant" => {
@@ -2652,7 +2602,7 @@ pub fn tail_claude_output(
                     // Token usage: one `result` per turn; Monitor wake-ups can
                     // produce several turns in one run, so accumulate.
                     if let Some(usage_obj) = msg.get("usage") {
-                        add_result_usage(&mut usage, usage_obj);
+                        add_result_usage(&mut usage, usage_obj, msg.get("total_cost_usd"));
                         if let Some(u) = usage.as_ref() {
                             log::debug!(
                                 "Token usage: input={}, output={}, cache_read={}, cache_create={}",
@@ -2838,6 +2788,24 @@ pub fn tail_claude_output(
                             }
                         }
                         // Fall through to skip the compact_boundary branch.
+                    } else if subtype == "api_retry" {
+                        let retry_event = ApiRetryEvent {
+                            session_id: session_id.to_string(),
+                            worktree_id: worktree_id.to_string(),
+                            attempt: msg.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0),
+                            max_retries: msg
+                                .get("max_retries")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            retry_delay_ms: msg
+                                .get("retry_delay_ms")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            error: msg.get("error").and_then(|v| v.as_str()).map(String::from),
+                        };
+                        if let Err(e) = app.emit_all("chat:api-retry", &retry_event) {
+                            log::error!("Failed to emit api-retry: {e}");
+                        }
                     } else if subtype == "compact_boundary" {
                         log::trace!("Detected compact_boundary system message");
 
@@ -3189,18 +3157,26 @@ fn is_claude_session_not_found_text(text: &str) -> bool {
 }
 
 /// Add one `result` message's `usage` object to the run total.
-fn add_result_usage(total: &mut Option<UsageData>, usage_obj: &serde_json::Value) {
+fn add_result_usage(
+    total: &mut Option<UsageData>,
+    usage_obj: &serde_json::Value,
+    cost_usd: Option<&serde_json::Value>,
+) {
     let field = |key: &str| usage_obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
     let total = total.get_or_insert(UsageData {
         input_tokens: 0,
         output_tokens: 0,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        cost_usd: None,
     });
     total.input_tokens += field("input_tokens");
     total.output_tokens += field("output_tokens");
     total.cache_read_input_tokens += field("cache_read_input_tokens");
     total.cache_creation_input_tokens += field("cache_creation_input_tokens");
+    if let Some(cost) = cost_usd.and_then(|v| v.as_f64()) {
+        total.cost_usd = Some(total.cost_usd.unwrap_or(0.0) + cost);
+    }
 }
 
 /// Error text of the synthetic assistant message Claude CLI emits when the
@@ -3416,6 +3392,16 @@ mod tests {
                 response.content_blocks.len(),
                 usize::from(real_reply.is_some())
             );
+        }
+    }
+
+    #[test]
+    fn auto_compact_window_accepts_cli_forms_only() {
+        for ok in ["auto", "200k", "1M", "500000"] {
+            assert!(is_valid_auto_compact_window(ok), "{ok}");
+        }
+        for bad in ["", "k", "--model", "200 k", "1m", "Auto"] {
+            assert!(!is_valid_auto_compact_window(bad), "{bad}");
         }
     }
 
@@ -3821,10 +3807,12 @@ mod tests {
                 "cache_read_input_tokens": 100,
                 "cache_creation_input_tokens": 1
             }),
+            Some(&serde_json::json!(0.25)),
         );
         add_result_usage(
             &mut usage,
             &serde_json::json!({ "input_tokens": 3, "output_tokens": 2 }),
+            Some(&serde_json::json!(0.5)),
         );
 
         let usage = usage.unwrap();
@@ -3832,6 +3820,14 @@ mod tests {
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_read_input_tokens, 100);
         assert_eq!(usage.cache_creation_input_tokens, 1);
+        assert_eq!(usage.cost_usd, Some(0.75));
+    }
+
+    #[test]
+    fn add_result_usage_without_cost_keeps_cost_unset() {
+        let mut usage = None;
+        add_result_usage(&mut usage, &serde_json::json!({ "input_tokens": 1 }), None);
+        assert_eq!(usage.unwrap().cost_usd, None);
     }
 
     #[test]
@@ -4090,61 +4086,43 @@ mod tests {
         assert!(!env_vars.iter().any(|(key, _)| key == "IGNORED_NON_STRING"));
     }
 
+    /// Guard: each output rule has one owner and the default
+    /// instructions stay inside a size budget. Measured on 2026-11-11.
     #[test]
-    fn default_global_system_prompt_prefers_interactive_plan_questions() {
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("Always use ASD-STE100 Simplified Technical English when you talk to me."));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("backend-native interactive question UI"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Claude AskUserQuestion"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Codex request_user_input"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("when the current execution mode is plan: do not write plan files or code"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("<proposed_plan>"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Every Codex response that contains or revises a plan while the current execution mode is plan"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("OpenCode question"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("then the line `Reply with a number:`"));
-        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("## Recap"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean Worktree Policy"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Do NOT create git worktrees manually"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean MCP/tools"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean Run Environment"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("get_run_environments"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("test against its `url`, port, and startup command"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("start_run_environment"));
-        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("use the returned/startup command"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("no other browser tool is available, use the Agent Browser"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("VERY IMPORTANT: Keep Code Simple"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("Always implement the simplest maintainable solution"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Clickable References"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("include clickable links when available"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains(
-            "At the start of a new task, replace '.ai/todo.md' instead of appending to it"
-        ));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("Only update '.ai/lessons.md' for general, project-wide learning"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Never add '.ai/todo.md' to Git"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("Do not add feature-specific, bug-fix-specific, or small/local lessons"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("Remove narrow or specific entries when you detect them"));
-        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("After ANY correction from the user"));
-        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Subagent Strategy"));
-        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("throw more compute at it via subagents"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("### 3. Self-Improvement Loop"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("### 6. Autonomous Bug Fixing"));
-        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("### 7. Autonomous Bug Fixing"));
-        assert_eq!(
-            DEFAULT_GLOBAL_SYSTEM_PROMPT,
-            crate::default_global_system_prompt()
-        );
+    fn default_instructions_have_no_duplicate_rules_and_fit_budget() {
+        for mode in ["build", "yolo"] {
+            let mut parts = Vec::new();
+            super::super::push_subagent_policy_before_global(
+                &mut parts,
+                Some(&crate::default_parallel_execution_prompt()),
+                crate::default_global_system_prompt(),
+            );
+            parts.push(execution_mode_instruction(Some(mode)).unwrap().to_string());
+            let prompt = parts.join("\n");
+
+            // The build/yolo mode text repeats the inline-question format on
+            // purpose: without a recap it has no other owner (#31).
+            assert_eq!(prompt.matches("Reply with a number:").count(), 2, "{mode}");
+            for phrase in ["Keep Code Simple", "project-wide learning"] {
+                assert_eq!(prompt.matches(phrase).count(), 1, "{mode}: {phrase}");
+            }
+            for removed in [
+                "how to test the changes",
+                "Not tested in browser",
+                "Clickable",
+            ] {
+                assert!(!prompt.contains(removed), "{mode}: {removed}");
+            }
+            // Issue #31: no end-of-turn recap is requested.
+            assert!(!prompt.contains("## Recap"), "{mode}");
+            assert!(prompt.len() < 14_000, "{mode}: {} chars", prompt.len());
+        }
     }
 
     #[test]
     fn default_global_system_prompt_does_not_require_github_discovery() {
-        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("GitHub Issue and Discussion Discovery"));
+        assert!(!crate::default_global_system_prompt()
+            .contains("GitHub Issue and Discussion Discovery"));
     }
 
     #[test]

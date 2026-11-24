@@ -2,45 +2,16 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tokio::sync::{broadcast, mpsc};
 
-use super::dispatch::dispatch_command;
+use super::dispatch::{dispatch_command_off_runtime, from_field, set_active_worktree_for_polling};
 use super::{WsBroadcaster, WsEvent};
+use crate::background_tasks::{BackgroundTaskManager, UiClient};
 
-fn command_should_run_on_blocking_pool(command: &str) -> bool {
-    matches!(
-        command,
-        "get_sessions"
-            | "bootstrap_project"
-            | "get_recent_worktrees"
-            | "list_all_sessions"
-            | "get_unread_session_count"
-            | "list_unread_sessions"
-            | "list_native_cli_sessions"
-            | "create_commit_with_ai"
-            | "create_pr_with_ai_content"
-            | "run_review_with_ai"
-            | "generate_release_notes"
-            | "execute_summarization"
-            | "install_claude_cli"
-            | "install_codex_cli"
-            | "install_missing_codex_code_mode_host"
-            | "install_opencode_cli"
-            | "install_pi_cli"
-            | "install_grok_cli"
-            | "update_grok_cli"
-            | "install_gh_cli"
-            | "install_glab_cli"
-            | "install_coderabbit_cli"
-            | "update_coderabbit_cli"
-            | "install_agent_browser"
-            | "check_agent_browser_update"
-            | "run_coderabbit_review"
-            | "trigger_coderabbit_pr_review"
-    )
-}
+static NEXT_WS_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Commands that must preserve WebSocket receive order.
 ///
@@ -58,7 +29,11 @@ async fn dispatch_invoke_response(
     command: String,
     args: Value,
 ) -> InvokeResponse {
-    match dispatch_command(&app, &command, args).await {
+    invoke_response(id, dispatch_command_off_runtime(app, command, args).await)
+}
+
+fn invoke_response(id: String, result: Result<Value, String>) -> InvokeResponse {
+    match result {
         Ok(data) => InvokeResponse {
             msg_type: "response".to_string(),
             id,
@@ -81,22 +56,6 @@ fn spawn_dispatch_response(
     args: Value,
     tx: mpsc::UnboundedSender<String>,
 ) {
-    if command_should_run_on_blocking_pool(&command) {
-        // These commands perform synchronous git/CLI/process work under an
-        // async dispatch signature. Running them on the core runtime can starve
-        // the WebSocket loop in web/mobile access, making unrelated actions
-        // (for example creating a new session) appear stuck until the command
-        // finishes.
-        tokio::task::spawn_blocking(move || {
-            let resp =
-                tauri::async_runtime::block_on(dispatch_invoke_response(app, id, command, args));
-            if let Ok(json) = serde_json::to_string(&resp) {
-                let _ = tx.send(json);
-            }
-        });
-        return;
-    }
-
     tokio::spawn(async move {
         let resp = dispatch_invoke_response(app, id, command, args).await;
         if let Ok(json) = serde_json::to_string(&resp) {
@@ -132,17 +91,53 @@ fn spawn_ordered_dispatch_response(
     })
 }
 
+/// Focus and the active worktree are tracked per connection, so they are
+/// handled here where the connection id is known instead of in the generic
+/// dispatch arm.
+fn set_ws_client_focus(app: &AppHandle, client: UiClient, args: &Value) -> Result<Value, String> {
+    let focused: bool = from_field(args, "focused")?;
+    app.state::<BackgroundTaskManager>()
+        .set_client_focus(client, focused);
+    Ok(Value::Null)
+}
+
 /// Route a client invoke: ordered commands chain serially; everything else
 /// dispatches independently so long-running work cannot block the WS loop.
 fn dispatch_client_invoke(
     app: &AppHandle,
+    ui_client: UiClient,
     id: String,
     command: String,
     args: Value,
     resp_tx: &mpsc::UnboundedSender<String>,
     ordered_tail: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
-    if command_must_run_in_ws_order(&command) {
+    if command == "set_app_focus_state" {
+        let resp = invoke_response(id, set_ws_client_focus(app, ui_client, &args));
+        if let Ok(json) = serde_json::to_string(&resp) {
+            let _ = resp_tx.send(json);
+        }
+    } else if command == "set_active_worktree_for_polling" {
+        // Per connection like focus, but it reads projects data from disk, so
+        // it runs on the blocking pool. Chained on the ordered tail so rapid
+        // selections apply in order and disconnect cleanup runs after them.
+        let app = app.clone();
+        let resp_tx = resp_tx.clone();
+        let previous = ordered_tail.take();
+        *ordered_tail = Some(tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            let result = tokio::task::spawn_blocking(move || {
+                set_active_worktree_for_polling(&app, ui_client, &args)
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("Command task failed: {error}")));
+            if let Ok(json) = serde_json::to_string(&invoke_response(id, result)) {
+                let _ = resp_tx.send(json);
+            }
+        }));
+    } else if command_must_run_in_ws_order(&command) {
         *ordered_tail = Some(spawn_ordered_dispatch_response(
             app.clone(),
             id,
@@ -158,25 +153,7 @@ fn dispatch_client_invoke(
 
 #[cfg(test)]
 mod tests {
-    use super::{command_must_run_in_ws_order, command_should_run_on_blocking_pool};
-
-    #[test]
-    fn commit_generation_runs_on_blocking_pool() {
-        assert!(command_should_run_on_blocking_pool("create_commit_with_ai"));
-    }
-
-    #[test]
-    fn session_history_loading_runs_on_blocking_pool() {
-        assert!(command_should_run_on_blocking_pool("get_sessions"));
-        assert!(command_should_run_on_blocking_pool(
-            "list_native_cli_sessions"
-        ));
-    }
-
-    #[test]
-    fn lightweight_session_creation_stays_on_async_runtime() {
-        assert!(!command_should_run_on_blocking_pool("create_session"));
-    }
+    use super::command_must_run_in_ws_order;
 
     #[test]
     fn terminal_input_writes_run_in_websocket_order() {
@@ -248,6 +225,7 @@ pub async fn handle_ws_connection(
     mut event_rx: broadcast::Receiver<WsEvent>,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let ui_client = UiClient::Ws(NEXT_WS_CLIENT_ID.fetch_add(1, Ordering::Relaxed));
 
     // Channel for command dispatch responses. Unbounded because command
     // responses are infrequent (user-initiated) and must never be dropped.
@@ -306,6 +284,7 @@ pub async fn handle_ws_connection(
                             Ok(WsClientMessage::Invoke { id, command, args }) => {
                                 dispatch_client_invoke(
                                     &app,
+                                    ui_client,
                                     id,
                                     command,
                                     args,
@@ -330,6 +309,7 @@ pub async fn handle_ws_connection(
                                     Ok(req) => {
                                         dispatch_client_invoke(
                                             &app,
+                                            ui_client,
                                             req.id,
                                             req.command,
                                             req.args,
@@ -382,7 +362,10 @@ pub async fn handle_ws_connection(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("WS client lagged, skipped {n} events");
+                        log::warn!("WS client lagged, skipped {n} events; requesting resync");
+                        if ws_tx.send(Message::Text(RESYNC_EVENT_JSON.into())).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -390,8 +373,20 @@ pub async fn handle_ws_connection(
         }
     }
 
+    // Let a queued active-worktree update land before removing the client,
+    // or it would re-add the closed connection's worktree.
+    if let Some(tail) = ordered_dispatch_tail.take() {
+        let _ = tail.await;
+    }
+    if let Some(manager) = app.try_state::<BackgroundTaskManager>() {
+        manager.remove_client(ui_client);
+    }
     log::trace!("WebSocket client disconnected");
 }
+
+/// Sent to a client that lagged behind the broadcast channel. Skipped events can
+/// include chat:sending/chat:done, so the client must resync session state.
+const RESYNC_EVENT_JSON: &str = r#"{"type":"event","event":"ws:resync","payload":{}}"#;
 
 /// Maximum additional messages to drain after the first in a single flush cycle.
 const DRAIN_MAX: usize = 32;
@@ -418,7 +413,8 @@ async fn feed_and_drain(
                 continue;
             }
             Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                log::warn!("WS client lagged during drain, skipped {n} events");
+                log::warn!("WS client lagged during drain, skipped {n} events; requesting resync");
+                ws_tx.feed(Message::Text(RESYNC_EVENT_JSON.into())).await?;
                 continue;
             }
             _ => {}

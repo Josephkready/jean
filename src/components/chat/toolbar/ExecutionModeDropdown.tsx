@@ -1,4 +1,5 @@
 import {
+  ChevronsUpDown,
   ClipboardList,
   Hammer,
   Shield,
@@ -14,6 +15,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { useChatStore } from '@/store/chat-store'
 import {
   getSupportedPermissionModes,
@@ -34,6 +40,8 @@ interface ExecutionModeDropdownProps {
   className?: string
   align?: 'start' | 'center' | 'end'
   onCloseAutoFocus?: (event: Event) => void
+  /** Show only the mode icon; the label moves to a tooltip */
+  iconOnly?: boolean
 }
 
 const PERMISSIONS: Record<
@@ -62,6 +70,18 @@ const PERMISSIONS: Record<
   },
 }
 
+/** Icon tone per mode: the one place plan and permission colours live. */
+const MODE_TONE: Record<'plan' | PermissionMode, string> = {
+  plan: 'text-info',
+  supervised: 'text-muted-foreground',
+  build: 'text-warning',
+  auto: 'text-muted-foreground',
+  yolo: 'text-destructive',
+}
+
+const MODE_ITEM_CLASS =
+  'items-start pl-2 [&>span]:hidden data-[state=checked]:bg-accent data-[state=checked]:text-accent-foreground'
+
 /** Permission selector; existing wire modes remain compatible. */
 export function ExecutionModeDropdown({
   executionMode,
@@ -73,6 +93,7 @@ export function ExecutionModeDropdown({
   className,
   align = 'start',
   onCloseAutoFocus,
+  iconOnly = false,
 }: ExecutionModeDropdownProps) {
   const rememberedPermission = useChatStore(state =>
     sessionId ? state.permissionModes[sessionId] : undefined
@@ -82,6 +103,7 @@ export function ExecutionModeDropdown({
     ? (rememberedPermission ?? (sessionId ? 'build' : 'yolo'))
     : permissionModeForExecution(executionMode)
   const supported = getSupportedPermissionModes(backend).filter(
+    // react-doctor-disable-next-line react-doctor/js-set-map-lookups -- at most three execution modes
     mode => !availableModes || availableModes.includes(mode)
   )
   const planAvailable = !availableModes || availableModes.includes('plan')
@@ -93,33 +115,37 @@ export function ExecutionModeDropdown({
     : isLegacy
       ? 'Legacy Build'
       : active.label
+  const ariaLabel = isPlan ? 'Workflow: Plan' : `Permissions: ${triggerLabel}`
 
   return (
     <div className={cn('flex items-center shrink-0', className)}>
       <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            aria-label={
-              isPlan ? 'Workflow: Plan' : `Permissions: ${triggerLabel}`
-            }
-            disabled={disabled}
-            className={cn(
-              'flex h-8 items-center gap-1.5 px-2 text-xs font-medium hover:bg-muted/80 disabled:opacity-50',
-              isPlan
-                ? 'text-amber-700 dark:text-amber-300'
-                : 'text-muted-foreground'
-            )}
-          >
-            <PermissionIcon
-              className={cn(
-                'h-3.5 w-3.5',
-                !isPlan && permission === 'yolo' && 'text-red-500'
-              )}
-            />
-            <span>{triggerLabel}</span>
-          </button>
-        </DropdownMenuTrigger>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label={ariaLabel}
+                disabled={disabled}
+                className="flex h-8 items-center gap-1.5 px-2 text-xs font-medium text-muted-foreground hover:bg-muted/80 disabled:opacity-50"
+              >
+                <PermissionIcon
+                  className={cn(
+                    'h-3.5 w-3.5',
+                    MODE_TONE[isPlan ? 'plan' : permission]
+                  )}
+                />
+                {!iconOnly && (
+                  <>
+                    <span>{triggerLabel}</span>
+                    <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                  </>
+                )}
+              </button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          {iconOnly && <TooltipContent>{ariaLabel}</TooltipContent>}
+        </Tooltip>
         <DropdownMenuContent
           align={align}
           onCloseAutoFocus={onCloseAutoFocus}
@@ -139,11 +165,10 @@ export function ExecutionModeDropdown({
             }}
           >
             {planAvailable && (
-              <DropdownMenuRadioItem
-                value="plan"
-                className="items-start pl-2 [&>span]:hidden dark:data-[state=checked]:bg-yellow-400 dark:data-[state=checked]:text-zinc-950 dark:data-[state=checked]:[&_svg]:text-zinc-950 dark:data-[state=checked]:[&_.text-muted-foreground]:text-zinc-800"
-              >
-                <ClipboardList className="mr-2 mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
+              <DropdownMenuRadioItem value="plan" className={MODE_ITEM_CLASS}>
+                <ClipboardList
+                  className={cn('mr-2 mt-0.5 h-4 w-4 shrink-0', MODE_TONE.plan)}
+                />
                 <div>
                   <div>Plan</div>
                   <div className="mt-1 text-xs text-muted-foreground">
@@ -166,12 +191,12 @@ export function ExecutionModeDropdown({
                 <DropdownMenuRadioItem
                   key={mode}
                   value={mode}
-                  className="items-start pl-2 [&>span]:hidden dark:data-[state=checked]:bg-yellow-400 dark:data-[state=checked]:text-zinc-950 dark:data-[state=checked]:[&_svg]:text-zinc-950 dark:data-[state=checked]:[&_.text-muted-foreground]:text-zinc-800"
+                  className={MODE_ITEM_CLASS}
                 >
                   <Icon
                     className={cn(
                       'mr-2 mt-0.5 h-4 w-4 shrink-0',
-                      mode === 'yolo' && 'text-red-500!'
+                      MODE_TONE[mode]
                     )}
                   />
                   <div>

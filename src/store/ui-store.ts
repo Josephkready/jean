@@ -3,6 +3,7 @@ import { devtools } from 'zustand/middleware'
 import type { CliBackend } from '@/types/preferences'
 import type { IssueContext } from '@/types/github'
 import type { CliType } from '@/lib/cli-update'
+import type { GitRepoOwner } from '@/services/git-status'
 import { mergeSeenFailedWorkflowRunIds } from '@/components/shared/workflow-run-utils'
 import { isMobileViewport } from '@/lib/viewport'
 
@@ -40,10 +41,8 @@ export type PreferencePane =
   | 'terminal'
   | 'magic-prompts'
   | 'mcp-servers'
-  | 'providers'
   | 'usage'
   | 'integrations'
-  | 'experimental'
   | 'web-access'
   | 'opinionated'
 
@@ -93,7 +92,6 @@ export interface PendingServerUpdate {
 
 export type CliLoginModalType =
   | 'claude'
-  | 'cliproxyapi'
   | 'gh'
   | 'glab'
   | 'codex'
@@ -125,7 +123,7 @@ export interface MinimizedCliUpdate {
   progress: number | null
 }
 
-/** Top-level Jean feature selected in the sidebar tab rail */
+/** Top-level Jean feature selected in the sidebar tabs */
 export type RailSection = 'workspace' | 'agents'
 
 interface UIState {
@@ -145,7 +143,6 @@ interface UIState {
   agentUpdatesSeenAt: Record<string, number>
   leftSidebarSize: number // Width in pixels, persisted across sessions
   /** Agents sidebar width in pixels; can shrink to an icon column */
-  agentsSidebarSize: number
   /** File browser (worktree explorer) visibility */
   fileBrowserVisible: boolean
   /** File browser width in pixels, persisted across sessions */
@@ -156,6 +153,8 @@ interface UIState {
   commandPaletteOpen: boolean
   preferencesOpen: boolean
   preferencesPane: PreferencePane | null
+  /** Settings search entry to scroll to when the dialog opens */
+  preferencesJumpEntryId: string | null
   commitModalOpen: boolean
   onboardingOpen: boolean
   onboardingDismissed: boolean
@@ -164,6 +163,7 @@ interface UIState {
   openInModalOpen: boolean
   remotePickerOpen: boolean
   remotePickerRepoPath: string | null
+  remotePickerOwner: GitRepoOwner | null
   loadContextModalOpen: boolean
   linkedProjectsModalOpen: boolean
   magicModalOpen: boolean
@@ -182,6 +182,7 @@ interface UIState {
   updatePrModalOpen: boolean
   reviewCommentsModalOpen: boolean
   workflowRunsModalOpen: boolean
+  workflowRunsModalProjectId: string | null
   workflowRunsModalProjectPath: string | null
   workflowRunsModalBranch: string | null
   /**
@@ -197,6 +198,8 @@ interface UIState {
   cliLoginModalCommandArgs: string[] | null
   cliLoginModalAction: 'login' | 'update' | 'install'
   cliLoginModalMcpContext: McpLoginContext | null
+  /** Jean server that runs the login terminal. Unset: the local instance. */
+  cliLoginModalServerId: string | null
   /** Active CLI update hidden from its modal while the process keeps running. */
   minimizedCliUpdate: MinimizedCliUpdate | null
   /** Worktree IDs that should auto-trigger investigate-issue when created */
@@ -244,6 +247,8 @@ interface UIState {
   bugReportOpen: boolean
   /** Whether the one-time Jean MCP introduction dialog is open */
   jeanMcpIntroOpen: boolean
+  /** Whether the MCP servers overview dialog is open */
+  mcpServersModalOpen: boolean
   /** Whether UI state has been restored from persisted storage */
   uiStateInitialized: boolean
   /** Pending app update that user skipped — shown as indicator in title bar */
@@ -274,7 +279,6 @@ interface UIState {
   markAgentUpdatesSeen: (agentId: string, timestamp: number) => void
   setAgentUpdatesSeenAt: (seenAt: Record<string, number>) => void
   setLeftSidebarSize: (size: number) => void
-  setAgentsSidebarSize: (size: number) => void
   leftSidebarSwipe: {
     isDragging: boolean
     dragOffset: number
@@ -292,6 +296,7 @@ interface UIState {
   togglePreferences: () => void
   setPreferencesOpen: (open: boolean) => void
   openPreferencesPane: (pane: PreferencePane) => void
+  openPreferencesEntry: (entryId: string | null) => void
   setCommitModalOpen: (open: boolean) => void
   setOnboardingOpen: (open: boolean) => void
   setOnboardingManuallyTriggered: (triggered: boolean) => void
@@ -299,6 +304,7 @@ interface UIState {
   setOpenInModalOpen: (open: boolean) => void
   openRemotePicker: (
     repoPath: string,
+    owner: GitRepoOwner,
     callback: (remote: string) => void
   ) => void
   closeRemotePicker: () => void
@@ -323,8 +329,7 @@ interface UIState {
   setReviewCommentsModalOpen: (open: boolean) => void
   setWorkflowRunsModalOpen: (
     open: boolean,
-    projectPath?: string | null,
-    branch?: string | null
+    target?: { projectId: string; projectPath: string; branch?: string | null }
   ) => void
   markFailedWorkflowRunsSeen: (runIds: number[]) => void
   setSeenFailedWorkflowRunIds: (runIds: number[]) => void
@@ -335,7 +340,8 @@ interface UIState {
     command: string,
     commandArgs?: string[],
     action?: 'login' | 'update' | 'install',
-    mcpContext?: McpLoginContext
+    mcpContext?: McpLoginContext,
+    serverId?: string
   ) => void
   closeCliLoginModal: () => void
   setMinimizedCliUpdate: (update: MinimizedCliUpdate | null) => void
@@ -391,6 +397,7 @@ interface UIState {
   setFeatureTourOpen: (open: boolean) => void
   setBugReportOpen: (open: boolean) => void
   setJeanMcpIntroOpen: (open: boolean) => void
+  setMcpServersModalOpen: (open: boolean) => void
   setUIStateInitialized: (initialized: boolean) => void
   setPendingUpdateVersion: (version: string | null) => void
   setUpdateModalVersion: (version: string | null) => void
@@ -451,7 +458,6 @@ export const useUIStore = create<UIState>()(
       agentsAdvanced: false,
       agentUpdatesSeenAt: {},
       leftSidebarSize: 250, // Default width in pixels
-      agentsSidebarSize: 250,
       leftSidebarSwipe: {
         isDragging: false,
         dragOffset: 0,
@@ -464,6 +470,7 @@ export const useUIStore = create<UIState>()(
       commandPaletteOpen: false,
       preferencesOpen: false,
       preferencesPane: null,
+      preferencesJumpEntryId: null,
       commitModalOpen: false,
       onboardingOpen: false,
       onboardingDismissed: false,
@@ -472,6 +479,7 @@ export const useUIStore = create<UIState>()(
       openInModalOpen: false,
       remotePickerOpen: false,
       remotePickerRepoPath: null,
+      remotePickerOwner: null,
       loadContextModalOpen: false,
       linkedProjectsModalOpen: false,
       magicModalOpen: false,
@@ -482,6 +490,7 @@ export const useUIStore = create<UIState>()(
       updatePrModalOpen: false,
       reviewCommentsModalOpen: false,
       workflowRunsModalOpen: false,
+      workflowRunsModalProjectId: null,
       workflowRunsModalProjectPath: null,
       workflowRunsModalBranch: null,
       seenFailedWorkflowRunIds: [],
@@ -493,6 +502,7 @@ export const useUIStore = create<UIState>()(
       cliLoginModalCommandArgs: null,
       cliLoginModalAction: 'login',
       cliLoginModalMcpContext: null,
+      cliLoginModalServerId: null,
       minimizedCliUpdate: null,
       autoInvestigateWorktreeIds: new Set(),
       autoInvestigatePRWorktreeIds: new Set(),
@@ -517,6 +527,7 @@ export const useUIStore = create<UIState>()(
       featureTourOpen: false,
       bugReportOpen: false,
       jeanMcpIntroOpen: false,
+      mcpServersModalOpen: false,
       uiStateInitialized: false,
       pendingUpdateVersion: null,
       updateModalVersion: null,
@@ -671,16 +682,6 @@ export const useUIStore = create<UIState>()(
           'setLeftSidebarSize'
         ),
 
-      setAgentsSidebarSize: size =>
-        set(
-          state =>
-            state.agentsSidebarSize === size
-              ? state
-              : { agentsSidebarSize: size },
-          undefined,
-          'setAgentsSidebarSize'
-        ),
-
       setLeftSidebarSwipe: swipe =>
         set(
           state =>
@@ -806,6 +807,25 @@ export const useUIStore = create<UIState>()(
           'openPreferencesPane'
         ),
 
+      openPreferencesEntry: entryId =>
+        set(
+          state =>
+            entryId === null
+              ? state.preferencesJumpEntryId === null
+                ? state
+                : { preferencesJumpEntryId: null }
+              : {
+                  preferencesOpen: true,
+                  preferencesPane: null,
+                  preferencesJumpEntryId: entryId,
+                  ...(mustCloseMobileSidebar(state)
+                    ? { leftSidebarVisible: false }
+                    : {}),
+                },
+          undefined,
+          'openPreferencesEntry'
+        ),
+
       setCommitModalOpen: open =>
         set(
           state =>
@@ -850,12 +870,13 @@ export const useUIStore = create<UIState>()(
           'setOpenInModalOpen'
         ),
 
-      openRemotePicker: (repoPath, callback) => {
+      openRemotePicker: (repoPath, owner, callback) => {
         _remotePickerCallback = callback
         set(
           {
             remotePickerOpen: true,
             remotePickerRepoPath: repoPath,
+            remotePickerOwner: owner,
           },
           undefined,
           'openRemotePicker'
@@ -868,6 +889,7 @@ export const useUIStore = create<UIState>()(
           {
             remotePickerOpen: false,
             remotePickerRepoPath: null,
+            remotePickerOwner: null,
           },
           undefined,
           'closeRemotePicker'
@@ -954,12 +976,17 @@ export const useUIStore = create<UIState>()(
           'setReviewCommentsModalOpen'
         ),
 
-      setWorkflowRunsModalOpen: (open, projectPath, branch) =>
+      setWorkflowRunsModalOpen: (open, target) =>
         set(
           {
             workflowRunsModalOpen: open,
-            workflowRunsModalProjectPath: open ? (projectPath ?? null) : null,
-            workflowRunsModalBranch: open ? (branch ?? null) : null,
+            workflowRunsModalProjectId: open
+              ? (target?.projectId ?? null)
+              : null,
+            workflowRunsModalProjectPath: open
+              ? (target?.projectPath ?? null)
+              : null,
+            workflowRunsModalBranch: open ? (target?.branch ?? null) : null,
           },
           undefined,
           'setWorkflowRunsModalOpen'
@@ -1012,7 +1039,14 @@ export const useUIStore = create<UIState>()(
           'closeCliUpdateModal'
         ),
 
-      openCliLoginModal: (type, command, commandArgs, action, mcpContext) =>
+      openCliLoginModal: (
+        type,
+        command,
+        commandArgs,
+        action,
+        mcpContext,
+        serverId
+      ) =>
         set(
           {
             cliLoginModalOpen: true,
@@ -1021,6 +1055,7 @@ export const useUIStore = create<UIState>()(
             cliLoginModalCommandArgs: commandArgs ?? null,
             cliLoginModalAction: action ?? 'login',
             cliLoginModalMcpContext: mcpContext ?? null,
+            cliLoginModalServerId: serverId ?? null,
             minimizedCliUpdate: null,
           },
           undefined,
@@ -1036,6 +1071,7 @@ export const useUIStore = create<UIState>()(
             cliLoginModalCommandArgs: null,
             cliLoginModalAction: 'login',
             cliLoginModalMcpContext: null,
+            cliLoginModalServerId: null,
             minimizedCliUpdate: null,
           },
           undefined,
@@ -1646,6 +1682,16 @@ export const useUIStore = create<UIState>()(
               : { jeanMcpIntroOpen: open },
           undefined,
           'setJeanMcpIntroOpen'
+        ),
+
+      setMcpServersModalOpen: (open: boolean) =>
+        set(
+          state =>
+            state.mcpServersModalOpen === open
+              ? state
+              : { mcpServersModalOpen: open },
+          undefined,
+          'setMcpServersModalOpen'
         ),
 
       setUIStateInitialized: (initialized: boolean) =>

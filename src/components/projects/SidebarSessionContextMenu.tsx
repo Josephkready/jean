@@ -17,7 +17,6 @@ interface SidebarSessionContextMenuProps {
   worktreePath: string
   onRename: (session: Session) => void
   onLabel: (sessionId: string) => void
-  onArchive: (session: Session) => void
   onDelete: (session: Session) => void
   children: ReactNode
 }
@@ -59,7 +58,6 @@ function SidebarSessionContextMenuContent({
   worktreePath,
   onRename,
   onLabel,
-  onArchive,
   onDelete,
   onCloseAutoFocus,
 }: Omit<SidebarSessionContextMenuProps, 'children'> & {
@@ -83,7 +81,6 @@ function SidebarSessionContextMenuContent({
         onToggleLabel={() => onLabel(session.id)}
         onOpenInNativeClient={() => openInNativeClient(session)}
         onReconnect={() => void reconnectNativeCliSession(session, worktreeId)}
-        onArchive={() => onArchive(session)}
         onDelete={() => onDelete(session)}
       />
     </ContextMenuContent>

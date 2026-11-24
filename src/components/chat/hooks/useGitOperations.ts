@@ -1,4 +1,5 @@
 import { useCallback, useState, type RefObject } from 'react'
+import { startJeanReviewSession } from '@/lib/jean-review'
 import { invoke, listen } from '@/lib/transport'
 import { openExternal } from '@/lib/platform'
 import { dismissibleToast } from '@/lib/dismissible-toast'
@@ -13,6 +14,7 @@ import { chatQueryKeys, refreshWorktreeSessionsCaches } from '@/services/chat'
 import { startCommitJob } from '@/services/commit-jobs'
 import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
 import { buildMcpConfigJson } from '@/services/mcp'
+import { resolveSendReasoning, targetUsesEffort } from '@/lib/model-utils'
 import {
   saveWorktreePr,
   linkWorktreePr,
@@ -25,8 +27,6 @@ import {
   fetchWorktreesStatus,
   performGitPull,
 } from '@/services/git-status'
-import { prStatusQueryKeys } from '@/services/pr-status'
-import type { PrStatusEvent } from '@/types/pr-status'
 import { isBaseSession } from '@/types/projects'
 import type {
   CreatePrResponse,
@@ -56,13 +56,8 @@ import {
   resolveMagicPromptProvider,
   type CliBackend,
   type AppPreferences,
-  type MagicCodeReviewConfig,
 } from '@/types/preferences'
 import type { InvestigateOverride } from './useMagicCommands'
-import {
-  resolveCodeReviewConfigs,
-  startCodeReviewsSequentially,
-} from '@/lib/code-review-configs'
 
 interface SessionMutation<T> {
   mutate: (args: T) => void
@@ -102,6 +97,7 @@ interface UseGitOperationsParams {
   sendMessage: SendMessageMutation
   selectedThinkingLevelRef: RefObject<ThinkingLevel>
   selectedEffortLevelRef: RefObject<EffortLevel>
+  cliVersion: string | null
   mcpServersDataRef: RefObject<McpServerInfo[] | undefined>
   enabledMcpServersRef: RefObject<string[]>
 }
@@ -127,7 +123,7 @@ interface UseGitOperationsReturn {
   handleCodeRabbitPrReview: () => Promise<void>
   /** Validates and shows merge options dialog */
   handleMerge: () => Promise<void>
-  /** Merges open PR on GitHub then archives/deletes worktree */
+  /** Merges open PR on GitHub then deletes the worktree */
   handleMergePr: () => Promise<void>
   /** Detects existing merge conflicts and opens resolution session */
   handleResolveConflicts: (override?: InvestigateOverride) => Promise<void>
@@ -162,6 +158,7 @@ export function useGitOperations({
   sendMessage,
   selectedThinkingLevelRef,
   selectedEffortLevelRef,
+  cliVersion,
   mcpServersDataRef,
   enabledMcpServersRef,
 }: UseGitOperationsParams): UseGitOperationsReturn {
@@ -308,8 +305,19 @@ export function useGitOperations({
 
       const isCustomProvider = Boolean(provider && provider !== '__anthropic__')
       const customProfileName = isCustomProvider ? provider : undefined
-      const usesEffortLevel =
-        backend === 'codex' || backend === 'opencode' || backend === 'pi'
+      // Effort targets must not get the session thinking level: it would add
+      // an "ultrathink" keyword that the toolbar does not show.
+      const usesEffortLevel = targetUsesEffort({
+        backend,
+        model,
+        provider,
+        customCliProfiles: preferences?.custom_cli_profiles,
+        cliVersion,
+      })
+      const effortOverride = preferences?.magic_prompt_efforts
+        ?.resolve_conflicts_effort as EffortLevel | null | undefined
+      if (usesEffortLevel && effortOverride)
+        store.setEffortLevel(session.id, effortOverride)
 
       sendMessage.mutate(
         {
@@ -319,10 +327,11 @@ export function useGitOperations({
           message: prompt,
           model,
           executionMode,
-          thinkingLevel: selectedThinkingLevelRef.current,
-          effortLevel: usesEffortLevel
-            ? selectedEffortLevelRef.current
-            : undefined,
+          ...resolveSendReasoning(
+            usesEffortLevel,
+            selectedThinkingLevelRef.current,
+            effortOverride ?? selectedEffortLevelRef.current
+          ),
           mcpConfig: buildMcpConfigJson(
             mcpServersDataRef.current ?? [],
             enabledMcpServersRef.current,
@@ -340,11 +349,14 @@ export function useGitOperations({
       )
     },
     [
+      cliVersion,
       enabledMcpServersRef,
       inputRef,
       mcpServersDataRef,
       preferences?.ai_language,
       preferences?.chrome_enabled,
+      preferences?.custom_cli_profiles,
+      preferences?.magic_prompt_efforts?.resolve_conflicts_effort,
       preferences?.magic_prompts?.parallel_execution,
       selectedEffortLevelRef,
       selectedThinkingLevelRef,
@@ -594,6 +606,7 @@ export function useGitOperations({
           activeWorktreeId ?? undefined
         )
         triggerImmediateGitPoll()
+        triggerImmediateRemotePoll()
         if (result.permissionDenied) {
           opToast.error(
             `No permission to push to PR #${worktree?.pr_number}. Create a separate PR instead.`,
@@ -633,6 +646,24 @@ export function useGitOperations({
     ]
   )
 
+  // A clean base merge stays local. GitHub keeps the PR "conflicting" until
+  // the merge commit is pushed, so offer the push instead of faking the status.
+  const notifyCleanBaseMerge = useCallback(
+    (toastId: string | number) => {
+      triggerImmediateGitPoll()
+      toast.success('No conflicts — base branch merged cleanly', {
+        id: toastId,
+        description: 'Push the merge commit to clear the conflict on the PR.',
+        duration: 10000,
+        action: {
+          label: toastActionLabel('Push'),
+          onClick: () => void handlePush(),
+        },
+      })
+    },
+    [handlePush]
+  )
+
   const handleRevertLastCommit = useCallback(async () => {
     if (!activeWorktreePath || !activeWorktreeId) return
 
@@ -642,7 +673,7 @@ export function useGitOperations({
     try {
       const result = await invoke<RevertCommitResponse>(
         'revert_last_local_commit',
-        { worktreePath: activeWorktreePath }
+        { worktreeId: activeWorktreeId, worktreePath: activeWorktreePath }
       )
       triggerImmediateGitPoll()
       if (worktree?.project_id) fetchWorktreesStatus(worktree.project_id)
@@ -696,6 +727,7 @@ export function useGitOperations({
           cancellationRequested = true
           toast.info('Cancelling PR creation...', { id: toastId })
           await invoke<boolean>('cancel_create_pr_with_ai_content', {
+            worktreeId: activeWorktreeId,
             worktreePath: activeWorktreePath,
           })
         },
@@ -772,11 +804,7 @@ export function useGitOperations({
   // If existingSessionId is provided, stores results on that session (in-place review from ChatWindow)
   // Creates a new session and stores review results in it
   const runReview = useCallback(
-    async (
-      source: 'ai' | 'coderabbit-cli' | 'coderabbit-pr',
-      reviewConfig?: MagicCodeReviewConfig,
-      reviewSessionId?: string
-    ) => {
+    async (source: 'coderabbit-cli' | 'coderabbit-pr') => {
       if (!activeWorktreeId || !activeWorktreePath) return
 
       const { setWorktreeLoading, clearWorktreeLoading } =
@@ -841,8 +869,7 @@ export function useGitOperations({
       }
 
       const reviewRunId = generateId()
-      const reviewLabel =
-        source === 'coderabbit-cli' ? 'CodeRabbit CLI review' : 'Review'
+      const reviewLabel = 'CodeRabbit CLI review'
       const toastId = toast.loading(
         `Starting ${reviewLabel} for ${reviewTarget}...`
       )
@@ -879,29 +906,8 @@ export function useGitOperations({
             worktreeId: activeWorktreeId,
             worktreePath: activeWorktreePath,
             source,
-            backend:
-              reviewConfig?.backend ??
-              resolveMagicPromptBackend(
-                preferences?.magic_prompt_backends,
-                'code_review_backend',
-                preferences?.default_backend
-              ),
-            customPrompt: preferences?.magic_prompts?.code_review,
-            model:
-              reviewConfig?.model ??
-              preferences?.magic_prompt_models?.code_review_model,
-            customProfileName: resolveMagicPromptProvider(
-              preferences?.magic_prompt_providers,
-              'code_review_provider',
-              preferences?.default_provider
-            ),
-            reasoningEffort:
-              reviewConfig?.reasoning_effort ??
-              preferences?.magic_prompt_efforts?.code_review_effort ??
-              null,
             reviewRunId,
-            reviewType: source === 'coderabbit-cli' ? 'all' : null,
-            sessionId: reviewSessionId,
+            reviewType: 'all',
           }
         )
 
@@ -927,13 +933,15 @@ export function useGitOperations({
             cancel: {
               label: 'Cancel',
               onClick: () => {
-                invoke<boolean>('cancel_review_job', { jobId: job.id }).catch(
-                  error => {
-                    toast.error(`Failed to cancel review: ${error}`, {
-                      id: toastId,
-                    })
-                  }
-                )
+                invoke<boolean>('cancel_review_job', {
+                  jobId: job.id,
+                  worktreeId: activeWorktreeId,
+                  worktreePath: activeWorktreePath,
+                }).catch(error => {
+                  toast.error(`Failed to cancel review: ${error}`, {
+                    id: toastId,
+                  })
+                })
               },
             },
           }
@@ -1011,6 +1019,8 @@ export function useGitOperations({
         } else {
           const currentJob = await invoke<ReviewJob | null>('get_review_job', {
             jobId: job.id,
+            worktreeId: activeWorktreeId,
+            worktreePath: activeWorktreePath,
           }).catch(() => null)
           if (currentJob) handleTerminalReviewJob(currentJob)
         }
@@ -1021,40 +1031,34 @@ export function useGitOperations({
         clearWorktreeLoading(activeWorktreeId)
       }
     },
-    [
-      activeWorktreeId,
-      activeWorktreePath,
-      worktree,
-      project?.name,
-      queryClient,
-      preferences?.magic_prompts?.code_review,
-      preferences?.magic_prompt_models?.code_review_model,
-      preferences?.magic_prompt_backends,
-      preferences?.default_backend,
-      preferences?.magic_prompt_providers,
-      preferences?.default_provider,
-      preferences?.magic_prompt_efforts?.code_review_effort,
-    ]
+    [activeWorktreeId, activeWorktreePath, worktree, project?.name, queryClient]
   )
 
   const handleReview = useCallback(async () => {
-    const configs = resolveCodeReviewConfigs({
-      configured: preferences?.magic_code_review_configs,
-      fallbackBackend:
-        resolveMagicPromptBackend(
-          preferences?.magic_prompt_backends,
-          'code_review_backend',
-          preferences?.default_backend
-        ) ?? 'claude',
-      fallbackModel:
-        preferences?.magic_prompt_models?.code_review_model ?? 'sonnet',
-    })
-    let reviewSessionId: string | undefined
-    await startCodeReviewsSequentially(configs, async config => {
-      reviewSessionId =
-        (await runReview('ai', config, reviewSessionId)) ?? reviewSessionId
-    })
-  }, [preferences, runReview])
+    if (!activeWorktreeId || !activeWorktreePath) return
+    const baseBranch =
+      worktree?.base_branch || project?.default_branch || 'main'
+    const baseRemote = worktree?.base_remote || 'origin'
+    try {
+      await startJeanReviewSession({
+        worktreeId: activeWorktreeId,
+        worktreePath: activeWorktreePath,
+        baseRef: `${baseRemote}/${baseBranch}`,
+        preferences,
+        queryClient,
+      })
+    } catch (error) {
+      toast.error(`Failed to start review: ${error}`)
+    }
+  }, [
+    activeWorktreeId,
+    activeWorktreePath,
+    preferences,
+    project?.default_branch,
+    queryClient,
+    worktree?.base_branch,
+    worktree?.base_remote,
+  ])
 
   const handleCodeRabbitReview = useCallback(async () => {
     await runReview('coderabbit-cli')
@@ -1100,7 +1104,7 @@ export function useGitOperations({
     setShowMergeDialog(true)
   }, [activeWorktreeId, worktree])
 
-  // Handle Merge PR - merges open PR on GitHub then archives/deletes worktree
+  // Handle Merge PR - merges open PR on GitHub then deletes the worktree
   const handleMergePr = useCallback(async () => {
     if (!activeWorktreeId || !worktree) return
     if (!worktree.pr_number) {
@@ -1111,37 +1115,29 @@ export function useGitOperations({
     const mergePrToastId = toast.loading('Merging PR...')
     try {
       const result = await invoke<MergePrResponse>('merge_github_pr', {
+        worktreeId: worktree.id,
         worktreePath: worktree.path,
       })
       toast.success(result.message, { id: mergePrToastId })
 
-      // Archive or delete the worktree (same as auto-archive on merge)
-      const shouldDelete = preferences?.removal_behavior === 'delete'
-      const action = shouldDelete ? 'Deleting' : 'Archiving'
-      const cleanupToastId = toast.loading(`${action} worktree...`)
+      const cleanupToastId = toast.loading('Deleting worktree...')
       try {
-        await invoke(shouldDelete ? 'delete_worktree' : 'archive_worktree', {
-          worktreeId: activeWorktreeId,
-        })
+        await invoke('delete_worktree', { worktreeId: activeWorktreeId })
         queryClient.invalidateQueries({
           queryKey: projectsQueryKeys.worktrees(worktree.project_id),
         })
         triggerImmediateGitPoll()
         if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
-        const pastAction = shouldDelete ? 'Deleted' : 'Archived'
-        toast.success(`${pastAction} "${worktree.name}"`, {
+        toast.success(`Deleted "${worktree.name}"`, { id: cleanupToastId })
+      } catch (cleanupError) {
+        toast.error(`Failed to delete worktree: ${cleanupError}`, {
           id: cleanupToastId,
         })
-      } catch (cleanupError) {
-        toast.error(
-          `Failed to ${action.toLowerCase()} worktree: ${cleanupError}`,
-          { id: cleanupToastId }
-        )
       }
     } catch (error) {
       toast.error(`Failed to merge PR: ${error}`, { id: mergePrToastId })
     }
-  }, [activeWorktreeId, worktree, preferences?.removal_behavior, queryClient])
+  }, [activeWorktreeId, worktree, queryClient])
 
   // Handle Resolve Conflicts - detects existing merge conflicts and opens resolution session
   const handleResolveConflicts = useCallback(
@@ -1163,11 +1159,7 @@ export function useGitOperations({
           )
 
           if (!prResult.has_conflicts) {
-            toast.success('No conflicts — base branch merged cleanly', {
-              id: toastId,
-            })
-            triggerImmediateGitPoll()
-            triggerImmediateRemotePoll()
+            notifyCleanBaseMerge(toastId)
             return
           }
 
@@ -1323,6 +1315,7 @@ ${resolveInstructions}`
       cacheCreatedSession,
       resolveConflictSessionSelection,
       sendConflictResolutionPrompt,
+      notifyCleanBaseMerge,
     ]
   )
 
@@ -1342,22 +1335,7 @@ ${resolveInstructions}`
         )
 
         if (!result.has_conflicts) {
-          toast.success('No conflicts — base branch merged cleanly', {
-            id: toastId,
-          })
-          triggerImmediateGitPoll()
-
-          // Optimistically clear "Conflicts" button by updating cached PR status
-          const cached = queryClient.getQueryData<PrStatusEvent>(
-            prStatusQueryKeys.worktree(activeWorktreeId)
-          )
-          if (cached) {
-            queryClient.setQueryData(
-              prStatusQueryKeys.worktree(activeWorktreeId),
-              { ...cached, mergeable: 'mergeable' }
-            )
-          }
-          triggerImmediateRemotePoll()
+          notifyCleanBaseMerge(toastId)
           return
         }
 
@@ -1444,6 +1422,7 @@ ${resolveInstructions}`
       cacheCreatedSession,
       resolveConflictSessionSelection,
       sendConflictResolutionPrompt,
+      notifyCleanBaseMerge,
     ]
   )
 

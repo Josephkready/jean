@@ -17,11 +17,13 @@ export interface LinearIssueItemProps {
   isSelected: boolean
   isCreating: boolean
   contextMatches?: ContextLinkMatch[]
+  /** Matches in this worktree show only the session name */
+  currentWorktreeId?: string
   isChecked?: boolean
   onCheckedChange?: (checked: boolean) => void
   onMouseEnter: () => void
   onClick: (background: boolean) => void
-  onInvestigate: (background: boolean) => void
+  onInvestigate?: (background: boolean) => void
   onPreview?: () => void
 }
 
@@ -39,6 +41,7 @@ export function LinearIssueItem({
   isSelected,
   isCreating,
   contextMatches,
+  currentWorktreeId,
   isChecked = false,
   onCheckedChange,
   onMouseEnter,
@@ -91,7 +94,7 @@ export function LinearIssueItem({
           </span>
           <span className="text-sm font-medium truncate">{issue.title}</span>
           {isNewIssue(issue.createdAt) && (
-            <span className="shrink-0 rounded-full bg-success/10 px-1.5 py-0.5 text-[10px] font-medium text-success border border-success/20">
+            <span className="shrink-0 rounded-full bg-success/10 px-1.5 py-0.5 text-2xs font-medium text-success border border-success/20">
               New
             </span>
           )}
@@ -127,29 +130,36 @@ export function LinearIssueItem({
           )}
         </div>
       </button>
-      <ContextLinkBadge matches={contextMatches} />
+      <ContextLinkBadge
+        matches={contextMatches}
+        currentWorktreeId={currentWorktreeId}
+      />
       <div className="flex items-center gap-1 flex-shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              onClick={e => {
-                e.stopPropagation()
-                onInvestigate(e.metaKey || e.ctrlKey)
-              }}
-              disabled={isCreating}
-              aria-label="Investigate"
-              className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              {isCreating ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Wand2 className="h-3 w-3 text-current" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Investigate ({getModifierSymbol()}+M)</TooltipContent>
-        </Tooltip>
+        {onInvestigate && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation()
+                  onInvestigate(e.metaKey || e.ctrlKey)
+                }}
+                disabled={isCreating}
+                aria-label="Investigate"
+                className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                {isCreating ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Wand2 className="h-3 w-3 text-current" />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Investigate ({getModifierSymbol()}+M)
+            </TooltipContent>
+          </Tooltip>
+        )}
         {onPreview && (
           <div className="opacity-0 group-hover:opacity-100 transition-opacity">
             <Tooltip>

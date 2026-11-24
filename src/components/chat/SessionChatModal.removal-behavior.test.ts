@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { closeRequiresConfirmation } from '@/components/projects/worktree-close-decision'
 
 const readSource = (path: string) =>
   readFileSync(join(process.cwd(), path), 'utf8')
@@ -86,95 +85,16 @@ describe('SessionChatModal removal behavior', () => {
     expect(source).toContain('onPointerDown={e => e.stopPropagation()}')
   })
 
-  it('uses the delete-aware handler when removing non-last tabs', () => {
-    const source = readSource('src/components/chat/SessionChatModal.tsx')
-    const start = source.indexOf('const removeSessionTab = useCallback(')
-    const end = source.indexOf('\n  const handleTabAuxClick', start)
-    const removeSessionTab =
-      start === -1 || end === -1 ? '' : source.slice(start, end)
-
-    expect(removeSessionTab).toBeTruthy()
-    expect(removeSessionTab).toContain('handleDeleteSession(session.id)')
-    expect(removeSessionTab).not.toMatch(
-      /else\s*\{[\s\S]*?selectVisualNeighbor\(session\.id\)[\s\S]*?handleArchiveSession\(session\.id\)/
-    )
-  })
-
-  it('confirms non-empty session tab close even when other tabs remain (issue #56)', () => {
-    const source = readSource('src/components/chat/SessionChatModal.tsx')
-    const start = source.indexOf('const removeSessionTab = useCallback(')
-    const end = source.indexOf('\n  const handleTabAuxClick', start)
-    const removeSessionTab =
-      start === -1 || end === -1 ? '' : source.slice(start, end)
-
-    expect(removeSessionTab).toContain('needsConfirm')
-    // Gate behavior is covered by the behavioral closeRequiresConfirmation table test.
-    // Confirm gate wraps the action for every non-empty tab (not only last).
-    expect(removeSessionTab).toMatch(
-      /if \(needsConfirm\) \{[\s\S]*?pendingCloseAction\.current = action/
-    )
-    // Neighbor select happens inside the deferred action, not as a bypass.
-    expect(removeSessionTab).toMatch(
-      /const action = \(\) => \{[\s\S]*activeSessions\.length > 1[\s\S]*handleDeleteSession/
-    )
-  })
-
-  it('decides close confirmation from the removal behavior and explicit archive flag (issue #35)', () => {
-    expect(closeRequiresConfirmation(true, 'archive', false)).toBe(false)
-    expect(closeRequiresConfirmation(true, 'archive', true)).toBe(false)
-    expect(closeRequiresConfirmation(true, 'delete', false)).toBe(true)
-    expect(closeRequiresConfirmation(true, 'delete', true)).toBe(false)
-    expect(closeRequiresConfirmation(false, 'delete', false)).toBe(false)
-  })
-
-  it('waits for last-session removal success before leaving the modal', () => {
-    const source = readSource('src/components/chat/SessionChatModal.tsx')
-    const start = source.indexOf('const removeSessionTab = useCallback(')
-    const end = source.indexOf('\n  const handleTabAuxClick', start)
-    const removeSessionTab =
-      start === -1 || end === -1 ? '' : source.slice(start, end)
-
-    expect(removeSessionTab).toContain('handleDeleteSession(session.id)')
-    expect(removeSessionTab).not.toContain('onClose()')
-    expect(removeSessionTab).not.toContain('navigateToProjectPicker(')
-  })
-
   it('creates and opens an empty session after the last session is removed', () => {
     const commandSource = readSource('jean-core/src/chat/commands.rs')
     const closeStart = commandSource.indexOf('pub async fn close_session(')
-    const closeEnd = commandSource.indexOf(
-      'pub async fn archive_session(',
-      closeStart
-    )
-    const archiveEnd = commandSource.indexOf(
-      'pub async fn unarchive_session(',
-      closeEnd
-    )
+    const closeEnd = commandSource.indexOf('pub async fn', closeStart + 1)
     const closeSession = commandSource.slice(closeStart, closeEnd)
-    const archiveSession = commandSource.slice(closeEnd, archiveEnd)
 
-    for (const command of [closeSession, archiveSession]) {
-      expect(command).toContain('if new_active.is_none()')
-      expect(command).toContain('let session = create_session(')
-      expect(command).toContain('return Ok(Some(session.id))')
-    }
-  })
-
-  it('asks to close the worktree when Cmd+W is pressed with no sessions', () => {
-    const modalSource = readSource('src/components/chat/SessionChatModal.tsx')
-    const canvasSource = readSource(
-      'src/components/dashboard/ProjectCanvasView.tsx'
-    )
-
-    expect(modalSource).toContain("setCloseConfirmMode('worktree')")
-    expect(modalSource).toContain('onRequestCloseWorktree')
-    expect(modalSource).toContain('mode={closeConfirmMode}')
-    expect(canvasSource).toContain(
-      'onRequestCloseWorktree={handleRequestCloseModalWorktree}'
-    )
-    expect(canvasSource).toContain(
-      'closeWorktreeDirectlyRef.current(modal.worktreeId)'
-    )
+    expect(closeStart).toBeGreaterThan(-1)
+    expect(closeSession).toContain('if new_active.is_none()')
+    expect(closeSession).toContain('let session = create_session(')
+    expect(closeSession).toContain('return Ok(Some(session.id))')
   })
 
   it('hides session tabs and top action chrome when zen mode is active', () => {
@@ -194,7 +114,7 @@ describe('SessionChatModal removal behavior', () => {
 
     expect(source).toContain('flex min-w-max items-center gap-0 py-0 px-0')
     expect(source).toContain(
-      'group/tab flex shrink-0 items-center gap-1.5 border-r border-border/40 px-3 py-1.5 text-xs transition-colors whitespace-nowrap'
+      'group/tab relative flex shrink-0 items-center gap-1.5 border-r border-border/20 px-3 py-1.5 text-xs transition-colors whitespace-nowrap'
     )
     expect(source).not.toContain('group/tab flex rounded items-center')
   })
@@ -235,24 +155,13 @@ describe('SessionChatModal removal behavior', () => {
   it('uses the muted icon color without moving the mobile header actions', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
-    expect(source).toContain(
-      "isMobile &&\n                            'text-muted-foreground hover:text-foreground'"
+    expect(source).toMatch(
+      /isMobile &&\s+'text-muted-foreground hover:text-foreground'/
     )
     expect(source).toContain(
       "? 'h-7 w-7 text-muted-foreground hover:text-foreground'"
     )
     expect(source).toContain('aria-label="New session"')
-  })
-
-  it('falls back to a real session when restored active session state is stale', () => {
-    const source = readSource('src/components/chat/SessionChatModal.tsx')
-
-    expect(source).toMatch(
-      /resolveModalSessionId\(\s*activeSessionId,\s*sessions\.map\(session => session\.id\),\s*sessionsData\?\.active_session_id,\s*activeSessionGone\s*\)/
-    )
-    expect(source).toContain(
-      'const activeSessionGone = !!sessionsData && missingActiveSessionFailed'
-    )
   })
 
   it('refreshes the session list when the modal opens', () => {

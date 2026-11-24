@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, Plus, Server, X } from '@/components/icons/reicon'
+import { ChevronDown, Plus, Server } from '@/components/icons/reicon'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,21 +15,28 @@ import {
 import { isNativeApp } from '@/lib/environment'
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/store/ui-store'
+import { SidebarSearchField } from '@/components/projects/SidebarSearchField'
 import { useIsMobile } from '@/hooks/use-mobile'
-import { SidebarTabRail } from '@/components/projects/SidebarTabRail'
 import { AgentIcon } from '@/components/icons/JeanAgentIcon'
 import type { AgentSummary } from '@/services/agents'
 import { agentStatusLabel, agentSubtitle, useSelectedAgent } from './agents'
 import { NewAgentDialog } from './NewAgentDialog'
 
-/** Dot after the row: blue = unread messages, amber = needs you. */
-export function agentRowDot(
-  agent: AgentSummary
-): 'unread' | 'attention' | null {
+export type AgentRowDot = 'attention' | 'unread' | 'working'
+
+/** The one status dot of a row, most urgent first. */
+export function agentRowDot(agent: AgentSummary): AgentRowDot | null {
   if (agent.pendingApprovals > 0 || agent.status === 'waiting')
     return 'attention'
   if (agent.unreadNotifications > 0) return 'unread'
+  if (agent.status === 'working') return 'working'
   return null
+}
+
+const ROW_DOT: Record<AgentRowDot, { className: string; label: string }> = {
+  attention: { className: 'bg-warning', label: 'Needs you' },
+  unread: { className: 'bg-info', label: 'Unread messages' },
+  working: { className: 'bg-success', label: 'Working' },
 }
 
 const ALL_SERVERS = 'all'
@@ -87,21 +94,15 @@ function AgentRow({
             aria-current={isSelected ? 'page' : undefined}
             aria-label={agent.name}
             className={cn(
-              'relative flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 @max-[13rem]/agents:justify-center @max-[13rem]/agents:px-0',
-              isSelected ? 'bg-accent text-foreground' : 'hover:bg-accent/50'
+              'relative flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-[background-color,box-shadow,color] duration-150 @max-[13rem]/agents:justify-center @max-[13rem]/agents:px-0',
+              isSelected
+                ? 'bg-muted/50 text-foreground shadow'
+                : 'hover:bg-muted/30'
             )}
             onClick={() => onSelect(agent.id)}
             data-testid={`agent-row-${agent.id}`}
           >
-            <span className="relative shrink-0">
-              <AgentIcon icon={agent.icon} className="size-9" />
-              {agent.status === 'working' && (
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full bg-green-500 ring-2 ring-sidebar dark:ring-[#0b0b0b]"
-                  aria-label="Working"
-                />
-              )}
-            </span>
+            <AgentIcon icon={agent.icon} className="size-9 shrink-0" />
             <span className="min-w-0 flex-1 @max-[13rem]/agents:hidden">
               <span className="block truncate text-sm font-medium text-foreground">
                 {agent.name}
@@ -114,9 +115,9 @@ function AgentRow({
               <span
                 className={cn(
                   'size-2 shrink-0 rounded-full @max-[13rem]/agents:absolute @max-[13rem]/agents:top-1.5 @max-[13rem]/agents:right-1.5',
-                  dot === 'unread' ? 'bg-blue-500' : 'bg-amber-500'
+                  ROW_DOT[dot].className
                 )}
-                aria-label={dot === 'unread' ? 'Unread messages' : 'Needs you'}
+                aria-label={ROW_DOT[dot].label}
               />
             )}
           </button>
@@ -155,10 +156,9 @@ function AgentGroup({
       {custom.length > 0 && (
         <>
           {/* Narrow sidebar: a divider replaces the heading */}
-          <div className="mx-3 mt-3 mb-2 hidden border-t border-border @max-[13rem]/agents:block" />
+          <div className="mx-3 mt-3 mb-2 hidden border-t border-border/20 @max-[13rem]/agents:block" />
           <h4 className="pb-1 pl-4 pr-2 pt-4 text-xs text-muted-foreground @max-[13rem]/agents:hidden">
             Your agents
-            <span className="ml-1.5 tabular-nums">{custom.length}</span>
           </h4>
           <ul className="space-y-0.5 px-2">
             {custom.map(agent => (
@@ -223,30 +223,16 @@ export function AgentsSidebar() {
 
   return (
     <div className="flex h-full">
-      {isMobile && (
-        <SidebarTabRail className="border-r border-border/40">
-          <button
-            type="button"
-            className={cn(ICON_BUTTON, 'size-12 shrink-0')}
-            onClick={() => useUIStore.getState().setLeftSidebarVisible(false)}
-            aria-label="Close sidebar"
-          >
-            <X className="size-6" />
-          </button>
-        </SidebarTabRail>
-      )}
       {/* Narrow sidebar (container below 13rem) shows only the agent icons */}
       <div className="@container/agents flex min-w-0 flex-1 flex-col">
-        {/* Same 8px offset and 48px height as the rail buttons, so they line up */}
-        <div className="mt-2 flex h-12 shrink-0 items-center justify-between px-3 @max-[13rem]/agents:justify-center">
-          <h2 className="text-sm font-medium text-foreground @max-[13rem]/agents:hidden">
-            Agents
-          </h2>
+        {/* The sidebar tab strip already names this view */}
+        <div className="flex shrink-0 items-center gap-1 px-3 pb-2">
+          <SidebarSearchField />
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 type="button"
-                className={cn(ICON_BUTTON, 'size-7')}
+                className={cn(ICON_BUTTON, 'size-8 shrink-0')}
                 onClick={() => setNewAgentOpen(true)}
                 aria-label="New agent"
               >
@@ -257,7 +243,7 @@ export function AgentsSidebar() {
           </Tooltip>
         </div>
         {showServerFilter && (
-          <div className="shrink-0 px-2 pb-2">
+          <div className="shrink-0 px-2 py-2">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
@@ -305,24 +291,26 @@ export function AgentsSidebar() {
           </p>
         ) : null}
         <div
-          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-3"
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-2 pb-3"
           aria-label="Agents"
         >
           {agents &&
-            groups.map(([groupId, groupName, groupAgents]) => (
-              <section key={groupId || 'agents'}>
-                {groupName && (
-                  <h3 className="truncate px-4 pb-1.5 pt-3 text-xs font-medium text-muted-foreground @max-[13rem]/agents:hidden">
-                    {groupName}
-                  </h3>
-                )}
-                <AgentGroup
-                  agents={groupAgents}
-                  selectedId={selected?.id}
-                  onSelect={handleSelect}
-                />
-              </section>
-            ))}
+            groups
+              .filter(([, , groupAgents]) => groupAgents.length > 0)
+              .map(([groupId, groupName, groupAgents]) => (
+                <section key={groupId || 'agents'}>
+                  {groupName && (
+                    <h3 className="truncate px-4 pb-1.5 pt-3 text-xs font-medium text-muted-foreground @max-[13rem]/agents:hidden">
+                      {groupName}
+                    </h3>
+                  )}
+                  <AgentGroup
+                    agents={groupAgents}
+                    selectedId={selected?.id}
+                    onSelect={handleSelect}
+                  />
+                </section>
+              ))}
         </div>
       </div>
       <NewAgentDialog

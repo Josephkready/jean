@@ -1,3 +1,4 @@
+import { WorkingWaveform } from '@/components/ui/status-indicator'
 import {
   draggable,
   dropTargetForElements,
@@ -9,6 +10,7 @@ import {
   type Edge,
 } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge'
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -17,13 +19,14 @@ import {
   useMemo,
   useRef,
   useState,
-  lazy,
   Suspense,
 } from 'react'
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import { invoke } from '@/lib/transport'
 import { requestImportExistingWorktree } from '@/lib/import-existing-worktree'
 import { cn } from '@/lib/utils'
+import { lazyWithPreload, preloadWhenIdle } from '@/lib/lazy-preload'
+import { MODAL_TERMINAL_PRIMARY_ROW_CLASS } from '@/components/chat/modal-terminal-layout'
 import {
   canOpenInEditor,
   canOpenInFinder,
@@ -41,8 +44,8 @@ import {
   Activity,
   AlertCircle,
   CircleDot,
-  GitBranch,
-  GitBranchPlus,
+  Check,
+  GitMerge,
   GitPullRequestArrow,
   ShieldAlert,
   Code,
@@ -55,7 +58,7 @@ import {
   GripVertical,
   Tag,
 } from '@/components/icons/reicon'
-import { Button } from '@/components/ui/button'
+import { Button, raisedToolbar } from '@/components/ui/button'
 import {
   Tooltip,
   TooltipContent,
@@ -65,9 +68,9 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
-import { closeRequiresConfirmation } from '@/components/projects/worktree-close-decision'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -82,13 +85,22 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 import { Spinner } from '@/components/ui/spinner'
 import { GitStatusBadges } from '@/components/ui/git-status-badges'
 import {
@@ -106,7 +118,12 @@ import {
   projectsQueryKeys,
   type PackageScript,
 } from '@/services/projects'
-import { chatQueryKeys, cancelChatMessage } from '@/services/chat'
+import {
+  chatQueryKeys,
+  cancelChatMessage,
+  prefetchWorktreeDefaultSession,
+} from '@/services/chat'
+import { useHoverIntent } from '@/hooks/useHoverIntent'
 import {
   useDependabotAlerts,
   useGitHubIssues,
@@ -116,7 +133,7 @@ import {
 } from '@/services/github'
 import { useGhCliAuth } from '@/services/gh-cli'
 import { providerLabels, useProjectGitProvider } from '@/services/git-provider'
-import { useGitStatus } from '@/services/git-status'
+import { useGitStatus, useIsGitSyncing } from '@/services/git-status'
 import { useChatStore } from '@/store/chat-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
@@ -124,11 +141,7 @@ import { useTerminalStore } from '@/store/terminal-store'
 import { isBaseSession, type Project, type Worktree } from '@/types/projects'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import type { LabelData, Session, WorktreeSessions } from '@/types/chat'
-import { NewIssuesBadge } from '@/components/shared/NewIssuesBadge'
-import { OpenPRsBadge } from '@/components/shared/OpenPRsBadge'
-import { FailedRunsBadge } from '@/components/shared/FailedRunsBadge'
 import { countUnreadFailedWorkflowRuns } from '@/components/shared/workflow-run-utils'
-import { SecurityAlertsBadge } from '@/components/shared/SecurityAlertsBadge'
 import { SessionChatModal } from '@/components/chat/SessionChatModal'
 import {
   getStackedBaseBranch,
@@ -157,9 +170,12 @@ import {
   flattenGroups,
   isActionableWaitingStatus,
 } from '@/components/chat/session-card-utils'
+import {
+  resolveActiveSessionId,
+  resolvePersistedActiveSessionId,
+} from '@/components/chat/session-lifecycle'
 import { WorktreeSetupCard } from '@/components/chat/WorktreeSetupCard'
-import { OpenInButton } from '@/components/open-in/OpenInButton'
-import { ScriptsButton } from '@/components/open-in/ScriptsButton'
+import { ScriptsSubmenu } from '@/components/open-in/ScriptsButton'
 import { useCanvasStoreState } from '@/components/chat/hooks/useCanvasStoreState'
 import {
   type WorktreeSortMode,
@@ -172,20 +188,22 @@ import { useClearContextApproval } from '@/components/chat/hooks/useClearContext
 import { useWorktreeApproval } from '@/components/chat/hooks/useWorktreeApproval'
 import { useCanvasKeyboardNav } from '@/components/chat/hooks/useCanvasKeyboardNav'
 import { useCanvasShortcutEvents } from '@/components/chat/hooks/useCanvasShortcutEvents'
-import {
-  useArchiveWorktree,
-  useDeleteWorktree,
-  useCloseBaseSessionClean,
-  useCloseBaseSessionArchive,
-} from '@/services/projects'
-import { TerminalStatusIndicator } from '@/hooks/useWorktreeTerminalStatus'
+import { useDeleteWorktree } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { DEFAULT_KEYBINDINGS, formatShortcutDisplay } from '@/types/keybindings'
+import type { CheckStatus, PrDisplayStatus } from '@/types/pr-status'
+import { usePrStatus } from '@/services/pr-status'
+import { getPrStatusDisplay } from '@/components/chat/toolbar/toolbar-utils'
+import { openExternal } from '@/lib/platform'
+import {
+  getCheckStatusDisplay,
+  isStaleActivity,
+  toMilliseconds,
+} from './worktree-row-status'
 import { CloseWorktreeDialog } from '@/components/chat/CloseWorktreeDialog'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { hasBackendTransport } from '@/lib/environment'
 import { consumeWebReloadState } from '@/lib/web-reload-state'
-import { readCloseBypassDetail } from '@/lib/confirm-bypass'
 import { useLatestRef } from '@/hooks/useLatestRef'
 import {
   shouldDisableWorktreeTextSelection,
@@ -204,12 +222,19 @@ import {
 } from './canvas-worktree-filters'
 import { MrRobotPanel, MrRobotProgress } from './MrRobotPanel'
 import { getWorktreeLabelContainerClassName } from './worktree-label-layout'
-const GitDiffModal = lazy(() =>
+import {
+  CANVAS_ROW_STATE_LABELS,
+  getCanvasRowAttention,
+  getCanvasRowState,
+  sortByCanvasRowState,
+  type CanvasRowState,
+} from './canvas-row-state'
+const GitDiffModal = lazyWithPreload(() =>
   import('@/components/chat/GitDiffModal').then(mod => ({
     default: mod.GitDiffModal,
   }))
 )
-const LinkedProjectsModal = lazy(() =>
+const LinkedProjectsModal = lazyWithPreload(() =>
   import('@/components/magic/LinkedProjectsModal').then(mod => ({
     default: mod.LinkedProjectsModal,
   }))
@@ -247,6 +272,12 @@ interface ProjectCanvasViewProps {
 
 const EMPTY_PINNED_LABELS: LabelData[] = []
 const EMPTY_LABELS: LabelData[] = []
+
+const WORKTREE_SORT_OPTIONS: { value: WorktreeSortMode; label: string }[] = [
+  { value: 'created', label: 'Creation date' },
+  { value: 'last_activity', label: 'Last activity' },
+  { value: 'manual', label: 'Manual' },
+]
 
 interface WorktreeSection {
   worktree: Worktree
@@ -294,6 +325,7 @@ type CanvasWorktreeDragState = WorktreeReorderDragState
 
 function SortableCanvasWorktreeSection({
   section,
+  rowState,
   disabled,
   isDragging,
   closestEdge,
@@ -301,6 +333,7 @@ function SortableCanvasWorktreeSection({
   children,
 }: {
   section: WorktreeSection
+  rowState: CanvasRowState
   disabled: boolean
   isDragging: boolean
   closestEdge: Edge | null
@@ -323,7 +356,8 @@ function SortableCanvasWorktreeSection({
             isWorktreeDragData(source.data) &&
             source.data.projectId === projectId &&
             source.data.scope === DRAG_SCOPE_CANVAS_WORKTREE_LIST &&
-            source.data.worktreeId !== section.worktree.id
+            source.data.worktreeId !== section.worktree.id &&
+            source.data.rowState === rowState
           )
         },
         getData: ({ input, element }) => {
@@ -356,13 +390,14 @@ function SortableCanvasWorktreeSection({
             projectId,
             worktreeId: section.worktree.id,
             scope: DRAG_SCOPE_CANVAS_WORKTREE_LIST,
+            rowState,
           }),
         })
       )
     }
 
     return combine(...cleanupFns)
-  }, [disabled, projectId, section.worktree.id])
+  }, [disabled, projectId, rowState, section.worktree.id])
 
   return (
     <div
@@ -379,7 +414,7 @@ function SortableCanvasWorktreeSection({
         <button
           ref={dragHandleRef}
           type="button"
-          className="absolute -left-5 top-2 z-10 flex h-7 w-5 cursor-grab items-center justify-center rounded text-muted-foreground/45 opacity-0 transition-opacity hover:bg-muted/70 hover:text-muted-foreground group-hover/canvas-list:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/60 active:cursor-grabbing"
+          className="absolute -left-5 top-2 z-10 flex h-7 w-5 cursor-grab items-center justify-center rounded text-muted-foreground/45 opacity-0 transition-opacity hover:bg-muted/70 hover:text-muted-foreground group-hover/canvas-list:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50 active:cursor-grabbing"
           aria-label={`Reorder ${isBaseSession(section.worktree) ? 'Base Session' : section.worktree.name}`}
           onClick={event => event.stopPropagation()}
         >
@@ -413,14 +448,6 @@ export function getCanvasHighlight(
   }
 }
 
-type ActiveStatus =
-  | 'waiting'
-  | 'planning'
-  | 'vibing'
-  | 'yoloing'
-  | 'review'
-  | null
-
 interface CanvasLabelFilterTabItem extends PinnedWorktreeLabelTab {
   icon: React.ComponentType<{ className?: string; style?: React.CSSProperties }>
 }
@@ -435,28 +462,9 @@ function isLabelFilterTabItem(
   return isLabelFilterTab(tab.value)
 }
 
-function getActiveStatus(cards: SessionCardData[]): ActiveStatus {
-  // Actionable waiting (plan/input/permission/codex queues) collapses only at
-  // the worktree *summary* level — individual cards keep distinct statuses.
-  if (cards.some(c => isActionableWaitingStatus(c.status))) return 'waiting'
-  if (cards.some(c => c.status === 'planning' || c.status === 'scheduled'))
-    return 'planning'
-  if (cards.some(c => c.status === 'vibing')) return 'vibing'
-  if (cards.some(c => c.status === 'yoloing')) return 'yoloing'
-  // Prefer review-ready over completed for worktree-level summary
-  if (cards.some(c => c.status === 'review')) return 'review'
-  if (cards.some(c => c.status === 'completed')) return 'review'
-  return null
-}
-
 function formatRelativeTime(timestamp?: number): string | null {
   if (!timestamp) return null
-  // Some timestamps are stored in seconds; normalize to milliseconds.
-  const normalizedTimestamp =
-    timestamp > 0 && timestamp < 1_000_000_000_000
-      ? timestamp * 1000
-      : timestamp
-  const diffMs = Date.now() - normalizedTimestamp
+  const diffMs = Date.now() - toMilliseconds(timestamp)
   if (diffMs < 0) return 'just now'
   const minuteMs = 60_000
   const hourMs = 60 * minuteMs
@@ -473,21 +481,23 @@ function formatRelativeTime(timestamp?: number): string | null {
   return `${days}d ago`
 }
 
+function getSectionRowState(section: WorktreeSection): CanvasRowState {
+  const { waitingCount, runningCount } = getSessionMetrics(section.cards)
+  return getCanvasRowState({
+    waitingCount,
+    runningCount,
+    isPending: section.isPending,
+  })
+}
+
 function getSessionMetrics(cards: SessionCardData[]) {
   const waitingCount = cards.filter(c =>
     isActionableWaitingStatus(c.status)
   ).length
-  // Keep review-ready and completed countable together for metrics, but
-  // cancelled/crashed are not "ready for review".
-  const reviewCount = cards.filter(
-    c => c.status === 'review' || c.status === 'completed'
+  const runningCount = cards.filter(
+    c =>
+      c.status === 'planning' || c.status === 'vibing' || c.status === 'yoloing'
   ).length
-  const planningCount = cards.filter(
-    c => c.status === 'planning' || c.status === 'scheduled'
-  ).length
-  const buildingCount = cards.filter(c => c.status === 'vibing').length
-  const yoloCount = cards.filter(c => c.status === 'yoloing').length
-  const activeCount = planningCount + buildingCount + yoloCount
   const latestActivityAt = cards.reduce(
     (latest, card) =>
       Math.max(latest, getSessionActivityTimestamp(card.session)),
@@ -495,13 +505,8 @@ function getSessionMetrics(cards: SessionCardData[]) {
   )
 
   return {
-    totalCount: cards.length,
     waitingCount,
-    reviewCount,
-    planningCount,
-    buildingCount,
-    yoloCount,
-    activeCount,
+    runningCount,
     latestActivityAt,
   }
 }
@@ -537,8 +542,8 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
   openPRs,
   cards,
   showDetails = false,
+  compact = false,
   isSelected,
-  shortcutNumber,
   rowIndex = 0,
   onRowClick,
   onDiffClick,
@@ -552,8 +557,9 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
   openPRs?: { number: number; headRefName: string }[]
   cards?: SessionCardData[]
   showDetails?: boolean
+  /** Mobile layout: one status icon, title, time and a muted meta line. */
+  compact?: boolean
   isSelected?: boolean
-  shortcutNumber?: number
   rowIndex?: number
   onRowClick?: (worktree: Worktree, rowIndex: number) => void
   onDiffClick?: (request: DiffRequest) => void
@@ -574,86 +580,95 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
     defaultBranch
   )
   const isBase = isBaseSession(worktree)
+  const rowTitle = isBase ? 'Base Session' : worktree.name
   const { data: gitStatus } = useGitStatus(isVisible ? worktree.id : null)
+  const isGitSyncing = useIsGitSyncing(worktree.id)
 
   const behindCount =
     gitStatus?.behind_count ?? worktree.cached_behind_count ?? 0
   const unpushedCount =
     gitStatus?.unpushed_count ?? worktree.cached_unpushed_count ?? 0
 
-  // Diff stats: branch diff + uncommitted for non-base; uncommitted only for base
-  const branchDiffAdded =
-    gitStatus?.branch_diff_added ?? worktree.cached_branch_diff_added ?? 0
-  const branchDiffRemoved =
-    gitStatus?.branch_diff_removed ?? worktree.cached_branch_diff_removed ?? 0
-  const uncommittedAdded =
+  // Diff stats: only uncommitted changes (committed branch diff is hidden)
+  const diffAdded =
     gitStatus?.uncommitted_added ?? worktree.cached_uncommitted_added ?? 0
-  const uncommittedRemoved =
+  const diffRemoved =
     gitStatus?.uncommitted_removed ?? worktree.cached_uncommitted_removed ?? 0
-  const diffAdded = isBase
-    ? uncommittedAdded
-    : branchDiffAdded + uncommittedAdded
-  const diffRemoved = isBase
-    ? uncommittedRemoved
-    : branchDiffRemoved + uncommittedRemoved
 
-  const pickRemoteOrRun = useRemotePicker(worktree.path)
+  const pickRemoteOrRun = useRemotePicker(worktree.path, {
+    worktreeId: worktree.id,
+  })
+
+  const runGitSync = useCallback(() => {
+    const runSync = async (remote?: string) => {
+      await performGitSync({
+        needsPull: behindCount > 0,
+        needsPush: unpushedCount > 0,
+        pull: {
+          worktreeId: worktree.id,
+          worktreePath: worktree.path,
+          baseBranch: worktree.base_branch ?? defaultBranch,
+          projectId,
+          remote: worktree.base_remote,
+          onMergeConflict: () => onResolveConflicts?.(worktree),
+        },
+        prNumber: worktree.pr_number,
+        pushRemote: remote,
+      })
+    }
+
+    if (unpushedCount > 0 && pushNeedsRemotePicker(worktree.pr_number)) {
+      pickRemoteOrRun(runSync)
+    } else {
+      void runSync()
+    }
+  }, [
+    behindCount,
+    unpushedCount,
+    worktree,
+    defaultBranch,
+    projectId,
+    onResolveConflicts,
+    pickRemoteOrRun,
+  ])
 
   const handleSync = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation()
-
-      const runSync = async (remote?: string) => {
-        await performGitSync({
-          needsPull: behindCount > 0,
-          needsPush: unpushedCount > 0,
-          pull: {
-            worktreeId: worktree.id,
-            worktreePath: worktree.path,
-            baseBranch: worktree.base_branch ?? defaultBranch,
-            projectId,
-            remote: worktree.base_remote,
-            onMergeConflict: () => onResolveConflicts?.(worktree),
-          },
-          prNumber: worktree.pr_number,
-          pushRemote: remote,
-        })
-      }
-
-      if (unpushedCount > 0 && pushNeedsRemotePicker(worktree.pr_number)) {
-        pickRemoteOrRun(runSync)
-      } else {
-        void runSync()
-      }
+      runGitSync()
     },
-    [
-      behindCount,
-      unpushedCount,
-      worktree,
-      defaultBranch,
-      projectId,
-      onResolveConflicts,
-      pickRemoteOrRun,
-    ]
+    [runGitSync]
   )
 
   const handleRowClick = useCallback(() => {
     onRowClick?.(worktree, rowIndex)
   }, [onRowClick, worktree, rowIndex])
+  const queryClient = useQueryClient()
+  const rowHover = useHoverIntent(() => {
+    void prefetchWorktreeDefaultSession(queryClient, worktree.id, worktree.path)
+  })
 
   const handleSetLabels = useCallback(() => {
     onSetLabels?.(worktree)
   }, [onSetLabels, worktree])
 
-  const handleDiffClick = useCallback(() => {
-    onDiffClick?.(
-      getCanvasDiffRequest(
-        worktree,
-        defaultBranch,
-        isBase ? 'uncommitted' : 'branch'
-      )
-    )
-  }, [onDiffClick, isBase, worktree, defaultBranch])
+  const [labelsExpanded, setLabelsExpanded] = useState(false)
+  const toggleLabelsExpanded = useCallback((e: React.SyntheticEvent) => {
+    e.stopPropagation()
+    setLabelsExpanded(expanded => !expanded)
+  }, [])
+
+  const openDiff = useCallback(() => {
+    onDiffClick?.(getCanvasDiffRequest(worktree, defaultBranch, 'uncommitted'))
+  }, [onDiffClick, worktree, defaultBranch])
+
+  const handleDiffClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      openDiff()
+    },
+    [openDiff]
+  )
 
   const sessionMetrics = useMemo(
     () => (cards && cards.length > 0 ? getSessionMetrics(cards) : null),
@@ -677,13 +692,168 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
   const displayBranch = gitStatus?.current_branch ?? worktree.branch
   const showBranchBadge = shouldShowWorktreeBranchBadge({
     displayBranch,
-    worktreeName: worktree.name,
+    worktreeName: rowTitle,
+    defaultBranch,
     stackedBaseBranch,
     prNumber: worktree.pr_number,
     securityAlertNumber: worktree.security_alert_number,
     advisoryGhsaId: worktree.advisory_ghsa_id,
   })
   const worktreeLabels = getWorktreeLabels(worktree)
+  const waitingCount = sessionMetrics?.waitingCount ?? 0
+  const runningCount = sessionMetrics?.runningCount ?? 0
+  const isStale =
+    !isBase &&
+    runningCount === 0 &&
+    waitingCount === 0 &&
+    isStaleActivity([
+      sessionMetrics?.latestActivityAt,
+      worktree.last_opened_at,
+      worktree.created_at,
+    ])
+
+  const { data: prStatus } = usePrStatus(
+    compact && isVisible && worktree.pr_number ? worktree.id : null
+  )
+  const prDisplayStatus =
+    prStatus?.display_status ??
+    (worktree.cached_pr_status as PrDisplayStatus | undefined)
+  const prCheckStatus =
+    prStatus?.check_status ??
+    (worktree.cached_check_status as CheckStatus | undefined)
+  const prDisplay = prDisplayStatus ? getPrStatusDisplay(prDisplayStatus) : null
+  const prChecks = prCheckStatus ? getCheckStatusDisplay(prCheckStatus) : null
+  const attention = worktree.pr_number
+    ? getCanvasRowAttention({
+        checkStatus: prCheckStatus,
+        mergeable: prStatus?.mergeable,
+      })
+    : null
+  const compactLabels = [...worktreeLabels, ...uniqueSessionLabels]
+
+  const compactContent = compact && (
+    <div className="flex min-w-0 items-start gap-2.5">
+      <span className="flex h-lh w-3.5 shrink-0 items-center justify-center">
+        {waitingCount > 0 ? (
+          <span
+            role="img"
+            aria-label={`${waitingCount} waiting`}
+            className="size-2 rounded-full bg-warning"
+          />
+        ) : runningCount > 0 ? (
+          <WorkingWaveform label={`${runningCount} running`} />
+        ) : worktree.pr_number && prDisplay ? (
+          prDisplayStatus === 'merged' ? (
+            <GitMerge
+              aria-label={`PR ${prDisplay.label}`}
+              className={cn('size-3', prDisplay.className)}
+            />
+          ) : (
+            <GitPullRequestArrow
+              aria-label={`PR ${prDisplay.label}`}
+              className={cn('size-3', prDisplay.className)}
+            />
+          )
+        ) : (
+          <span className="size-1.5 rounded-full bg-muted-foreground/40" />
+        )}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate">{rowTitle}</span>
+          {compactLabels.length > 0 && !labelsExpanded && (
+            <button
+              type="button"
+              aria-label={`Show labels: ${compactLabels.map(l => l.name).join(', ')}`}
+              aria-expanded={false}
+              title={compactLabels.map(l => l.name).join(', ')}
+              className="-m-1.5 flex shrink-0 items-center gap-1.5 p-1.5"
+              onClick={toggleLabelsExpanded}
+              onKeyDown={e => e.stopPropagation()}
+            >
+              {compactLabels.slice(0, 3).map(label => (
+                <span
+                  key={label.name}
+                  className="size-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: label.color }}
+                />
+              ))}
+              {compactLabels.length > 3 && (
+                <span className="text-2xs text-muted-foreground">
+                  +{compactLabels.length - 3}
+                </span>
+              )}
+            </button>
+          )}
+          <span className="ml-auto shrink-0 pl-2 text-xs tabular-nums text-muted-foreground">
+            {lastActivity}
+          </span>
+        </div>
+        {labelsExpanded && compactLabels.length > 0 && (
+          <button
+            type="button"
+            aria-label="Hide labels"
+            aria-expanded
+            className="flex flex-wrap items-center gap-1 py-0.5 text-left"
+            onClick={toggleLabelsExpanded}
+            onKeyDown={e => e.stopPropagation()}
+          >
+            {compactLabels.map(label => (
+              <span
+                key={label.name}
+                className="inline-flex items-center rounded-full px-2 py-0.5 text-2xs font-medium"
+                style={{
+                  backgroundColor: label.color,
+                  color: getLabelTextColor(label.color),
+                }}
+              >
+                {label.name}
+              </span>
+            ))}
+          </button>
+        )}
+        {(displayBranch !== rowTitle && displayBranch && !isBase) ||
+        stackedBaseBranch ||
+        worktree.pr_number ||
+        worktree.security_alert_number ||
+        worktree.advisory_ghsa_id ? (
+          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+            {displayBranch && displayBranch !== rowTitle && !isBase && (
+              <span className="min-w-0 truncate">{displayBranch}</span>
+            )}
+            {stackedBaseBranch && (
+              <span className="min-w-0 shrink truncate">
+                → {stackedBaseBranch}
+                {stackedOnPR && ` #${stackedOnPR.number}`}
+              </span>
+            )}
+            {worktree.pr_number && (
+              <span className="inline-flex shrink-0 items-center gap-0.5 tabular-nums">
+                #{worktree.pr_number}
+                {prCheckStatus === 'success' && (
+                  <Check
+                    aria-label="Checks passed"
+                    className="size-3 text-success"
+                  />
+                )}
+              </span>
+            )}
+            {(worktree.security_alert_number || worktree.advisory_ghsa_id) && (
+              <ShieldAlert
+                aria-label="Security alert"
+                className="size-3 shrink-0 text-warning"
+              />
+            )}
+            {attention && (
+              <span className="shrink-0 text-destructive">
+                {attention === 'conflicts' ? 'Conflicts' : 'Checks failing'}
+              </span>
+            )}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
 
   const row = (
     <div
@@ -691,17 +861,25 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
       className={cn(
         'group relative border border-transparent transition-colors',
         showDetails
-          ? 'mb-1 rounded-md px-3 py-2'
+          ? compact
+            ? 'mb-0.5 rounded-md px-3 py-1.5'
+            : 'mb-1 rounded-md px-3 py-2'
           : 'mb-0.5 flex items-center gap-2',
         onRowClick &&
           (showDetails
-            ? 'cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/60'
+            ? 'cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50'
             : 'cursor-pointer px-2 -mx-2 py-1 hover:bg-muted/50'),
         isSelected && onRowClick && 'border-border/40 bg-muted/35',
+        compact &&
+          isStale &&
+          !isSelected &&
+          'opacity-55 hover:opacity-100 focus-within:opacity-100',
         disableTextSelection && 'select-none'
       )}
       style={disableTextSelection ? { WebkitTouchCallout: 'none' } : undefined}
       onClick={onRowClick ? handleRowClick : undefined}
+      onPointerEnter={onRowClick ? () => rowHover.start(undefined) : undefined}
+      onPointerLeave={onRowClick ? rowHover.cancel : undefined}
       onKeyDown={e => {
         if (!onRowClick) return
         if (e.key === 'Enter' || e.key === ' ') {
@@ -711,65 +889,119 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
       }}
       role={onRowClick ? 'button' : undefined}
       tabIndex={onRowClick ? 0 : undefined}
-      aria-label={
-        onRowClick
-          ? `Open ${isBase ? 'Base Session' : worktree.name}`
-          : undefined
-      }
+      aria-label={onRowClick ? `Open ${rowTitle}` : undefined}
     >
       {showDetails && isSelected && onRowClick && (
         <span className="absolute top-2 bottom-2 left-0 w-0.5 rounded-full bg-primary" />
       )}
 
-      <div className={cn(showDetails ? 'flex flex-col gap-1.5' : 'contents')}>
-        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:flex-nowrap">
-          {shortcutNumber !== undefined && (
-            <kbd className="hidden shrink-0 h-4 min-w-4 items-center justify-center rounded border border-border/50 bg-muted/50 px-0.5 font-mono text-muted-foreground sm:inline-flex">
-              <span className="text-[9px]">⌘{shortcutNumber}</span>
-            </kbd>
-          )}
-          <span className="flex min-w-0 flex-1 flex-col gap-1 font-medium sm:flex-row sm:items-center sm:gap-1.5">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="min-w-0 flex-1 truncate">
-                {isBase ? 'Base Session' : worktree.name}
+      {compactContent || (
+        <div className={cn(showDetails ? 'flex flex-col gap-1.5' : 'contents')}>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:flex-nowrap">
+            {waitingCount > 0 ? (
+              <span
+                role="img"
+                aria-label={`${waitingCount} waiting`}
+                className="size-2 shrink-0 rounded-full bg-warning"
+              />
+            ) : (
+              runningCount > 0 && (
+                <WorkingWaveform label={`${runningCount} running`} />
+              )
+            )}
+            <span className="flex min-w-0 flex-1 flex-col gap-1 font-medium sm:flex-row sm:items-center sm:gap-1.5">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="min-w-0 flex-1 truncate">{rowTitle}</span>
+                {showBranchBadge && (
+                  <span className="hidden items-center gap-1 rounded border border-border/50 px-1.5 py-0.5 text-2xs font-normal text-muted-foreground sm:inline-flex">
+                    {stackedBaseBranch && (
+                      <>
+                        <span className="max-w-32 truncate">
+                          {stackedBaseBranch}
+                        </span>
+                        {stackedOnPR && (
+                          <>
+                            <GitPullRequestArrow className="h-2.5 w-2.5" />#
+                            {stackedOnPR.number}
+                          </>
+                        )}
+                        <span className="text-border">←</span>
+                      </>
+                    )}
+                    <span className="max-w-40 truncate">{displayBranch}</span>
+                    {worktree.pr_number && (
+                      <>
+                        <span className="text-border">·</span>
+                        <span>#{worktree.pr_number}</span>
+                      </>
+                    )}
+                    {worktree.security_alert_number && (
+                      <>
+                        <span className="text-border">·</span>
+                        <ShieldAlert className="h-2.5 w-2.5 text-warning" />#
+                        {worktree.security_alert_number}
+                      </>
+                    )}
+                    {worktree.advisory_ghsa_id && (
+                      <>
+                        <span className="text-border">·</span>
+                        <ShieldAlert className="h-2.5 w-2.5 text-warning" />
+                        <span className="max-w-20 truncate">
+                          {worktree.advisory_ghsa_id}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                )}
+                <span
+                  className="inline-flex items-center font-normal hover:bg-muted/50 rounded px-1.5 py-0.5"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <GitStatusBadges
+                    behindCount={behindCount}
+                    unpushedCount={unpushedCount}
+                    diffAdded={diffAdded}
+                    diffRemoved={diffRemoved}
+                    isSyncing={isGitSyncing}
+                    onSync={handleSync}
+                    onDiffClick={handleDiffClick}
+                  />
+                </span>
               </span>
               {showBranchBadge && (
-                <span className="hidden items-center gap-1 rounded border border-border/50 px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground sm:inline-flex">
-                  <GitBranch className="h-2.5 w-2.5" />
-                  <span className="max-w-40 truncate">{displayBranch}</span>
+                <span className="inline-flex max-w-full items-center gap-1 self-start rounded border border-border/50 px-1.5 py-0.5 text-2xs font-normal text-muted-foreground sm:hidden">
                   {stackedBaseBranch && (
                     <>
-                      <span className="text-border">·</span>
-                      <GitBranchPlus className="h-2.5 w-2.5" />
                       <span className="max-w-32 truncate">
                         {stackedBaseBranch}
                       </span>
                       {stackedOnPR && (
                         <>
-                          <GitPullRequestArrow className="h-2.5 w-2.5" />#
-                          {stackedOnPR.number}
+                          <GitPullRequestArrow className="h-2.5 w-2.5 shrink-0" />
+                          #{stackedOnPR.number}
                         </>
                       )}
+                      <span className="shrink-0 text-border">←</span>
                     </>
                   )}
+                  <span className="max-w-full truncate">{displayBranch}</span>
                   {worktree.pr_number && (
                     <>
                       <span className="text-border">·</span>
-                      <GitPullRequestArrow className="h-2.5 w-2.5" />#
-                      {worktree.pr_number}
+                      <span>#{worktree.pr_number}</span>
                     </>
                   )}
                   {worktree.security_alert_number && (
                     <>
                       <span className="text-border">·</span>
-                      <ShieldAlert className="h-2.5 w-2.5 text-warning" />#
-                      {worktree.security_alert_number}
+                      <ShieldAlert className="h-2.5 w-2.5 shrink-0 text-warning" />
+                      #{worktree.security_alert_number}
                     </>
                   )}
                   {worktree.advisory_ghsa_id && (
                     <>
                       <span className="text-border">·</span>
-                      <ShieldAlert className="h-2.5 w-2.5 text-warning" />
+                      <ShieldAlert className="h-2.5 w-2.5 shrink-0 text-warning" />
                       <span className="max-w-20 truncate">
                         {worktree.advisory_ghsa_id}
                       </span>
@@ -777,71 +1009,35 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
                   )}
                 </span>
               )}
-              <span
-                className="inline-flex items-center font-normal hover:bg-muted/50 rounded px-1.5 py-0.5"
-                onClick={e => e.stopPropagation()}
-              >
-                <GitStatusBadges
-                  behindCount={behindCount}
-                  unpushedCount={unpushedCount}
-                  diffAdded={diffAdded}
-                  diffRemoved={diffRemoved}
-                  onSync={handleSync}
-                  onDiffClick={handleDiffClick}
-                />
-              </span>
             </span>
-            {showBranchBadge && (
-              <span className="inline-flex max-w-full items-center gap-1 self-start rounded border border-border/50 px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground sm:hidden">
-                <GitBranch className="h-2.5 w-2.5 shrink-0" />
-                <span className="max-w-full truncate">{displayBranch}</span>
-                {stackedBaseBranch && (
-                  <>
-                    <span className="text-border">·</span>
-                    <GitBranchPlus className="h-2.5 w-2.5 shrink-0" />
-                    <span className="max-w-32 truncate">
-                      {stackedBaseBranch}
-                    </span>
-                    {stackedOnPR && (
-                      <>
-                        <GitPullRequestArrow className="h-2.5 w-2.5 shrink-0" />
-                        #{stackedOnPR.number}
-                      </>
-                    )}
-                  </>
-                )}
-                {worktree.pr_number && (
-                  <>
-                    <span className="text-border">·</span>
-                    <GitPullRequestArrow className="h-2.5 w-2.5 shrink-0" />#
-                    {worktree.pr_number}
-                  </>
-                )}
-                {worktree.security_alert_number && (
-                  <>
-                    <span className="text-border">·</span>
-                    <ShieldAlert className="h-2.5 w-2.5 shrink-0 text-warning" />
-                    #{worktree.security_alert_number}
-                  </>
-                )}
-                {worktree.advisory_ghsa_id && (
-                  <>
-                    <span className="text-border">·</span>
-                    <ShieldAlert className="h-2.5 w-2.5 shrink-0 text-warning" />
-                    <span className="max-w-20 truncate">
-                      {worktree.advisory_ghsa_id}
-                    </span>
-                  </>
+            {worktreeLabels.length > 0 && (
+              <span className={getWorktreeLabelContainerClassName()}>
+                {worktreeLabels.slice(0, 3).map(label => (
+                  <span
+                    key={label.name}
+                    className="inline-flex items-center rounded-full px-2 py-0.5 text-2xs font-medium"
+                    style={{
+                      backgroundColor: label.color,
+                      color: getLabelTextColor(label.color),
+                    }}
+                  >
+                    {label.name}
+                  </span>
+                ))}
+                {worktreeLabels.length > 3 && (
+                  <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
+                    +{worktreeLabels.length - 3}
+                  </span>
                 )}
               </span>
             )}
-          </span>
-          {worktreeLabels.length > 0 && (
-            <span className={getWorktreeLabelContainerClassName()}>
-              {worktreeLabels.slice(0, 3).map(label => (
+          </div>
+          {showDetails && sessionMetrics && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              {uniqueSessionLabels.map(label => (
                 <span
                   key={label.name}
-                  className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium"
+                  className="rounded px-2 py-0.5 text-2xs font-medium"
                   style={{
                     backgroundColor: label.color,
                     color: getLabelTextColor(label.color),
@@ -850,84 +1046,77 @@ const WorktreeSectionHeader = memo(function WorktreeSectionHeader({
                   {label.name}
                 </span>
               ))}
-              {worktreeLabels.length > 3 && (
-                <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                  +{worktreeLabels.length - 3}
+              {lastActivity && (
+                <span className="rounded px-2 py-0.5">{lastActivity}</span>
+              )}
+              {onRowClick && (
+                <span className="ml-auto hidden text-2xs opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 sm:inline-flex">
+                  Press Enter to open
                 </span>
               )}
-            </span>
+            </div>
           )}
         </div>
-        {showDetails && sessionMetrics && (
-          <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            {sessionMetrics.waitingCount > 0 && (
-              <span className="rounded bg-warning px-2 py-0.5 text-warning-foreground">
-                {sessionMetrics.waitingCount} waiting
-              </span>
-            )}
-            {sessionMetrics.planningCount > 0 && (
-              <span className="rounded bg-info/10 px-2 py-0.5 text-info">
-                {sessionMetrics.planningCount} planning
-              </span>
-            )}
-            {sessionMetrics.buildingCount > 0 && (
-              <span className="rounded bg-info/10 px-2 py-0.5 text-info">
-                {sessionMetrics.buildingCount} building
-              </span>
-            )}
-            {sessionMetrics.yoloCount > 0 && (
-              <span className="rounded bg-destructive/10 px-2 py-0.5 text-destructive">
-                {sessionMetrics.yoloCount} full access
-              </span>
-            )}
-            {sessionMetrics.reviewCount > 0 && (
-              <span className="rounded bg-success/10 px-2 py-0.5 text-success">
-                {sessionMetrics.reviewCount} review
-              </span>
-            )}
-            {uniqueSessionLabels.map(label => (
-              <span
-                key={label.name}
-                className="rounded px-2 py-0.5 text-[10px] font-medium"
-                style={{
-                  backgroundColor: label.color,
-                  color: getLabelTextColor(label.color),
-                }}
-              >
-                {label.name}
-              </span>
-            ))}
-            {lastActivity && (
-              <span className="rounded px-2 py-0.5">{lastActivity}</span>
-            )}
-            {isVisible && (
-              <TerminalStatusIndicator
-                worktreeId={worktree.id}
-                iconSize="h-3 w-3"
-                variant="summary"
-              />
-            )}
-            {onRowClick && (
-              <span className="ml-auto hidden text-[11px] opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 sm:inline-flex">
-                Press Enter to open
-              </span>
-            )}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   )
 
-  if (!onSetLabels) return row
+  // Compact rows move PR, diff and sync details into the long-press menu.
+  const showPrDetails = compact && !!worktree.pr_number
+  const showDiffDetails =
+    compact && !!onDiffClick && (diffAdded > 0 || diffRemoved > 0)
+  const showSyncDetails = compact && (behindCount > 0 || unpushedCount > 0)
+  const hasCompactDetails = showPrDetails || showDiffDetails || showSyncDetails
+
+  if (!onSetLabels && !hasCompactDetails) return row
 
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
-      <ContextMenuContent className="w-44">
-        <ContextMenuItem onSelect={handleSetLabels}>
-          <Tag className="mr-2 h-4 w-4" />
-          Set labels
-        </ContextMenuItem>
+      <ContextMenuContent className={hasCompactDetails ? 'w-60' : 'w-44'}>
+        {showPrDetails && (
+          <ContextMenuItem
+            disabled={!worktree.pr_url}
+            onSelect={() => {
+              if (worktree.pr_url) void openExternal(worktree.pr_url)
+            }}
+          >
+            <GitPullRequestArrow className="mr-2 h-4 w-4" />
+            <span className="truncate">
+              PR #{worktree.pr_number}
+              {prDisplay && ` · ${prDisplay.label}`}
+              {prChecks && ` · ${prChecks.label}`}
+            </span>
+          </ContextMenuItem>
+        )}
+        {showDiffDetails && (
+          <ContextMenuItem onSelect={openDiff}>
+            <Code className="mr-2 h-4 w-4" />
+            View changes
+            <span className="ml-auto pl-2 text-xs tabular-nums">
+              <span className="text-success">+{diffAdded}</span>{' '}
+              <span className="text-destructive">-{diffRemoved}</span>
+            </span>
+          </ContextMenuItem>
+        )}
+        {showSyncDetails && (
+          <ContextMenuItem onSelect={runGitSync}>
+            <ArrowUpDown className="mr-2 h-4 w-4" />
+            Sync
+            <span className="ml-auto pl-2 text-xs tabular-nums text-muted-foreground">
+              {behindCount > 0 && `↓${behindCount}`}
+              {behindCount > 0 && unpushedCount > 0 && ' '}
+              {unpushedCount > 0 && `↑${unpushedCount}`}
+            </span>
+          </ContextMenuItem>
+        )}
+        {onSetLabels && hasCompactDetails && <ContextMenuSeparator />}
+        {onSetLabels && (
+          <ContextMenuItem onSelect={handleSetLabels}>
+            <Tag className="mr-2 h-4 w-4" />
+            Set labels
+          </ContextMenuItem>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -937,6 +1126,10 @@ export function ProjectCanvasView({
   projectId,
   project,
 }: ProjectCanvasViewProps) {
+  useEffect(
+    () => preloadWhenIdle([GitDiffModal.preload, LinkedProjectsModal.preload]),
+    []
+  )
   const { data: preferences } = usePreferences(project.serverId)
   const worktreeSortMode = useProjectsStore(
     state =>
@@ -966,17 +1159,11 @@ export function ProjectCanvasView({
     state =>
       (state.projectCanvasActiveFilters[projectId] ?? 'all') as CanvasFilterTab
   )
-  // Cmd/Ctrl+1-9 opens Recent sessions while the Recent list is visible (see
-  // isRecentSessionsShortcutActive), so hide the worktree shortcut hints then.
-  const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
-  const recentTabActive = useProjectsStore(
-    state => state.sidebarActiveTab === 'recent'
-  )
-  const recentOwnsDigitShortcuts = leftSidebarVisible && recentTabActive
   const isMobile = useIsMobile()
   const canOpenEditor = canOpenInEditor()
   const canOpenTerminal = canOpenInTerminal()
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false)
+  const [isSortSheetOpen, setIsSortSheetOpen] = useState(false)
   const showWorktreeLabelContextMenu = shouldShowWorktreeLabelContextMenu({
     isMobile,
     isNative: isTauri(),
@@ -986,7 +1173,9 @@ export function ProjectCanvasView({
   })
 
   // Open PRs: used to link a worktree's base_branch to a PR number in row badges
-  const { data: gitProviderInfo } = useProjectGitProvider(project?.path)
+  const { data: gitProviderInfo } = useProjectGitProvider(project?.path, {
+    projectId: project?.id,
+  })
   const gitProvider = gitProviderInfo?.provider ?? 'github'
   const isGitlab = gitProvider === 'gitlab'
   const forgeLabels = providerLabels(gitProvider)
@@ -994,72 +1183,69 @@ export function ProjectCanvasView({
     ownerId: projectId ?? undefined,
   })
 
-  // Mobile-only: GitHub status counts for project dropdown menu items.
-  // Trigger gh auth query directly so it works on web/mobile access (App.tsx
-  // only runs it in native mode).
-  useGhCliAuth({ enabled: isMobile })
-  const mobileGitHubEnabled = isMobile
-  const BADGE_STALE_TIME = 5 * 60 * 1000
-  const { data: mobileIssueResult } = useGitHubIssues(
-    project?.path ?? null,
-    'open',
-    {
-      enabled: mobileGitHubEnabled,
-      staleTime: BADGE_STALE_TIME,
-      ownerId: projectId ?? undefined,
-    }
-  )
-  const { data: mobileOpenPRs } = useGitHubPRs(project?.path ?? null, 'open', {
-    enabled: mobileGitHubEnabled,
-    staleTime: BADGE_STALE_TIME,
+  // Forge counts for the project actions menu. Trigger the gh auth query
+  // directly so it works on web access (App.tsx only runs it in native mode).
+  const { data: ghAuth } = useGhCliAuth({ enabled: !isGitlab })
+  const githubCountsEnabled = !isGitlab && !!ghAuth?.authenticated
+  const FORGE_COUNT_STALE_TIME = 5 * 60 * 1000
+  const { data: issueResult } = useGitHubIssues(project?.path ?? null, 'open', {
+    enabled: isGitlab || githubCountsEnabled,
+    staleTime: FORGE_COUNT_STALE_TIME,
     ownerId: projectId ?? undefined,
   })
-  const { data: mobileAlerts } = useDependabotAlerts(
+  const { data: alerts } = useDependabotAlerts(
     project?.path ?? null,
+    project?.id,
     'open',
     {
-      enabled: mobileGitHubEnabled && !isGitlab,
-      staleTime: BADGE_STALE_TIME,
+      enabled: githubCountsEnabled,
+      staleTime: FORGE_COUNT_STALE_TIME,
     }
   )
-  const { data: mobileAdvisories } = useRepositoryAdvisories(
+  const { data: advisories } = useRepositoryAdvisories(
     project?.path ?? null,
+    project?.id,
     undefined,
     {
-      enabled: mobileGitHubEnabled && !isGitlab,
-      staleTime: BADGE_STALE_TIME,
+      enabled: githubCountsEnabled,
+      staleTime: FORGE_COUNT_STALE_TIME,
     }
   )
-  const { data: mobileWorkflowRuns } = useWorkflowRuns(
+  const { data: workflowRuns } = useWorkflowRuns(
     project?.path ?? null,
+    project?.id,
     undefined,
     {
-      enabled: mobileGitHubEnabled && !isGitlab,
-      staleTime: BADGE_STALE_TIME,
+      enabled: githubCountsEnabled,
+      staleTime: FORGE_COUNT_STALE_TIME,
     }
   )
-  const mobileIssueCount = mobileIssueResult?.totalCount ?? 0
-  const mobilePRCount = mobileOpenPRs?.length ?? 0
-  const mobileSecurityCount =
-    (mobileAlerts?.length ?? 0) +
-    (mobileAdvisories?.filter(a => a.state === 'draft' || a.state === 'triage')
+  const issueCount = issueResult?.totalCount ?? 0
+  const openPRCount = openPRs?.length ?? 0
+  const securityCount =
+    (alerts?.length ?? 0) +
+    (advisories?.filter(a => a.state === 'draft' || a.state === 'triage')
       .length ?? 0)
-  const mobileWorkflowRunCount = mobileWorkflowRuns?.runs?.length ?? 0
+  const workflowRunCount = workflowRuns?.runs?.length ?? 0
   const seenFailedWorkflowRunIds = useUIStore(
     state => state.seenFailedWorkflowRunIds
   )
-  const mobileFailedWorkflowCount = useMemo(
+  const failedWorkflowCount = useMemo(
     () =>
       countUnreadFailedWorkflowRuns(
-        mobileWorkflowRuns?.runs ?? [],
+        workflowRuns?.runs ?? [],
         seenFailedWorkflowRunIds
       ),
-    [mobileWorkflowRuns?.runs, seenFailedWorkflowRunIds]
+    [workflowRuns?.runs, seenFailedWorkflowRunIds]
   )
 
   // Load worktrees and session lists only for the selected project canvas.
   const { data: worktrees = [], isLoading: worktreesLoading } =
     useProjectBootstrap(projectId)
+  // The permanent base session does not block project removal
+  const removableWorktreeCount = worktrees.filter(
+    wt => !isBaseSession(wt)
+  ).length
 
   // Filter worktrees: include ready, pending, and error (exclude deleting)
   const visibleWorktrees = useMemo(() => {
@@ -1170,12 +1356,20 @@ export function ProjectCanvasView({
 
   // Build a Map of worktree ID -> session data for stable lookups
   const sessionsByWorktreeId = useMemo(() => {
-    const map = new Map<string, { sessions: Session[]; isLoading: boolean }>()
+    const map = new Map<
+      string,
+      {
+        sessions: Session[]
+        activeSessionId: string | null
+        isLoading: boolean
+      }
+    >()
     for (const query of sessionQueries) {
       const worktreeId = query.data?.worktree_id
       if (worktreeId) {
         map.set(worktreeId, {
           sessions: query.data?.sessions ?? [],
+          activeSessionId: query.data?.active_session_id ?? null,
           isLoading: query.isLoading,
         })
       }
@@ -1243,6 +1437,9 @@ export function ProjectCanvasView({
   const openWorktreeModal = useCallback(
     (worktreeId: string, worktreePath: string) => {
       markWorktreeLastUsed(worktreeId)
+      // Sync projects store so magic dialogs (e.g. Update PR) target this worktree
+      useProjectsStore.getState().selectWorktree(worktreeId)
+      useChatStore.getState().registerWorktreePath(worktreeId, worktreePath)
       setSelectedWorktreeModal({ worktreeId, worktreePath })
       const sessionId = useChatStore.getState().activeSessionIds[worktreeId]
       if (sessionId) {
@@ -1287,8 +1484,8 @@ export function ProjectCanvasView({
     [openWorktreeModal]
   )
 
-  // Build worktree sections with computed card data
-  const worktreeSections: WorktreeSection[] = useMemo(() => {
+  // Build worktree sections with computed card data, in sort-mode order
+  const orderedWorktreeSections: WorktreeSection[] = useMemo(() => {
     const result: WorktreeSection[] = []
     const latestActivityByWorktreeId = new Map<string, number>()
     const normalizedSearchQuery = searchQuery.trim().toLowerCase()
@@ -1358,7 +1555,8 @@ export function ProjectCanvasView({
       const grouped = flattenGroups(groupCardsByStatus(cards))
       const latestActivityAt = getWorktreeLastActivity(
         filteredSessions,
-        worktree.created_at
+        worktree.created_at,
+        storeState.sendingSessionIds
       )
 
       latestActivityByWorktreeId.set(worktree.id, latestActivityAt)
@@ -1386,7 +1584,6 @@ export function ProjectCanvasView({
     )
 
     result.push(...readySections)
-
     return result
   }, [
     readyWorktrees,
@@ -1399,6 +1596,13 @@ export function ProjectCanvasView({
     worktreeSortMode,
     activeFilterTab,
   ])
+
+  // Rows are grouped by state (Needs input, Running, Idle) like a mail inbox.
+  // The sort mode still decides the order inside each group.
+  const worktreeSections = useMemo(
+    () => sortByCanvasRowState(orderedWorktreeSections, getSectionRowState),
+    [orderedWorktreeSections]
+  )
 
   // Summary counts are independent of canvas search and the selected tab.
   const robotRows = useMemo(
@@ -1415,14 +1619,27 @@ export function ProjectCanvasView({
   )
 
   const canvasReorderEnabled =
-    activeFilterTab === 'all' && searchQuery.trim().length === 0
+    !isMobile && activeFilterTab === 'all' && searchQuery.trim().length === 0
 
+  // Reorder against the ungrouped order: grouping is derived from live state
+  // and must not leak into the persisted manual order.
   const canvasDraggableIds = useMemo(
     () =>
-      worktreeSections.flatMap(section =>
+      orderedWorktreeSections.flatMap(section =>
         canManuallyReorderWorktree(section.worktree)
           ? [section.worktree.id]
           : []
+      ),
+    [orderedWorktreeSections]
+  )
+
+  const canvasRowStateById = useMemo(
+    () =>
+      new Map(
+        worktreeSections.map(section => [
+          section.worktree.id,
+          getSectionRowState(section),
+        ])
       ),
     [worktreeSections]
   )
@@ -1463,6 +1680,9 @@ export function ProjectCanvasView({
       const newIndex = canvasDraggableIds.indexOf(overId)
 
       if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return
+      if (canvasRowStateById.get(activeId) !== canvasRowStateById.get(overId)) {
+        return
+      }
 
       const reorderedDraggableIds = reorderWithClosestEdge({
         items: canvasDraggableIds,
@@ -1471,7 +1691,7 @@ export function ProjectCanvasView({
         closestEdgeOfTarget: closestEdge,
       })
       const nextDraggableIds = [...reorderedDraggableIds]
-      const fullOrderedIds = worktreeSections.map(section => {
+      const fullOrderedIds = orderedWorktreeSections.map(section => {
         const worktreeId = section.worktree.id
         if (!canvasDraggableIdSet.has(worktreeId)) return worktreeId
         return nextDraggableIds.shift() ?? worktreeId
@@ -1494,9 +1714,10 @@ export function ProjectCanvasView({
       canvasDraggableIdSet,
       canvasDraggableIds,
       canvasReorderEnabled,
+      canvasRowStateById,
+      orderedWorktreeSections,
       projectId,
       reorderWorktrees,
-      worktreeSections,
       worktrees,
       worktreeSortMode,
     ]
@@ -1670,28 +1891,6 @@ export function ProjectCanvasView({
     }
   }, [reorderCanvasFromDrop])
 
-  const projectSummary = useMemo(() => {
-    let reviewCount = 0
-    let waitingCount = 0
-    let activeCount = 0
-    let totalReady = 0
-    for (const section of worktreeSections) {
-      if (section.isPending) continue
-      totalReady++
-      const status = getActiveStatus(section.cards)
-      if (status === 'review') reviewCount++
-      if (status === 'waiting') waitingCount++
-      if (
-        status === 'planning' ||
-        status === 'vibing' ||
-        status === 'yoloing'
-      ) {
-        activeCount++
-      }
-    }
-    return { totalReady, reviewCount, waitingCount, activeCount }
-  }, [worktreeSections])
-
   // Build flat array of all cards for keyboard navigation
   const flatCards: FlatCard[] = useMemo(() => {
     const result: FlatCard[] = []
@@ -1763,6 +1962,13 @@ export function ProjectCanvasView({
   // Git diff modal (CMD+G on canvas)
   const [canvasDiffRequest, setCanvasDiffRequest] =
     useState<DiffRequest | null>(null)
+  const canvasDiffWorktree = canvasDiffRequest
+    ? worktreeSections.find(s => s.worktree.id === canvasDiffRequest.worktreeId)
+        ?.worktree
+    : undefined
+  const { data: canvasDiffGitStatus } = useGitStatus(
+    canvasDiffRequest?.worktreeId ?? null
+  )
 
   // Sync canvas-level git diff modal open state to UI store (blocks execute_run keybinding)
   useEffect(() => {
@@ -1791,47 +1997,17 @@ export function ProjectCanvasView({
       projectId: projectId ?? null,
     })
 
-  // Archive mutations - need to handle per-worktree
-  const archiveWorktree = useArchiveWorktree()
   const deleteWorktree = useDeleteWorktree()
-  const closeBaseSessionClean = useCloseBaseSessionClean()
-  const closeBaseSessionArchive = useCloseBaseSessionArchive()
 
   const closeWorktreeDirectly = useCallback(
     (worktreeId: string) => {
       if (!project) return
       const wt = visibleWorktrees.find(w => w.id === worktreeId)
-      if (!wt) return
-      // Unloaded preferences resolve to the documented default ('delete'),
-      // matching the confirmation decision made by the close handler.
-      const removalBehavior = preferences?.removal_behavior ?? 'delete'
-      if (isBaseSession(wt)) {
-        if (removalBehavior === 'delete') {
-          closeBaseSessionClean.mutate({
-            worktreeId: wt.id,
-            projectId: project.id,
-          })
-        } else {
-          closeBaseSessionArchive.mutate({
-            worktreeId: wt.id,
-            projectId: project.id,
-          })
-        }
-      } else if (removalBehavior === 'delete') {
-        deleteWorktree.mutate({ worktreeId: wt.id, projectId: project.id })
-      } else {
-        archiveWorktree.mutate({ worktreeId: wt.id, projectId: project.id })
-      }
+      // The base session is permanent: it never closes.
+      if (!wt || isBaseSession(wt)) return
+      deleteWorktree.mutate({ worktreeId: wt.id, projectId: project.id })
     },
-    [
-      project,
-      visibleWorktrees,
-      preferences?.removal_behavior,
-      archiveWorktree,
-      deleteWorktree,
-      closeBaseSessionClean,
-      closeBaseSessionArchive,
-    ]
+    [project, visibleWorktrees, deleteWorktree]
   )
 
   // Stable callbacks for the memoized SessionChatModal. The latest modal
@@ -1856,15 +2032,19 @@ export function ProjectCanvasView({
 
   // Listen for focus-canvas-search event
   useEffect(() => {
+    let focusTimer: ReturnType<typeof setTimeout> | undefined
     const handleFocusSearch = () => {
       if (isMobile) {
         setIsMobileSearchOpen(true)
       }
-      setTimeout(() => searchInputRef.current?.focus(), 0)
+      clearTimeout(focusTimer)
+      focusTimer = setTimeout(() => searchInputRef.current?.focus(), 0)
     }
     window.addEventListener('focus-canvas-search', handleFocusSearch)
-    return () =>
+    return () => {
       window.removeEventListener('focus-canvas-search', handleFocusSearch)
+      clearTimeout(focusTimer)
+    }
   }, [isMobile])
 
   // Auto-focus search input when mobile search overlay opens
@@ -1888,7 +2068,7 @@ export function ProjectCanvasView({
     }
   }, [selectedWorktreeModal])
 
-  // Close modal when worktree is deleted/archived (e.g. PR merged)
+  // Close modal when worktree is deleted (e.g. PR merged)
   useEffect(() => {
     const handleCloseModal = (e: CustomEvent<{ worktreeId: string }>) => {
       if (selectedWorktreeModal?.worktreeId === e.detail.worktreeId) {
@@ -1999,7 +2179,7 @@ export function ProjectCanvasView({
     }
   }, [selectedWorktreeModal, flatCards, selectedIndex, activeFilterTab])
 
-  // Keep a valid selection when the selected item disappears (archive/delete/close).
+  // Keep a valid selection when the selected item disappears (delete/close).
   // In list layout this prefers the previous row, matching expected canvas behavior.
   // Skip while search is active — transient empty search results should not erase selection memory.
   useEffect(() => {
@@ -2085,8 +2265,14 @@ export function ProjectCanvasView({
       const autoOpen = useUIStore.getState().consumeAutoOpenSession(worktreeId)
       if (!autoOpen.shouldOpen) continue
 
-      // Use specific session if provided, otherwise fall back to first session
-      const targetSession = sessionData.sessions[0]
+      const autoOpenSessionId = resolveActiveSessionId({
+        current: null,
+        backendActive: sessionData.activeSessionId,
+        listedIds: sessionData.sessions.map(session => session.id),
+      })
+      const targetSession = sessionData.sessions.find(
+        session => session.id === autoOpenSessionId
+      )
 
       if (worktree && targetSession) {
         // Find the index in flatCards for keyboard selection
@@ -2119,6 +2305,15 @@ export function ProjectCanvasView({
     openWorktreeModal,
   ])
 
+  // A server has no worktree list: always show its base session chat.
+  const isServer = !!project.server
+  // react-doctor-disable-next-line react-doctor/no-effect-chain -- reacts to server project data loading and the modal closing; no local event handler owns this
+  useEffect(() => {
+    if (!isServer || selectedWorktreeModal) return
+    const base = readyWorktrees.find(isBaseSession)
+    if (base) openWorktreeModal(base.id, base.path)
+  }, [isServer, selectedWorktreeModal, readyWorktrees, openWorktreeModal])
+
   // Auto-select session when dashboard opens. Reopens the last opened session
   // of this project in the modal; otherwise only selects a card visually.
   // Prefers last opened per project, then persisted active session per worktree, falls back to first card
@@ -2131,19 +2326,26 @@ export function ProjectCanvasView({
     let targetIndex = -1
     let shouldAutoOpenModal = false
     let resolvedLastOpenedSessionId: string | null = null
+    let lastOpenedPickIsTemporary = false
 
     // First: check lastOpenedPerProject for this project
     const lastOpened = lastOpenedPerProject[projectId]
     if (lastOpened) {
-      const worktreeSessions =
-        sessionsByWorktreeIdRef.current.get(lastOpened.worktreeId)?.sessions ??
-        []
-      const hasSavedSession = worktreeSessions.some(
-        session => session.id === lastOpened.sessionId
+      const worktreeSessions = sessionsByWorktreeIdRef.current.get(
+        lastOpened.worktreeId
       )
-      resolvedLastOpenedSessionId = hasSavedSession
-        ? lastOpened.sessionId
-        : (worktreeSessions[0]?.id ?? null)
+      const listedIds =
+        worktreeSessions?.sessions.map(session => session.id) ?? []
+      const selection = {
+        current: lastOpened.sessionId,
+        currentGone: !listedIds.includes(lastOpened.sessionId),
+        backendActive: worktreeSessions?.activeSessionId,
+        listedIds,
+      }
+      resolvedLastOpenedSessionId = resolveActiveSessionId(selection)
+      lastOpenedPickIsTemporary =
+        resolvedLastOpenedSessionId !== null &&
+        resolvePersistedActiveSessionId(selection) === null
 
       for (const fc of flatCards) {
         if (!fc.card || fc.isPending) continue
@@ -2226,14 +2428,19 @@ export function ProjectCanvasView({
 
       // Auto-open SessionChatModal for the last opened session
       if (shouldAutoOpenModal && !suppressRestoreAutoOpen) {
-        const sessionIdToOpen =
-          lastOpened && targetCard.worktreeId === lastOpened.worktreeId
-            ? (resolvedLastOpenedSessionId ?? targetCard.card.session.id)
-            : targetCard.card.session.id
+        const isLastOpenedWorktree =
+          !!lastOpened && targetCard.worktreeId === lastOpened.worktreeId
+        const sessionIdToOpen = isLastOpenedWorktree
+          ? (resolvedLastOpenedSessionId ?? targetCard.card.session.id)
+          : targetCard.card.session.id
 
-        useChatStore
-          .getState()
-          .setActiveSession(targetCard.worktreeId, sessionIdToOpen)
+        // The modal resolves a temporary pick itself and again after the
+        // list refetch; storing it would outlive the refetch.
+        if (!(isLastOpenedWorktree && lastOpenedPickIsTemporary)) {
+          useChatStore
+            .getState()
+            .setActiveSession(targetCard.worktreeId, sessionIdToOpen)
+        }
         openWorktreeModal(targetCard.worktreeId, targetCard.worktreePath)
       }
     }
@@ -2255,9 +2462,12 @@ export function ProjectCanvasView({
       const { activeSessionIds, setActiveSession, setLastOpenedForProject } =
         useChatStore.getState()
       const existingSessionId = activeSessionIds[worktreeId]
-      const firstSessionId =
-        sessionsByWorktreeIdRef.current.get(worktreeId)?.sessions[0]?.id
-      const targetSessionId = existingSessionId ?? firstSessionId
+      const worktreeSessions = sessionsByWorktreeIdRef.current.get(worktreeId)
+      const targetSessionId = resolveActiveSessionId({
+        current: existingSessionId,
+        backendActive: worktreeSessions?.activeSessionId,
+        listedIds: worktreeSessions?.sessions.map(session => session.id) ?? [],
+      })
 
       if (targetSessionId) {
         if (!existingSessionId) {
@@ -2269,21 +2479,6 @@ export function ProjectCanvasView({
     [openWorktreeModal, projectId]
   )
 
-  // Stable row-click handler for memoized section headers. Reads the latest
-  // selection/open handlers through a ref so it never changes identity.
-  const sectionRowClickRef = useLatestRef(
-    (worktree: Worktree, rowIndex: number) => {
-      handleSelectedIndexChange(rowIndex)
-      handleWorktreeClick(worktree.id, worktree.path)
-    }
-  )
-  const handleSectionRowClick = useCallback(
-    (worktree: Worktree, rowIndex: number) => {
-      sectionRowClickRef.current(worktree, rowIndex)
-    },
-    [sectionRowClickRef]
-  )
-
   // Handle selection from keyboard nav
   const handleSelect = useCallback(
     (index: number) => {
@@ -2293,6 +2488,19 @@ export function ProjectCanvasView({
       }
     },
     [flatCards, handleWorktreeClick]
+  )
+
+  // Stable row-click handler for memoized section headers. Reads the latest
+  // selection/open handlers through a ref so it never changes identity.
+  const sectionRowClickRef = useLatestRef((rowIndex: number) => {
+    handleSelectedIndexChange(rowIndex)
+    handleSelect(rowIndex)
+  })
+  const handleSectionRowClick = useCallback(
+    (_worktree: Worktree, rowIndex: number) => {
+      sectionRowClickRef.current(rowIndex)
+    },
+    [sectionRowClickRef]
   )
 
   const moveSelectedWorktreeByKeyboard = useCallback(
@@ -2894,8 +3102,6 @@ export function ProjectCanvasView({
       // Consume the event to prevent the legacy useCloseSessionOrWorktreeKeybinding fallback
       e.stopImmediatePropagation()
 
-      const bypassConfirm = readCloseBypassDetail(e)
-
       // No modal open — close the worktree of the selected card
       if (selectedIndex !== null && flatCards[selectedIndex]) {
         const item = flatCards[selectedIndex]
@@ -2904,20 +3110,11 @@ export function ProjectCanvasView({
         const section = worktreeSections.find(
           s => s.worktree.id === item.worktreeId
         )
-        if (
-          bypassConfirm ||
-          !closeRequiresConfirmation(
-            preferences?.confirm_session_close,
-            preferences?.removal_behavior ?? 'delete'
-          )
-        ) {
-          closeWorktreeDirectly(item.worktreeId)
-        } else {
-          setCloseWorktreeTarget({
-            worktreeId: item.worktreeId,
-            branchName: section?.worktree.branch,
-          })
-        }
+        if (section && isBaseSession(section.worktree)) return
+        setCloseWorktreeTarget({
+          worktreeId: item.worktreeId,
+          branchName: section?.worktree.branch,
+        })
       }
     }
 
@@ -2934,15 +3131,7 @@ export function ProjectCanvasView({
         handleCloseSessionOrWorktree,
         { capture: true }
       )
-  }, [
-    selectedWorktreeModal,
-    selectedIndex,
-    flatCards,
-    worktreeSections,
-    preferences?.confirm_session_close,
-    preferences?.removal_behavior,
-    closeWorktreeDirectly,
-  ])
+  }, [selectedWorktreeModal, selectedIndex, flatCards, worktreeSections])
 
   // Listen for create-new-session event to handle CMD+T / picker shortcut
   useEffect(() => {
@@ -3088,36 +3277,33 @@ export function ProjectCanvasView({
       <div className="flex-1 flex flex-col overflow-auto">
         {/* Header and filters - sticky together over content */}
         <div className="sticky top-0 z-10 bg-background/60 backdrop-blur-md">
-          <div className="relative grid grid-cols-[auto_1fr_auto] items-center gap-4 px-4 py-2 sm:py-3 border-b border-border/30 sm:min-h-[61px]">
+          <div
+            className={cn(
+              // Same height as the session header so the project title lines up
+              'relative grid grid-cols-[auto_1fr_auto] items-center gap-4 px-4 border-b border-border/20',
+              MODAL_TERMINAL_PRIMARY_ROW_CLASS
+            )}
+          >
             <div className="flex flex-col shrink-0">
               <div className="flex items-center gap-2">
-                <h2 className="truncate text-lg font-semibold">
+                <h2 className="truncate text-sm font-normal text-muted-foreground">
                   {project.name}
                 </h2>
-                <div className="hidden md:flex items-center gap-2">
-                  <NewIssuesBadge
-                    projectPath={project.path}
-                    projectId={projectId}
-                  />
-                  <OpenPRsBadge
-                    projectPath={project.path}
-                    projectId={projectId}
-                  />
-                  <SecurityAlertsBadge
-                    projectPath={project.path}
-                    projectId={projectId}
-                  />
-                  <FailedRunsBadge projectPath={project.path} />
-                </div>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
                       variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
+                      size="icon-sm"
+                      className="relative text-muted-foreground"
                       aria-label="Project actions"
                     >
                       <MoreHorizontal className="h-4 w-4" />
+                      {failedWorkflowCount > 0 && (
+                        <span
+                          aria-hidden
+                          className="absolute top-1 right-1 size-1.5 rounded-full bg-destructive"
+                        />
+                      )}
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="w-64">
@@ -3142,9 +3328,7 @@ export function ProjectCanvasView({
                       onSelect={() => createBaseSession.mutate(projectId)}
                     >
                       <Home className="h-4 w-4" />
-                      {worktrees.find(isBaseSession)
-                        ? 'Open Base Session'
-                        : 'New Base Session'}
+                      Open Base Session
                     </DropdownMenuItem>
 
                     <DropdownMenuItem
@@ -3158,82 +3342,75 @@ export function ProjectCanvasView({
                       Project Settings
                     </DropdownMenuItem>
 
-                    {mobileGitHubEnabled && (
-                      <>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            useProjectsStore.getState().selectProject(projectId)
-                            const {
-                              setNewWorktreeModalDefaultTab,
-                              setNewWorktreeModalOpen,
-                            } = useUIStore.getState()
-                            setNewWorktreeModalDefaultTab('issues')
-                            setNewWorktreeModalOpen(true)
-                          }}
-                        >
-                          <CircleDot className="h-4 w-4 text-success" />
-                          {mobileIssueCount > 0
-                            ? `${mobileIssueCount} Issues`
-                            : 'Issues'}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            useProjectsStore.getState().selectProject(projectId)
-                            const {
-                              setNewWorktreeModalDefaultTab,
-                              setNewWorktreeModalOpen,
-                            } = useUIStore.getState()
-                            setNewWorktreeModalDefaultTab('prs')
-                            setNewWorktreeModalOpen(true)
-                          }}
-                        >
-                          <GitPullRequestArrow className="h-4 w-4 text-info" />
-                          {mobilePRCount > 0
-                            ? `${mobilePRCount} ${forgeLabels.pullRequestsShort}`
-                            : forgeLabels.pullRequestsShort}
-                        </DropdownMenuItem>
-                        {!isGitlab && (
-                          <DropdownMenuItem
-                            onSelect={() =>
-                              useUIStore
-                                .getState()
-                                .setWorkflowRunsModalOpen(true, project.path)
-                            }
-                          >
-                            {mobileFailedWorkflowCount > 0 ? (
-                              <AlertCircle className="h-4 w-4 text-destructive" />
-                            ) : (
-                              <Activity className="h-4 w-4" />
-                            )}
-                            {mobileFailedWorkflowCount > 0
-                              ? `${mobileFailedWorkflowCount} Failed Workflows`
-                              : mobileWorkflowRunCount > 0
-                                ? `${mobileWorkflowRunCount} Workflows`
-                                : 'Workflows'}
-                          </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        useProjectsStore.getState().selectProject(projectId)
+                        const {
+                          setNewWorktreeModalDefaultTab,
+                          setNewWorktreeModalOpen,
+                        } = useUIStore.getState()
+                        setNewWorktreeModalDefaultTab('issues')
+                        setNewWorktreeModalOpen(true)
+                      }}
+                    >
+                      <CircleDot className="h-4 w-4 text-success" />
+                      {issueCount > 0 ? `${issueCount} Issues` : 'Issues'}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        useProjectsStore.getState().selectProject(projectId)
+                        const {
+                          setNewWorktreeModalDefaultTab,
+                          setNewWorktreeModalOpen,
+                        } = useUIStore.getState()
+                        setNewWorktreeModalDefaultTab('prs')
+                        setNewWorktreeModalOpen(true)
+                      }}
+                    >
+                      <GitPullRequestArrow className="h-4 w-4 text-info" />
+                      {openPRCount > 0
+                        ? `${openPRCount} ${forgeLabels.pullRequestsShort}`
+                        : forgeLabels.pullRequestsShort}
+                    </DropdownMenuItem>
+                    {!isGitlab && (
+                      <DropdownMenuItem
+                        onSelect={() =>
+                          useUIStore.getState().setWorkflowRunsModalOpen(true, {
+                            projectId: project.id,
+                            projectPath: project.path,
+                          })
+                        }
+                      >
+                        {failedWorkflowCount > 0 ? (
+                          <AlertCircle className="h-4 w-4 text-destructive" />
+                        ) : (
+                          <Activity className="h-4 w-4" />
                         )}
-                        {!isGitlab && (
-                          <DropdownMenuItem
-                            onSelect={() => {
-                              useProjectsStore
-                                .getState()
-                                .selectProject(projectId)
-                              const {
-                                setNewWorktreeModalDefaultTab,
-                                setNewWorktreeModalOpen,
-                              } = useUIStore.getState()
-                              setNewWorktreeModalDefaultTab('security')
-                              setNewWorktreeModalOpen(true)
-                            }}
-                          >
-                            <ShieldAlert className="h-4 w-4 text-warning" />
-                            {mobileSecurityCount > 0
-                              ? `${mobileSecurityCount} Security`
-                              : 'Security'}
-                          </DropdownMenuItem>
-                        )}
-                      </>
+                        {failedWorkflowCount > 0
+                          ? `${failedWorkflowCount} Failed Workflows`
+                          : workflowRunCount > 0
+                            ? `${workflowRunCount} Workflows`
+                            : 'Workflows'}
+                      </DropdownMenuItem>
+                    )}
+                    {!isGitlab && (
+                      <DropdownMenuItem
+                        onSelect={() => {
+                          useProjectsStore.getState().selectProject(projectId)
+                          const {
+                            setNewWorktreeModalDefaultTab,
+                            setNewWorktreeModalOpen,
+                          } = useUIStore.getState()
+                          setNewWorktreeModalDefaultTab('security')
+                          setNewWorktreeModalOpen(true)
+                        }}
+                      >
+                        <ShieldAlert className="h-4 w-4 text-warning" />
+                        {securityCount > 0
+                          ? `${securityCount} Security`
+                          : 'Security'}
+                      </DropdownMenuItem>
                     )}
 
                     {(canOpenEditor ||
@@ -3247,6 +3424,7 @@ export function ProjectCanvasView({
                             onSelect={() =>
                               openInEditor.mutate({
                                 worktreePath: project.path,
+                                projectId: project.id,
                                 editor: preferences?.editor,
                               })
                             }
@@ -3258,7 +3436,12 @@ export function ProjectCanvasView({
 
                         {canOpenInFinder(project.serverId) && (
                           <DropdownMenuItem
-                            onSelect={() => openInFinder.mutate(project.path)}
+                            onSelect={() =>
+                              openInFinder.mutate({
+                                worktreePath: project.path,
+                                projectId: project.id,
+                              })
+                            }
                           >
                             <FolderOpen className="h-4 w-4" />
                             Open in Finder
@@ -3270,6 +3453,7 @@ export function ProjectCanvasView({
                             onSelect={() =>
                               openInTerminal.mutate({
                                 worktreePath: project.path,
+                                projectId: project.id,
                                 terminal: preferences?.terminal,
                               })
                             }
@@ -3302,6 +3486,15 @@ export function ProjectCanvasView({
                         <DropdownMenuSeparator />
                       )}
 
+                    {!isMobile && (
+                      <ScriptsSubmenu
+                        projectId={project.id}
+                        owner={{ projectId: project.id }}
+                        worktreePath={project.path}
+                        onRun={handlePackageScript}
+                      />
+                    )}
+
                     <DropdownMenuItem
                       onSelect={() => openOnGitHub.mutate(projectId)}
                     >
@@ -3309,69 +3502,121 @@ export function ProjectCanvasView({
                       Open on {forgeLabels.name}
                     </DropdownMenuItem>
 
+                    {isMobile ? (
+                      <DropdownMenuItem
+                        onSelect={() => setIsSortSheetOpen(true)}
+                      >
+                        <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+                        Sort worktrees
+                      </DropdownMenuItem>
+                    ) : (
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger className="gap-2">
+                          <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+                          Sort worktrees
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="w-44">
+                          <DropdownMenuRadioGroup
+                            value={worktreeSortMode}
+                            onValueChange={value =>
+                              useProjectsStore
+                                .getState()
+                                .setProjectCanvasWorktreeSortMode(
+                                  projectId,
+                                  value as WorktreeSortMode
+                                )
+                            }
+                          >
+                            {WORKTREE_SORT_OPTIONS.map(option => (
+                              <DropdownMenuRadioItem
+                                key={option.value}
+                                value={option.value}
+                              >
+                                {option.label}
+                              </DropdownMenuRadioItem>
+                            ))}
+                          </DropdownMenuRadioGroup>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    )}
+
                     <DropdownMenuSeparator />
 
                     <DropdownMenuItem
                       variant="destructive"
                       onSelect={() => removeProject.mutate(projectId)}
-                      disabled={worktrees.length > 0}
+                      disabled={removableWorktreeCount > 0}
                       className="whitespace-nowrap"
                     >
                       <Trash2 className="h-4 w-4 shrink-0" />
                       Remove Project
-                      {worktrees.length > 0 && (
+                      {removableWorktreeCount > 0 && (
                         <span className="ml-auto text-xs opacity-60 shrink-0">
-                          ({worktrees.length} worktrees)
+                          ({removableWorktreeCount} worktrees)
                         </span>
                       )}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
-                      aria-label="Sort worktrees"
+                {isMobile && (
+                  <Sheet
+                    open={isSortSheetOpen}
+                    onOpenChange={setIsSortSheetOpen}
+                  >
+                    <SheetContent
+                      side="bottom"
+                      className="max-h-[75svh] overflow-hidden rounded-t-xl p-0"
+                      showCloseButton={false}
                     >
-                      <ArrowUpDown className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-48">
-                    <DropdownMenuLabel>Sort worktrees</DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuRadioGroup
-                      value={worktreeSortMode}
-                      onValueChange={value =>
-                        useProjectsStore
-                          .getState()
-                          .setProjectCanvasWorktreeSortMode(
-                            projectId,
-                            value as WorktreeSortMode
+                      <SheetHeader className="shrink-0 border-b px-4 py-3 text-left">
+                        <SheetTitle>Sort worktrees</SheetTitle>
+                        <SheetDescription className="sr-only">
+                          Choose how worktrees are ordered in this project.
+                        </SheetDescription>
+                      </SheetHeader>
+                      <div className="overflow-y-auto px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+                        {WORKTREE_SORT_OPTIONS.map(option => {
+                          const selected = option.value === worktreeSortMode
+                          return (
+                            <button
+                              key={option.value}
+                              type="button"
+                              className={cn(
+                                'flex min-h-12 w-full items-center gap-3 rounded-lg px-3 text-left active:bg-accent',
+                                selected && 'bg-accent'
+                              )}
+                              aria-pressed={selected}
+                              onClick={() => {
+                                useProjectsStore
+                                  .getState()
+                                  .setProjectCanvasWorktreeSortMode(
+                                    projectId,
+                                    option.value
+                                  )
+                                setIsSortSheetOpen(false)
+                              }}
+                            >
+                              <span className="flex-1 font-medium">
+                                {option.label}
+                              </span>
+                              {selected && (
+                                <Check className="h-4 w-4 shrink-0" />
+                              )}
+                            </button>
                           )
-                      }
-                    >
-                      <DropdownMenuRadioItem value="created">
-                        Creation date
-                      </DropdownMenuRadioItem>
-                      <DropdownMenuRadioItem value="last_activity">
-                        Last activity
-                      </DropdownMenuRadioItem>
-                      <DropdownMenuRadioItem value="manual">
-                        Manual
-                      </DropdownMenuRadioItem>
-                    </DropdownMenuRadioGroup>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                        })}
+                      </div>
+                    </SheetContent>
+                  </Sheet>
+                )}
                 {/* Mobile: magnifier icon inline with badges */}
                 {isMobile &&
                   (worktreeSections.length > 0 || searchQuery) &&
                   !isMobileSearchOpen && (
                     <Button
                       variant="ghost"
-                      size="icon"
-                      className="relative h-7 w-7 text-muted-foreground"
+                      size="icon-sm"
+                      className="relative text-muted-foreground"
                       onClick={() => setIsMobileSearchOpen(true)}
                       aria-label="Open search"
                     >
@@ -3382,29 +3627,14 @@ export function ProjectCanvasView({
                     </Button>
                   )}
               </div>
-              <p className="text-xs text-muted-foreground whitespace-nowrap">
-                {projectSummary.totalReady > 0 ? (
-                  <>
-                    {projectSummary.totalReady} worktrees
-                    {projectSummary.reviewCount > 0 &&
-                      ` · ${projectSummary.reviewCount} review`}
-                    {projectSummary.waitingCount > 0 &&
-                      ` · ${projectSummary.waitingCount} waiting`}
-                    {projectSummary.activeCount > 0 &&
-                      ` · ${projectSummary.activeCount} active`}
-                  </>
-                ) : (
-                  <span className="invisible">0 worktrees</span>
-                )}
-              </p>
             </div>
             {(worktreeSections.length > 0 || searchQuery) && (
               <>
                 {/* Desktop: inline search bar */}
                 {!isMobile && (
                   <div className="flex justify-center">
-                    <div className="relative w-full max-w-md">
-                      <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <div className="relative w-full max-w-xs">
+                      <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                       <Input
                         ref={searchInputRef}
                         placeholder="Search worktrees and sessions..."
@@ -3412,7 +3642,7 @@ export function ProjectCanvasView({
                         onChange={e => setSearchQuery(e.target.value)}
                         aria-label="Search worktrees and sessions"
                         name="worktree-search"
-                        className="pl-9 bg-transparent border-border/30"
+                        className="h-8 border-border/30 bg-transparent pl-7 text-xs shadow-none dark:bg-transparent"
                       />
                     </div>
                   </div>
@@ -3462,25 +3692,12 @@ export function ProjectCanvasView({
                 )}
               </>
             )}
-            {/* Grid column 3: open-in/scripts on desktop, new worktree everywhere */}
             <div className="flex items-center gap-2 shrink-0 justify-end col-start-3">
-              {!isMobile && (
-                <>
-                  <OpenInButton
-                    worktreePath={project.path}
-                    serverId={project.serverId}
-                  />
-                  <ScriptsButton
-                    projectId={project.id}
-                    worktreePath={project.path}
-                    onRun={handlePackageScript}
-                  />
-                </>
-              )}
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
                 size="sm"
+                className={raisedToolbar}
                 onClick={() => {
                   useProjectsStore.getState().selectProject(projectId)
                   useUIStore.getState().setNewWorktreeModalOpen(true)
@@ -3492,7 +3709,7 @@ export function ProjectCanvasView({
             </div>
           </div>
 
-          <div className="border-b border-border/30 bg-background/80 px-4 py-2">
+          <div className="border-b border-border/20 bg-background/80 px-4 py-2">
             <div
               role="tablist"
               aria-label="Worktree filters"
@@ -3533,7 +3750,7 @@ export function ProjectCanvasView({
                         {badge && (
                           <span
                             className={cn(
-                              'rounded border px-1 py-0 text-[9px] uppercase leading-4 tracking-wide',
+                              'rounded border px-1 py-0 text-2xs uppercase leading-4 tracking-wide',
                               isActive
                                 ? 'border-primary/30 text-primary'
                                 : 'border-muted-foreground/20 text-muted-foreground'
@@ -3544,7 +3761,7 @@ export function ProjectCanvasView({
                         )}
                         <span
                           className={cn(
-                            'rounded-md px-1.5 py-0.5 text-[10px] leading-none',
+                            'rounded-md px-1.5 py-0.5 text-2xs leading-none',
                             isActive
                               ? 'bg-primary/15 text-primary'
                               : 'bg-muted text-muted-foreground'
@@ -3601,7 +3818,7 @@ export function ProjectCanvasView({
                       <span>{tab.label}</span>
                       <span
                         className={cn(
-                          'rounded-md px-1.5 py-0.5 text-[10px] leading-none',
+                          'rounded-md px-1.5 py-0.5 text-2xs leading-none',
                           isActive
                             ? 'bg-primary/15 text-primary'
                             : 'bg-muted text-muted-foreground'
@@ -3669,9 +3886,21 @@ export function ProjectCanvasView({
               onDragEnd={handleNativeCanvasDragEnd}
             >
               {(() => {
-                let shortcutNum = 0
+                let previousRowState: CanvasRowState | null = null
                 return worktreeSections.map(section => {
                   const currentIndex = cardIndex++
+                  const rowState =
+                    canvasRowStateById.get(section.worktree.id) ?? 'idle'
+                  const groupHeader =
+                    rowState !== previousRowState ? (
+                      <div
+                        key={`group-${rowState}`}
+                        className="px-3 pt-3 pb-1 text-2xs font-medium uppercase tracking-wide text-muted-foreground first:pt-0"
+                      >
+                        {CANVAS_ROW_STATE_LABELS[rowState]}
+                      </div>
+                    ) : null
+                  previousRowState = rowState
                   const isReorderDisabled =
                     !canvasReorderEnabled ||
                     reorderWorktrees.isPending ||
@@ -3679,10 +3908,44 @@ export function ProjectCanvasView({
 
                   if (section.isPending) {
                     return (
+                      <Fragment key={section.worktree.id}>
+                        {groupHeader}
+                        <SortableCanvasWorktreeSection
+                          section={section}
+                          rowState={rowState}
+                          disabled={true}
+                          isDragging={
+                            canvasDragState.draggingId === section.worktree.id
+                          }
+                          closestEdge={
+                            canvasDragState.targetId === section.worktree.id
+                              ? canvasDragState.closestEdge
+                              : null
+                          }
+                          projectId={projectId}
+                        >
+                          <WorktreeSetupCard
+                            ref={el => {
+                              cardRefs.current[currentIndex] = el
+                            }}
+                            worktree={section.worktree}
+                            layout="list"
+                            isSelected={selectedIndex === currentIndex}
+                            onSelect={() =>
+                              handleSelectedIndexChange(currentIndex)
+                            }
+                          />
+                        </SortableCanvasWorktreeSection>
+                      </Fragment>
+                    )
+                  }
+                  return (
+                    <Fragment key={section.worktree.id}>
+                      {groupHeader}
                       <SortableCanvasWorktreeSection
-                        key={section.worktree.id}
                         section={section}
-                        disabled={true}
+                        rowState={rowState}
+                        disabled={isReorderDisabled}
                         isDragging={
                           canvasDragState.draggingId === section.worktree.id
                         }
@@ -3693,85 +3956,53 @@ export function ProjectCanvasView({
                         }
                         projectId={projectId}
                       >
-                        <WorktreeSetupCard
+                        <div
                           ref={el => {
                             cardRefs.current[currentIndex] = el
                           }}
-                          worktree={section.worktree}
-                          layout="list"
-                          isSelected={selectedIndex === currentIndex}
-                          onSelect={() =>
-                            handleSelectedIndexChange(currentIndex)
-                          }
-                        />
-                      </SortableCanvasWorktreeSection>
-                    )
-                  }
-                  const thisShortcut =
-                    ++shortcutNum <= 9 && !recentOwnsDigitShortcuts
-                      ? shortcutNum
-                      : undefined
-                  return (
-                    <SortableCanvasWorktreeSection
-                      key={section.worktree.id}
-                      section={section}
-                      disabled={isReorderDisabled}
-                      isDragging={
-                        canvasDragState.draggingId === section.worktree.id
-                      }
-                      closestEdge={
-                        canvasDragState.targetId === section.worktree.id
-                          ? canvasDragState.closestEdge
-                          : null
-                      }
-                      projectId={projectId}
-                    >
-                      <div
-                        ref={el => {
-                          cardRefs.current[currentIndex] = el
-                        }}
-                      >
-                        <WorktreeSectionHeader
-                          worktree={section.worktree}
-                          projectId={projectId}
-                          defaultBranch={project.default_branch}
-                          openPRs={openPRs}
-                          cards={section.cards}
-                          showDetails={true}
-                          isSelected={selectedIndex === currentIndex}
-                          shortcutNumber={thisShortcut}
-                          rowIndex={currentIndex}
-                          onRowClick={handleSectionRowClick}
-                          onDiffClick={setCanvasDiffRequest}
-                          onSetLabels={
-                            showWorktreeLabelContextMenu
-                              ? openWorktreeLabelModal
-                              : undefined
-                          }
-                          onResolveConflicts={handleCanvasResolveConflicts}
-                          disableTextSelection={disableWorktreeTextSelection}
-                        />
-                        {activeFilterTab === 'auto_fix' && (
-                          <MrRobotProgress
-                            row={
-                              robotRows.find(
-                                row => row.worktree.id === section.worktree.id
-                              ) ?? section
+                        >
+                          <WorktreeSectionHeader
+                            worktree={section.worktree}
+                            projectId={projectId}
+                            defaultBranch={project.default_branch}
+                            openPRs={openPRs}
+                            cards={section.cards}
+                            showDetails={true}
+                            compact={isMobile}
+                            isSelected={selectedIndex === currentIndex}
+                            rowIndex={currentIndex}
+                            onRowClick={handleSectionRowClick}
+                            onDiffClick={setCanvasDiffRequest}
+                            onSetLabels={
+                              showWorktreeLabelContextMenu
+                                ? openWorktreeLabelModal
+                                : undefined
                             }
-                            onOpen={(worktree, card) => {
-                              if (card)
-                                useChatStore
-                                  .getState()
-                                  .setActiveSession(
-                                    worktree.id,
-                                    card.session.id
-                                  )
-                              openWorktreeModal(worktree.id, worktree.path)
-                            }}
+                            onResolveConflicts={handleCanvasResolveConflicts}
+                            disableTextSelection={disableWorktreeTextSelection}
                           />
-                        )}
-                      </div>
-                    </SortableCanvasWorktreeSection>
+                          {activeFilterTab === 'auto_fix' && (
+                            <MrRobotProgress
+                              row={
+                                robotRows.find(
+                                  row => row.worktree.id === section.worktree.id
+                                ) ?? section
+                              }
+                              onOpen={(worktree, card) => {
+                                if (card)
+                                  useChatStore
+                                    .getState()
+                                    .setActiveSession(
+                                      worktree.id,
+                                      card.session.id
+                                    )
+                                openWorktreeModal(worktree.id, worktree.path)
+                              }}
+                            />
+                          )}
+                        </div>
+                      </SortableCanvasWorktreeSection>
+                    </Fragment>
                   )
                 })
               })()}
@@ -3847,6 +4078,26 @@ export function ProjectCanvasView({
         <GitDiffModal
           diffRequest={canvasDiffRequest}
           onClose={() => setCanvasDiffRequest(null)}
+          uncommittedStats={{
+            added:
+              canvasDiffGitStatus?.uncommitted_added ??
+              canvasDiffWorktree?.cached_uncommitted_added ??
+              0,
+            removed:
+              canvasDiffGitStatus?.uncommitted_removed ??
+              canvasDiffWorktree?.cached_uncommitted_removed ??
+              0,
+          }}
+          branchStats={{
+            added:
+              canvasDiffGitStatus?.branch_diff_added ??
+              canvasDiffWorktree?.cached_branch_diff_added ??
+              0,
+            removed:
+              canvasDiffGitStatus?.branch_diff_removed ??
+              canvasDiffWorktree?.cached_branch_diff_removed ??
+              0,
+          }}
         />
       </Suspense>
 
@@ -3857,6 +4108,9 @@ export function ProjectCanvasView({
         }}
         onConfirm={handleConfirmCloseWorktree}
         branchName={closeWorktreeTarget?.branchName}
+        worktree={visibleWorktrees.find(
+          w => w.id === closeWorktreeTarget?.worktreeId
+        )}
       />
 
       {/* Linked Projects modal (triggered from MagicModal on canvas) */}
@@ -3879,7 +4133,7 @@ function EmptyDashboardTabs({
   projectPath: string | null
 }) {
   const shortcut = formatShortcutDisplay(DEFAULT_KEYBINDINGS.new_worktree)
-  const { data: jeanConfig } = useJeanConfig(projectPath)
+  const { data: jeanConfig } = useJeanConfig(projectPath, projectId)
   const { openProjectSettings } = useProjectsStore.getState()
 
   return (
@@ -3898,7 +4152,10 @@ function EmptyDashboardTabs({
         >
           <Plus className="h-4 w-4" />
           Start Building
-          <kbd className="pointer-events-none ml-1 inline-flex h-5 items-center rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
+          <kbd
+            data-mod-hint
+            className="pointer-events-none ml-1 inline-flex h-5 items-center rounded border bg-muted px-1.5 font-mono text-2xs font-medium text-muted-foreground"
+          >
             {shortcut}
           </kbd>
         </Button>

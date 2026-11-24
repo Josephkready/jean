@@ -243,6 +243,7 @@ function OnboardingDialogContent({
 
   const [selectedBackends, setSelectedBackends] = useState<AIBackend[]>([])
   // Preselect detected backends once statuses for the current target load.
+  // react-doctor-disable-next-line react-doctor/rerender-state-only-in-handlers -- state change re-runs the preselect effect; a ref would not
   const [needsPreselect, setNeedsPreselect] = useState(false)
   // Remote setup just finished; decide where to go once its statuses load.
   const [pendingRemoteCheck, setPendingRemoteCheck] = useState(false)
@@ -573,7 +574,7 @@ function OnboardingDialogContent({
       historyStack.some(s => WHERE_STEPS.includes(s)))
   const progressLabels = showWhere
     ? (['Where', 'Backends', 'Setup'] as const)
-    : (['Backends', 'Setup', 'Done'] as const)
+    : (['Backends', 'Setup'] as const)
   const progressIndex = showWhere
     ? WHERE_STEPS.includes(step)
       ? 0

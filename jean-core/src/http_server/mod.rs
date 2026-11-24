@@ -3,6 +3,7 @@ pub mod auth;
 pub mod dispatch;
 pub mod push;
 pub mod server;
+pub mod session;
 pub mod websocket;
 
 use serde::Serialize;
@@ -53,6 +54,7 @@ fn is_replayable_chat_event(event: &str) -> bool {
             | "chat:done"
             | "chat:cancelled"
             | "chat:error"
+            | "chat:backend_retry"
     )
 }
 

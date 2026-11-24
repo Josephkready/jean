@@ -31,8 +31,8 @@ interface TextFilePreviewProps {
   onRemove: (textFileId: string) => void
   /** Whether removal is disabled (e.g., while sending) */
   disabled?: boolean
-  /** Session ID for updating text file content */
-  sessionId?: string
+  /** Session that owns the text files */
+  sessionId: string
 }
 
 /** Format bytes to human readable string */
@@ -149,7 +149,7 @@ export function TextFilePreview({
             <button
               type="button"
               onClick={() => setOpenFileId(textFile.id)}
-              className="flex items-center gap-2 h-16 px-3 rounded-md border border-border/50 bg-muted cursor-pointer hover:border-primary/50 transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+              className="flex items-center gap-2 h-16 px-3 rounded-md border border-border/50 bg-muted cursor-pointer hover:border-foreground/20 transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
             >
               <FileText className="h-5 w-5 text-muted-foreground shrink-0" />
               <div className="flex flex-col items-start text-left min-w-0">
@@ -185,7 +185,7 @@ export function TextFilePreview({
         open={!!openFileId}
         onOpenChange={open => !open && handleDialogClose()}
       >
-        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-auto sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95">
+        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-fit sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95">
           <DialogTitle className="text-sm font-medium flex items-center gap-2">
             <FileText className="h-4 w-4" />
             {openFile?.filename}

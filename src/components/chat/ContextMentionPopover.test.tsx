@@ -2,7 +2,10 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { render as renderWithoutProviders } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { ContextMentionPopover } from './ContextMentionPopover'
+import {
+  ContextMentionPopover,
+  getInvestigateLabels,
+} from './ContextMentionPopover'
 import type { ContextMentionItem } from './hooks/useContextMentionData'
 import type { GitHubIssue } from '@/types/github'
 import { toast } from 'sonner'
@@ -60,7 +63,10 @@ vi.mock('@/components/worktree/IssuePreviewModal', () => ({
 }))
 
 vi.mock('./hooks/useContextMentionData', () => ({
-  useContextMentionData: useContextMentionDataMock,
+  useContextMentionData: (...args: unknown[]) => {
+    const result = useContextMentionDataMock(...args)
+    return { sections: result.groups, ...result }
+  },
 }))
 
 describe('ContextMentionPopover', () => {
@@ -114,6 +120,35 @@ describe('ContextMentionPopover', () => {
     ).toContainElement(
       screen.getByRole('button', { name: 'Include closed/merged' })
     )
+  })
+
+  it('shows a tab with 0 for an empty section and keeps it selectable', () => {
+    useContextMentionDataMock.mockImplementation(() => ({
+      groups: [{ id: 'issue', heading: 'GitHub Issues', items: [items[0]] }],
+      sections: [
+        { id: 'issue', heading: 'GitHub Issues', items: [items[0]] },
+        { id: 'pr', heading: 'GitHub Pull Requests', items: [] },
+      ],
+      isFetching: false,
+      loadMoreDiscussions: vi.fn(),
+    }))
+    render(
+      <ContextMentionPopover
+        projectPath="/tmp/repo"
+        projectId="project-1"
+        open
+        onOpenChange={vi.fn()}
+        onSelectContext={vi.fn()}
+        searchQuery=""
+        anchorPosition={{ top: 0, left: 0 }}
+        containerWidth={480}
+      />
+    )
+
+    const prTab = screen.getByRole('tab', { name: /^PRs\s*0$/ })
+    fireEvent.click(prTab)
+    expect(prTab).toHaveAttribute('aria-selected', 'true')
+    expect(screen.queryByText('Fix login bug')).not.toBeInTheDocument()
   })
 
   it('opens the issue preview without selecting or closing the list', () => {
@@ -277,6 +312,31 @@ describe('ContextMentionPopover', () => {
       })
     )
     expect(onSelectContext).toHaveBeenCalledWith(items[1], true)
+  })
+
+  it('investigates a PR row in a new worktree, not the current session', () => {
+    const onSelectContext = vi.fn()
+    const onInvestigateInNewSession = vi.fn()
+    render(
+      <ContextMentionPopover
+        projectPath="/tmp/repo"
+        projectId="project-1"
+        open
+        onOpenChange={vi.fn()}
+        onSelectContext={onSelectContext}
+        onInvestigateInNewSession={onInvestigateInNewSession}
+        searchQuery=""
+        anchorPosition={{ top: 0, left: 0 }}
+      />
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Investigate PR #45 in a new worktree',
+      })
+    )
+    expect(onInvestigateInNewSession).toHaveBeenCalledWith([items[1]], false)
+    expect(onSelectContext).not.toHaveBeenCalled()
   })
 
   it('uses Shift+Enter to investigate the selected issue', () => {
@@ -607,7 +667,9 @@ describe('ContextMentionPopover', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select PR #45' }))
     expect(onSelectContext).not.toHaveBeenCalled()
     fireEvent.click(
-      screen.getByRole('button', { name: 'Investigate 3 in new session' })
+      screen.getByRole('button', {
+        name: 'Investigate in one session + 1 new worktree',
+      })
     )
 
     expect(onInvestigateInNewSession).toHaveBeenCalledWith(
@@ -616,7 +678,9 @@ describe('ContextMentionPopover', () => {
     )
 
     fireEvent.click(
-      screen.getByRole('button', { name: 'Investigate in 3 new sessions' })
+      screen.getByRole('button', {
+        name: 'Investigate in separate sessions + 1 new worktree',
+      })
     )
     expect(onInvestigateInNewSession).toHaveBeenLastCalledWith(
       [items[0], items[1]],
@@ -625,6 +689,71 @@ describe('ContextMentionPopover', () => {
     expect(toast.info).toHaveBeenCalledWith(
       'Skipped 1 already investigated item'
     )
+  })
+
+  it('moves and checks items with arrows and Space outside text fields', () => {
+    const onInvestigateInNewSession = vi.fn()
+    const onSelectContext = vi.fn()
+    render(
+      <ContextMentionPopover
+        projectPath="/tmp/repo"
+        projectId="project-1"
+        open
+        onOpenChange={vi.fn()}
+        onSelectContext={onSelectContext}
+        onInvestigateInNewSession={onInvestigateInNewSession}
+        searchQuery=""
+        anchorPosition={{ top: 0, left: 0 }}
+      />
+    )
+
+    const issueCheckbox = screen.getByRole('checkbox', { name: 'Select #123' })
+    const prCheckbox = screen.getByRole('checkbox', { name: 'Select PR #45' })
+    fireEvent.click(issueCheckbox)
+    expect(issueCheckbox).toBeChecked()
+
+    // Focus stays on the clicked checkbox; keys act on the highlighted row
+    fireEvent.keyDown(issueCheckbox, { key: 'ArrowUp' })
+    fireEvent.keyDown(issueCheckbox, { key: ' ' })
+    expect(prCheckbox).toBeChecked()
+    expect(issueCheckbox).toBeChecked()
+    fireEvent.keyDown(issueCheckbox, { key: 'ArrowDown' })
+    fireEvent.keyDown(issueCheckbox, { key: ' ' })
+    expect(issueCheckbox).not.toBeChecked()
+
+    // Space in the search field types; it does not toggle
+    const search = screen.getByRole('combobox')
+    fireEvent.keyDown(search, { key: ' ' })
+    expect(issueCheckbox).not.toBeChecked()
+
+    fireEvent.keyDown(issueCheckbox, { key: ' ' })
+    fireEvent.keyDown(search, { key: 'Enter', ctrlKey: true })
+    expect(onInvestigateInNewSession).toHaveBeenCalledWith(
+      [items[1], items[0]],
+      true
+    )
+    expect(onSelectContext).not.toHaveBeenCalled()
+  })
+
+  it('investigates checked items in one session with Mod+Shift+Enter', () => {
+    const onInvestigateInNewSession = vi.fn()
+    render(
+      <ContextMentionPopover
+        projectPath="/tmp/repo"
+        projectId="project-1"
+        open
+        onOpenChange={vi.fn()}
+        onSelectContext={vi.fn()}
+        onInvestigateInNewSession={onInvestigateInNewSession}
+        searchQuery=""
+        anchorPosition={{ top: 0, left: 0 }}
+      />
+    )
+
+    const checkbox = screen.getByRole('checkbox', { name: 'Select #123' })
+    fireEvent.click(checkbox)
+    fireEvent.keyDown(checkbox, { key: 'Enter', metaKey: true, shiftKey: true })
+    expect(onInvestigateInNewSession).toHaveBeenCalledWith([items[0]], false)
   })
 
   it('opens the existing session from its badge', () => {
@@ -791,5 +920,23 @@ describe('ContextMentionPopover', () => {
     await waitFor(() => expect(refresh).not.toBeDisabled())
     if (expected) expect(toastError).toHaveBeenCalledWith(expected)
     else expect(toastError).not.toHaveBeenCalled()
+  })
+})
+
+describe('getInvestigateLabels', () => {
+  const [issueItem, prItem] = items
+  it('offers only new worktrees when only PRs are checked', () => {
+    expect(getInvestigateLabels([prItem, { ...prItem, id: 'pr:46' }])).toEqual({
+      action: 'Investigate in 2 new worktrees',
+    })
+  })
+
+  it('keeps the session labels when no PR is checked', () => {
+    expect(
+      getInvestigateLabels([issueItem, { ...issueItem, id: 'issue:124' }])
+    ).toEqual({
+      action: 'Investigate 2 in one session',
+      separate: 'Investigate 2 in separate sessions',
+    })
   })
 })

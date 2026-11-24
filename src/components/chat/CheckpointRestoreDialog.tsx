@@ -335,7 +335,7 @@ export function CheckpointRestoreDialog({
           // Mobile: bottom sheet-style panel that stays on-screen and scrolls
           'flex w-[calc(100vw-1rem)] max-w-none flex-col gap-0 overflow-hidden p-0',
           'max-h-[min(92dvh,100%)]',
-          'max-sm:top-auto max-sm:bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-sm:left-1/2 max-sm:translate-x-[-50%] max-sm:translate-y-0 max-sm:rounded-xl',
+          'max-sm:top-auto max-sm:bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-sm:rounded-xl',
           // Desktop centered dialog
           'sm:max-w-lg sm:gap-0',
           // Override default padding from AlertDialogContent base
@@ -491,7 +491,7 @@ export function CheckpointRestoreDialog({
                             <span className="min-w-0 break-all font-mono">
                               {f.path}
                             </span>
-                            <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] uppercase">
+                            <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-2xs uppercase">
                               {f.action}
                             </span>
                           </div>
@@ -501,7 +501,7 @@ export function CheckpointRestoreDialog({
                             </p>
                           )}
                           {f.action === 'write' && f.content != null && (
-                            <pre className="mt-1 max-h-24 overflow-auto rounded bg-muted/50 p-1 font-mono text-[10px] leading-snug">
+                            <pre className="mt-1 max-h-24 overflow-auto rounded bg-muted/50 p-1 font-mono text-2xs leading-snug">
                               {f.content.slice(0, 800)}
                               {f.content.length > 800 ? '…' : ''}
                             </pre>
@@ -641,7 +641,7 @@ export function CheckpointRestoreDialog({
               </Button>
 
               <div className="space-y-2 border-t border-border pt-2">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
                   Stronger options
                 </p>
                 <Button

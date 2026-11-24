@@ -1,6 +1,6 @@
 import { getModifierSymbol, isClientMacOS } from '@/lib/platform'
 import { isNativeApp } from '@/lib/environment'
-import { edgePrimary, raised } from '@/components/ui/button'
+import { edgeNeutral, edgePrimary, raised } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { Kbd } from '@/components/ui/kbd'
 import {
@@ -15,24 +15,26 @@ interface SendCancelButtonProps {
   canSend: boolean
   /** When true, the secondary action steers into the running turn instead of queueing. */
   willSteer?: boolean
-  /** When true, steering requires the primary modifier plus Enter. */
-  steerWithModifier?: boolean
+  /** When true, the primary modifier is held, so the action is modifier plus Enter. */
+  actionWithModifier?: boolean
   /** When true, the running backend accepts a manual steer action. */
   canSteer?: boolean
   queuedMessageCount?: number
   onCancel: () => void
   onSteer?: () => void
+  onQueue?: () => void
 }
 
 export function SendCancelButton({
   isSending,
   canSend,
   willSteer = false,
-  steerWithModifier = false,
+  actionWithModifier = false,
   canSteer = false,
   queuedMessageCount,
   onCancel,
   onSteer,
+  onQueue,
 }: SendCancelButtonProps) {
   const isMobile = useIsMobile()
 
@@ -44,17 +46,11 @@ export function SendCancelButton({
             type="button"
             onClick={onCancel}
             className={cn(
-              'flex h-8 items-center justify-center gap-1.5 px-3 text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90',
-              raised,
-              edgePrimary
+              'flex h-8 items-center justify-center gap-1.5 px-3 text-xs font-medium bg-destructive text-white hover:bg-destructive/90 [--btn-edge:color-mix(in_oklab,var(--destructive)_55%,black)]',
+              raised
             )}
           >
             <span>{queuedMessageCount ? 'Skip to Next' : 'Cancel'}</span>
-            {!isMobile && (
-              <Kbd className="ml-0.5 h-4 text-[10px] bg-primary-foreground/20 text-primary-foreground">
-                {isClientMacOS ? `${getModifierSymbol()}⌥⌫` : 'Ctrl+Alt+⌫'}
-              </Kbd>
-            )}
           </button>
         </TooltipTrigger>
         <TooltipContent>
@@ -66,10 +62,12 @@ export function SendCancelButton({
     )
 
     if (canSend) {
-      const showSeparateSteer =
-        canSteer && !willSteer && (isMobile || !isNativeApp())
+      // Without a held modifier (mobile, web), offer the opposite of the
+      // main action as a separate button.
+      const showAlternate = canSteer && (isMobile || !isNativeApp())
+      const alternateLabel = willSteer ? 'Queue' : 'Steer'
       const actionLabel = willSteer ? 'Steer' : 'Queue'
-      const actionShortcut = steerWithModifier
+      const actionShortcut = actionWithModifier
         ? isClientMacOS
           ? `${getModifierSymbol()}↵`
           : `${getModifierSymbol()}+Enter`
@@ -80,42 +78,55 @@ export function SendCancelButton({
           : `Steer into running turn (${actionShortcut})`
         : isMobile
           ? 'Queue message'
-          : 'Queue message (Enter)'
+          : `Queue message (${actionShortcut})`
 
       return (
-        <div className="flex items-center">
+        <div className="flex items-center gap-1.5">
           {cancelButton}
-          <div className="h-4 w-px shrink-0 bg-border/50" />
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 type="submit"
                 aria-label={actionLabel}
-                className="flex h-8 items-center justify-center gap-1.5 px-2.5 text-xs font-medium transition-colors text-muted-foreground hover:bg-muted/80 hover:text-foreground"
+                className={cn(
+                  'flex h-8 items-center justify-center gap-1.5 px-2.5 text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90',
+                  raised,
+                  edgePrimary
+                )}
               >
                 <span>{actionLabel}</span>
                 {!isMobile && (
-                  <Kbd className="h-4 text-[10px]">{actionShortcut}</Kbd>
+                  <Kbd
+                    modHint={actionWithModifier}
+                    className="h-4 bg-primary-foreground/15 text-2xs text-primary-foreground"
+                  >
+                    {actionShortcut}
+                  </Kbd>
                 )}
               </button>
             </TooltipTrigger>
             <TooltipContent>{actionTooltip}</TooltipContent>
           </Tooltip>
-          {showSeparateSteer && (
+          {showAlternate && (
             <>
-              <div className="h-4 w-px shrink-0 bg-border/50" />
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    aria-label="Steer"
-                    onClick={onSteer}
-                    className="flex h-8 items-center justify-center px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground"
+                    aria-label={alternateLabel}
+                    onClick={willSteer ? onQueue : onSteer}
+                    className={cn(
+                      'flex h-8 items-center justify-center px-2.5 text-xs font-medium bg-muted text-foreground hover:bg-muted/80',
+                      raised,
+                      edgeNeutral
+                    )}
                   >
-                    Steer
+                    {alternateLabel}
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>Steer into running turn</TooltipContent>
+                <TooltipContent>
+                  {willSteer ? 'Queue message' : 'Steer into running turn'}
+                </TooltipContent>
               </Tooltip>
             </>
           )}
@@ -125,6 +136,13 @@ export function SendCancelButton({
 
     return cancelButton
   }
+
+  // On desktop, holding ⌘/Ctrl turns the button into its Mod+Enter action:
+  // send in the background and open a new session (see App.css).
+  const backgroundArmable = canSend && !isMobile
+  const backgroundShortcut = isClientMacOS
+    ? `${getModifierSymbol()}↵`
+    : `${getModifierSymbol()}+Enter`
 
   return (
     <Tooltip>
@@ -140,14 +158,28 @@ export function SendCancelButton({
                   edgePrimary,
                   'bg-primary text-primary-foreground hover:bg-primary/90'
                 )
-              : 'text-muted-foreground hover:bg-muted/80 hover:text-foreground'
+              : 'text-muted-foreground hover:bg-muted/80 hover:text-foreground',
+            backgroundArmable && 'send-background-armable'
           )}
         >
-          <span>Send</span>
+          <span className="send-label">Send</span>
+          {backgroundArmable && (
+            <span
+              aria-hidden
+              className="send-background-label items-center gap-1.5"
+            >
+              <span>Send in background</span>
+              <Kbd className="h-4 bg-primary-foreground/15 text-2xs text-primary-foreground">
+                {backgroundShortcut}
+              </Kbd>
+            </span>
+          )}
         </button>
       </TooltipTrigger>
       <TooltipContent>
-        {isMobile ? 'Send message' : 'Send message (Enter)'}
+        {isMobile
+          ? 'Send message'
+          : `Send message (Enter) · Send in background (${backgroundShortcut})`}
       </TooltipContent>
     </Tooltip>
   )

@@ -1,12 +1,5 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import {
-  Check,
-  Clock,
-  Paperclip,
-  Pencil,
-  Play,
-  X,
-} from '@/components/icons/reicon'
+import { memo, useCallback, useRef, useState } from 'react'
+import { Clock, Paperclip, Pencil, Play, X } from '@/components/icons/reicon'
 import {
   Collapsible,
   CollapsibleContent,
@@ -18,18 +11,23 @@ import {
   TooltipContent,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
-import { isImeComposingEvent } from '@/lib/ime-composition'
 import { useChatStore } from '@/store/chat-store'
 import type { QueuedMessage } from '@/types/chat'
+import { COMPOSER_SURFACE_CLASS } from './composer-surface'
+import { parseSessionUpdates } from './session-update'
 
 interface QueuedPromptsPanelProps {
   sessionId: string
   messages: QueuedMessage[]
   /** True while the session is sending or waiting for input */
   isSessionBusy: boolean
+  /** Queue paused after a provider rejection (usage limit, auth, API error) */
+  isPaused?: boolean
   onRemove: (sessionId: string, messageId: string) => void
   onSendNow: (sessionId: string, messageId: string) => void
-  onEdit: (sessionId: string, messageId: string, message: string) => void
+  /** Load the prompt (text + attachments) into the chat input to edit it */
+  onEdit: (sessionId: string, messageId: string) => void
+  onCancelEdit: (sessionId: string) => void
 }
 
 function attachmentCount(msg: QueuedMessage): number {
@@ -41,6 +39,14 @@ function attachmentCount(msg: QueuedMessage): number {
   )
 }
 
+/** Jean's session updates show who sent them instead of the raw header. */
+function queuedLabel(message: string): string {
+  const updates = parseSessionUpdates(message)
+  if (!updates) return message
+  const names = updates.map(update => update.name || 'a session').join(', ')
+  return `Update from ${names}`
+}
+
 /**
  * Collapsible list of queued prompts shown at the top of the chat window.
  *
@@ -49,43 +55,47 @@ function attachmentCount(msg: QueuedMessage): number {
  * - Enter: send the selected prompt immediately
  * - Backspace/Delete: remove the selected prompt
  * - Escape: collapse the panel
+ *
+ * Editing loads the prompt into the chat input, so every attachment kind can
+ * be added or removed there. Submitting the input saves it back in place.
  */
 export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
   sessionId,
   messages,
   isSessionBusy,
+  isPaused = false,
   onRemove,
   onSendNow,
   onEdit,
+  onCancelEdit,
 }: QueuedPromptsPanelProps) {
-  // Collapsed state is remembered per session (expanded by default)
+  // Expanded state is remembered per session (collapsed by default)
   const isOpen = useChatStore(
-    state => !state.collapsedQueuedPromptsSessions[sessionId]
+    state => !!state.expandedQueuedPromptsSessions[sessionId]
   )
   const setIsOpen = useCallback(
     (open: boolean) =>
-      useChatStore.getState().setQueuedPromptsCollapsed(sessionId, !open),
+      useChatStore.getState().setQueuedPromptsExpanded(sessionId, open),
     [sessionId]
   )
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [editingText, setEditingText] = useState('')
-  const listRef = useRef<HTMLDivElement>(null)
-  const rowRefs = useRef<(HTMLDivElement | null)[]>([])
+  const editingId = useChatStore(
+    state => state.editingQueuedMessageIds[sessionId] ?? null
+  )
+  const listRef = useRef<HTMLUListElement>(null)
+  const rowRefs = useRef<(HTMLLIElement | null)[]>([])
 
-  // Clamp selection when the queue shrinks (auto-send / cross-client removal)
-  useEffect(() => {
-    if (selectedIndex > messages.length - 1) {
-      setSelectedIndex(Math.max(0, messages.length - 1))
-    }
-  }, [messages.length, selectedIndex])
+  // Clamp selection when the queue shrinks (auto-send / cross-client removal).
+  // Adjusted during render so the out-of-range index never paints.
+  const maxSelectedIndex = Math.max(0, messages.length - 1)
+  if (selectedIndex > maxSelectedIndex) setSelectedIndex(maxSelectedIndex)
 
   const scrollRowIntoView = useCallback((index: number) => {
     rowRefs.current[index]?.scrollIntoView({ block: 'nearest' })
   }, [])
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
+    (e: React.KeyboardEvent<HTMLUListElement>) => {
       if (messages.length === 0) return
       switch (e.key) {
         case 'ArrowDown': {
@@ -109,14 +119,14 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
         case 'Enter': {
           e.preventDefault()
           const msg = messages[selectedIndex]
-          if (msg) onSendNow(sessionId, msg.id)
+          if (msg && msg.id !== editingId) onSendNow(sessionId, msg.id)
           break
         }
         case 'Backspace':
         case 'Delete': {
           e.preventDefault()
           const msg = messages[selectedIndex]
-          if (msg) onRemove(sessionId, msg.id)
+          if (msg && msg.id !== editingId) onRemove(sessionId, msg.id)
           break
         }
         case 'Escape': {
@@ -128,6 +138,7 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
       }
     },
     [
+      editingId,
       messages,
       selectedIndex,
       sessionId,
@@ -138,30 +149,17 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
     ]
   )
 
-  const startEditing = useCallback((msg: QueuedMessage) => {
-    setEditingId(msg.id)
-    setEditingText(msg.message)
-  }, [])
-
-  const cancelEditing = useCallback(() => {
-    setEditingId(null)
-    setEditingText('')
-  }, [])
-
-  const saveEditing = useCallback(() => {
-    if (!editingId) return
-    const next = editingText.trim()
-    if (!next) return
-    onEdit(sessionId, editingId, next)
-    cancelEditing()
-  }, [cancelEditing, editingId, editingText, onEdit, sessionId])
-
   if (messages.length === 0) return null
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
       {/* Styled to read as an extension of the chat input card below */}
-      <div className="overflow-hidden border-t border-border bg-card sm:rounded-t-lg sm:border sm:border-b-0">
+      <div
+        className={cn(
+          'overflow-hidden sm:rounded-t-lg sm:border-b-0',
+          COMPOSER_SURFACE_CLASS
+        )}
+      >
         <div className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground">
           <CollapsibleTrigger className="flex flex-1 min-w-0 items-center gap-2 select-none text-left cursor-pointer -mx-3 -my-1.5 px-3 py-1.5 hover:bg-muted/50">
             <Clock className="h-4 w-4 shrink-0" />
@@ -169,12 +167,25 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
             <span className="rounded bg-muted/50 px-1.5 py-0.5 text-xs">
               {messages.length}
             </span>
+            {isPaused && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-2xs text-amber-600 dark:text-amber-400">
+                    Paused
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  The last request failed (usage limit, sign-in, or provider
+                  error). These prompts stay queued and send after your next
+                  successful message, or use Send now to retry one.
+                </TooltipContent>
+              </Tooltip>
+            )}
           </CollapsibleTrigger>
         </div>
         <CollapsibleContent>
-          <div
+          <ul
             ref={listRef}
-            role="list"
             aria-label="Queued prompts"
             tabIndex={0}
             onKeyDown={handleKeyDown}
@@ -185,13 +196,13 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
               const attachments = attachmentCount(msg)
               const isEditing = editingId === msg.id
               return (
-                <div
+                // react-doctor-disable-next-line react-doctor/click-events-have-key-events, react-doctor/no-noninteractive-element-interactions -- pointer mirror of the focusable list's arrow-key selection (handleKeyDown)
+                <li
                   key={msg.id}
                   id={`queued-prompt-${index}`}
                   ref={el => {
                     rowRefs.current[index] = el
                   }}
-                  role="listitem"
                   aria-current={isSelected ? 'true' : undefined}
                   onClick={() => setSelectedIndex(index)}
                   className={cn(
@@ -205,36 +216,18 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
                   <span className="shrink-0 text-muted-foreground/60 tabular-nums">
                     #{index + 1}
                   </span>
-                  {isEditing ? (
-                    <textarea
-                      aria-label="Queued prompt text"
-                      value={editingText}
-                      onChange={e => setEditingText(e.target.value)}
-                      onClick={e => e.stopPropagation()}
-                      onKeyDown={e => {
-                        e.stopPropagation()
-                        // Don't commit edit when Enter confirms IME composition
-                        if (isImeComposingEvent(e)) {
-                          return
-                        }
-                        if (e.key === 'Escape') {
-                          e.preventDefault()
-                          cancelEditing()
-                        } else if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault()
-                          saveEditing()
-                        }
-                      }}
-                      className="min-h-8 flex-1 resize-none rounded border border-input bg-background px-2 py-1 text-xs text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      autoFocus
-                    />
-                  ) : (
-                    <span className="min-w-0 flex-1 truncate text-foreground">
-                      {msg.message}
-                    </span>
-                  )}
-                  {attachments > 0 && (
-                    <span className="flex shrink-0 items-center gap-0.5 rounded bg-muted/50 px-1 py-0.5 text-[10px] text-muted-foreground">
+                  <span
+                    className={cn(
+                      'min-w-0 flex-1 truncate',
+                      isEditing ? 'text-muted-foreground' : 'text-foreground'
+                    )}
+                  >
+                    {isEditing
+                      ? 'Editing in the input below. Submit it to save.'
+                      : queuedLabel(msg.message)}
+                  </span>
+                  {!isEditing && attachments > 0 && (
+                    <span className="flex shrink-0 items-center gap-0.5 rounded bg-muted/50 px-1 py-0.5 text-2xs text-muted-foreground">
                       <Paperclip className="h-2.5 w-2.5" />
                       {attachments}
                     </span>
@@ -244,38 +237,29 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
                       'flex shrink-0 items-center gap-1 transition-opacity',
                       isEditing
                         ? 'opacity-100'
-                        : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100',
+                        : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100',
                       isSelected &&
                         !isEditing &&
                         'group-focus-within/list:opacity-100'
                     )}
                   >
                     {isEditing ? (
-                      <>
-                        <button
-                          type="button"
-                          aria-label="Save queued prompt"
-                          disabled={!editingText.trim()}
-                          onClick={e => {
-                            e.stopPropagation()
-                            saveEditing()
-                          }}
-                          className="rounded p-0.5 text-muted-foreground hover:bg-primary hover:text-primary-foreground disabled:opacity-40 transition-colors"
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          aria-label="Cancel queued prompt edit"
-                          onClick={e => {
-                            e.stopPropagation()
-                            cancelEditing()
-                          }}
-                          className="rounded p-0.5 text-muted-foreground hover:bg-muted transition-colors"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label="Cancel queued prompt edit"
+                            onClick={e => {
+                              e.stopPropagation()
+                              onCancelEdit(sessionId)
+                            }}
+                            className="rounded p-0.5 text-muted-foreground hover:bg-muted transition-colors"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Cancel edit</TooltipContent>
+                      </Tooltip>
                     ) : (
                       <>
                         <Tooltip>
@@ -285,7 +269,7 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
                               aria-label="Edit queued prompt"
                               onClick={e => {
                                 e.stopPropagation()
-                                startEditing(msg)
+                                onEdit(sessionId, msg.id)
                               }}
                               className="rounded p-0.5 text-muted-foreground hover:bg-muted transition-colors"
                             >
@@ -333,10 +317,10 @@ export const QueuedPromptsPanel = memo(function QueuedPromptsPanel({
                       </>
                     )}
                   </div>
-                </div>
+                </li>
               )
             })}
-          </div>
+          </ul>
         </CollapsibleContent>
       </div>
     </Collapsible>

@@ -184,6 +184,36 @@ describe('transport bootstrap', () => {
     })
   })
 
+  it('sends a pasted-text read to the server of the session that owns it', async () => {
+    const invokeOnServer = vi.fn(async () => ({ content: 'notes', size: 5 }))
+    vi.doMock('./server-connections', () => ({ invokeOnServer }))
+    const transport = await loadNativeTransportModule(vi.fn())
+
+    await transport.invoke('read_pasted_text', {
+      path: '/srv/jean/pasted-texts/a.txt',
+      sessionId: 'remote-1:session-7',
+    })
+
+    expect(invokeOnServer).toHaveBeenCalledWith(
+      'remote-1',
+      'read_pasted_text',
+      { path: '/srv/jean/pasted-texts/a.txt', sessionId: 'session-7' }
+    )
+  })
+
+  it('rejects a path command that does not say which server owns the path', async () => {
+    const invokeOnServer = vi.fn()
+    vi.doMock('./server-connections', () => ({ invokeOnServer }))
+    const transport = await loadNativeTransportModule(vi.fn())
+
+    await expect(
+      transport.invoke('read_pasted_text', { path: '/tmp/a.txt' })
+    ).rejects.toThrow(
+      'read_pasted_text cannot tell which Jean server owns its arguments. Send sessionId with it, or call invokeForServer.'
+    )
+    expect(invokeOnServer).not.toHaveBeenCalled()
+  })
+
   it('routes path-only Git and GitHub commands to a remote owner', async () => {
     const invokeOnServer = vi.fn(async () => ({ issues: [], totalCount: 0 }))
     vi.doMock('./server-connections', () => ({ invokeOnServer }))
@@ -274,6 +304,60 @@ describe('transport bootstrap', () => {
     expect(result.current).not.toContain('secret')
   })
 
+  it('exchanges a token link for a session without storing the token', async () => {
+    const transport = await loadTransportModule()
+    window.history.replaceState({}, '', '/?token=link-token&tab=1')
+
+    transport.connectTransport()
+
+    await waitFor(() => expect(MockWebSocket.instances.length).toBe(1))
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('api/auth?token=link-token')
+    )
+    expect(localStorage.setItem).not.toHaveBeenCalled()
+    expect(window.location.search).toBe('?tab=1')
+    window.history.replaceState({}, '', '/')
+  })
+
+  it('migrates a token saved by an older version and deletes it', async () => {
+    vi.mocked(localStorage.getItem).mockImplementation(key =>
+      key === 'jean-http-token' ? 'legacy-token' : null
+    )
+    const transport = await loadTransportModule()
+
+    transport.connectTransport()
+
+    await waitFor(() => expect(MockWebSocket.instances.length).toBe(1))
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('token=legacy-token')
+    )
+    expect(localStorage.removeItem).toHaveBeenCalledWith('jean-http-token')
+    vi.mocked(localStorage.getItem).mockImplementation(() => null)
+  })
+
+  it('reconnects with the session cookie when no token is present', async () => {
+    const transport = await loadTransportModule()
+
+    transport.connectTransport()
+
+    await waitFor(() => expect(MockWebSocket.instances.length).toBe(1))
+    expect(fetch).toHaveBeenCalledWith(expect.not.stringContaining('token='))
+  })
+
+  it('signs out by revoking the server session', async () => {
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    const transport = await loadTransportModule()
+
+    await transport.signOutOfWebAccess()
+
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('api/logout'), {
+      method: 'POST',
+    })
+    expect(localStorage.removeItem).toHaveBeenCalledWith('jean-http-token')
+    expect(replace).toHaveBeenCalled()
+  })
+
   it('classifies a missing web access token as signed out', async () => {
     vi.mocked(fetch).mockResolvedValue({ ok: false } as Response)
     const transport = await loadTransportModule()
@@ -340,6 +424,32 @@ describe('transport bootstrap', () => {
       enabled: true,
     })
   })
+
+  it.each([
+    ['open_file_in_default_app', { path: '/Users/jean/a.ts', editor: 'zed' }],
+    ['open_worktree_in_finder', { worktreePath: '/Users/jean/project' }],
+    [
+      'open_worktree_in_editor',
+      { worktreePath: '/Users/jean/project', editor: 'zed' },
+    ],
+    [
+      'open_worktree_in_terminal',
+      { worktreePath: '/Users/jean/project', terminal: 'ghostty' },
+    ],
+  ])(
+    'keeps explicitly local %s on its native Tauri handler',
+    async (command, args) => {
+      const tauriInvoke = vi.fn().mockResolvedValue(undefined)
+      const invokeOnServer = vi.fn()
+      vi.doMock('./server-connections', () => ({ invokeOnServer }))
+      const transport = await loadNativeTransportModule(tauriInvoke)
+
+      await transport.invokeForOptionalServer('local', command, args)
+
+      expect(tauriInvoke).toHaveBeenCalledWith(command, args)
+      expect(invokeOnServer).not.toHaveBeenCalled()
+    }
+  )
 
   it('keeps path-routed local Open In commands on native Tauri handlers', async () => {
     const tauriInvoke = vi.fn().mockResolvedValue(undefined)
@@ -963,10 +1073,7 @@ describe('transport bootstrap', () => {
     })
 
     expect(
-      transport.convertServerProjectFileSrc(
-        'remote-1',
-        '/home/jean/project/icon.png'
-      )
+      transport.convertProjectFileSrc('remote-1', '/home/jean/project/icon.png')
     ).toBe(
       'https://jean.example.com/api/project-files/%2Fhome%2Fjean%2Fproject%2Ficon.png?token=secret%20token'
     )
@@ -996,6 +1103,45 @@ describe('transport bootstrap', () => {
     getWs(0).close()
 
     expect(onDisconnect).toHaveBeenCalledOnce()
+  })
+
+  it('waits for the server to answer before resolving reachability', async () => {
+    vi.useFakeTimers()
+    const transport = await loadTransportModule()
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new TypeError('network changed'))
+      .mockResolvedValueOnce({ ok: false } as Response)
+      .mockResolvedValue({ ok: true } as Response)
+    const resolved = vi.fn()
+
+    void transport.waitUntilBackendReachable().then(resolved)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(resolved).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(500)
+    expect(resolved).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(resolved).toHaveBeenCalledOnce()
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain('/healthz')
+  })
+
+  it('probes again at once when the network comes back', async () => {
+    vi.useFakeTimers()
+    const transport = await loadTransportModule()
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new TypeError('network changed'))
+      .mockRejectedValueOnce(new TypeError('network changed'))
+      .mockResolvedValue({ ok: true } as Response)
+    const resolved = vi.fn()
+
+    void transport.waitUntilBackendReachable().then(resolved)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(resolved).not.toHaveBeenCalled()
+
+    window.dispatchEvent(new Event('online'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(resolved).toHaveBeenCalledOnce()
   })
 
   it('uploads attachments to the remote server over HTTP, not the WebSocket', async () => {

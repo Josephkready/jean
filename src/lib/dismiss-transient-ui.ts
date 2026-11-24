@@ -31,6 +31,7 @@ export function dismissTransientUi(): void {
     openInModalOpen: false,
     remotePickerOpen: false,
     remotePickerRepoPath: null,
+    remotePickerOwner: null,
     loadContextModalOpen: false,
     linkedProjectsModalOpen: false,
     magicModalOpen: false,
@@ -41,6 +42,7 @@ export function dismissTransientUi(): void {
     updatePrModalOpen: false,
     reviewCommentsModalOpen: false,
     workflowRunsModalOpen: false,
+    workflowRunsModalProjectId: null,
     workflowRunsModalProjectPath: null,
     workflowRunsModalBranch: null,
     cliUpdateModalOpen: false,
@@ -58,6 +60,7 @@ export function dismissTransientUi(): void {
     contextViewerOpen: false,
     featureTourOpen: false,
     jeanMcpIntroOpen: false,
+    mcpServersModalOpen: false,
     chatSearchOpen: false,
     viewingFilePath: null,
     // App update prompt is non-critical during connection recovery.

@@ -1,27 +1,39 @@
 import { Play, Star } from '@/components/icons/reicon'
-import { Button, edgePrimary, raised } from '@/components/ui/button'
+import { Button, raisedToolbar } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { usePackageScripts, type PackageScript } from '@/services/projects'
+import type { GitRepoOwner } from '@/services/git-status'
 import { usePatchPreferences, usePreferences } from '@/services/preferences'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 interface ScriptsButtonProps {
   projectId?: string
+  /** Worktree or project that owns `worktreePath` */
+  owner: GitRepoOwner
   worktreePath: string
   onRun: (script: PackageScript) => void
 }
 
-export function ScriptsButton({
+function ScriptMenuItems({
   projectId,
+  owner,
   worktreePath,
   onRun,
 }: ScriptsButtonProps) {
-  const { data: scripts = [] } = usePackageScripts(worktreePath)
+  const { data: scripts = [] } = usePackageScripts(worktreePath, owner)
   const { data: preferences } = usePreferences()
   const patchPreferences = usePatchPreferences()
   const favoriteKeys = preferences?.favorite_package_scripts ?? []
@@ -51,61 +63,92 @@ export function ScriptsButton({
     })
   }
 
+  return sortedScripts.map(script => (
+    <DropdownMenuItem
+      key={script.name}
+      aria-label={script.name}
+      onSelect={() => onRun(script)}
+    >
+      <Play className="h-3.5 w-3.5" />
+      <span className="min-w-0 flex-1 truncate font-mono text-xs">
+        {script.name}
+      </span>
+      {projectId && (
+        <button
+          type="button"
+          className="-my-1 -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label={`${favoriteScriptNames.has(script.name) ? 'Unfavorite' : 'Favorite'} ${script.name}`}
+          aria-pressed={favoriteScriptNames.has(script.name)}
+          onClick={event => {
+            event.preventDefault()
+            event.stopPropagation()
+            toggleFavorite(script.name)
+          }}
+        >
+          <Star
+            className={cn(
+              'h-3.5 w-3.5',
+              favoriteScriptNames.has(script.name) &&
+                'fill-warning text-warning'
+            )}
+          />
+        </button>
+      )}
+    </DropdownMenuItem>
+  ))
+}
+
+export function ScriptsButton(props: ScriptsButtonProps) {
+  const { data: scripts = [] } = usePackageScripts(
+    props.worktreePath,
+    props.owner
+  )
   if (scripts.length === 0) return null
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn(
-            'h-7 gap-1.5 border border-primary bg-primary px-2 text-xs text-primary-foreground/85 hover:bg-primary/90 hover:text-primary-foreground dark:border-border/50 dark:bg-muted/50 dark:text-muted-foreground dark:hover:text-foreground',
-            raised,
-            edgePrimary,
-            'dark:[--btn-edge:color-mix(in_oklab,var(--foreground)_12%,transparent)]'
-          )}
-          aria-label="Scripts"
-        >
-          <Play className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">Scripts</span>
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className={raisedToolbar}
+              aria-label="Scripts"
+            >
+              <Play className="size-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Scripts (package.json)</TooltipContent>
+      </Tooltip>
       <DropdownMenuContent align="end" className="min-w-48">
-        {sortedScripts.map(script => (
-          <DropdownMenuItem
-            key={script.name}
-            aria-label={script.name}
-            onSelect={() => onRun(script)}
-          >
-            <Play className="h-3.5 w-3.5" />
-            <span className="min-w-0 flex-1 truncate font-mono text-xs">
-              {script.name}
-            </span>
-            {projectId && (
-              <button
-                type="button"
-                className="-my-1 -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                aria-label={`${favoriteScriptNames.has(script.name) ? 'Unfavorite' : 'Favorite'} ${script.name}`}
-                aria-pressed={favoriteScriptNames.has(script.name)}
-                onClick={event => {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  toggleFavorite(script.name)
-                }}
-              >
-                <Star
-                  className={cn(
-                    'h-3.5 w-3.5',
-                    favoriteScriptNames.has(script.name) &&
-                      'fill-warning text-warning'
-                  )}
-                />
-              </button>
-            )}
-          </DropdownMenuItem>
-        ))}
+        <ScriptMenuItems {...props} />
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+/** The same script list as a submenu, for hosting inside another menu. */
+export function ScriptsSubmenu(props: ScriptsButtonProps) {
+  const { data: scripts = [] } = usePackageScripts(
+    props.worktreePath,
+    props.owner
+  )
+  if (scripts.length === 0) return null
+
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger className="gap-2">
+        <Play className="h-4 w-4 text-muted-foreground" />
+        <span className="flex-1">Scripts</span>
+        <span className="ml-3 text-2xs text-muted-foreground">
+          package.json
+        </span>
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="min-w-48">
+        <ScriptMenuItems {...props} />
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
   )
 }

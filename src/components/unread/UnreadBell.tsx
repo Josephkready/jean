@@ -14,6 +14,11 @@ import {
   PopoverContent,
 } from '@/components/ui/popover'
 import { Kbd } from '@/components/ui/kbd'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { invoke, invokeForServer } from '@/lib/transport'
 import { parseServerResourceKey } from '@/lib/server-resource'
@@ -42,6 +47,8 @@ function formatRelativeTime(timestamp: number): string {
   if (diffMs < dayMs) return `${Math.floor(diffMs / hourMs)}h ago`
   return `${Math.floor(diffMs / dayMs)}d ago`
 }
+
+const UNREAD_LIST_QUERY_KEY = ['all-sessions', 'unread']
 
 interface UnreadItem {
   session: Session
@@ -169,8 +176,13 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
   const { data: preferences } = usePreferences()
   const animationEnabled =
     preferences?.finished_session_animation_enabled ?? true
-  // Unread-only query: staleTime 0 refetches on open, cached rows show meanwhile.
-  const { data: allSessions, isLoading, isFetching } = useUnreadSessions(open)
+  // Keep the unread list warm while the badge shows, so opening the popover
+  // renders rows at once instead of waiting for every server to answer.
+  const {
+    data: allSessions,
+    isLoading,
+    isFetching,
+  } = useUnreadSessions(open || unreadCount > 0)
   const sendingSessionIds = useChatStore(state => state.sendingSessionIds)
   // Listen for command palette event to open the popover
   useEffect(() => {
@@ -180,16 +192,30 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
       window.removeEventListener('command:open-unread-sessions', handler)
   }, [])
 
-  // Refresh the count each time popover opens. The unread list refetches by
-  // itself on enable; invalidating it too would cancel and restart that fetch.
+  // Refresh the count and the list each time the popover opens. Cached rows
+  // show meanwhile; cancelRefetch: false keeps an in-flight fetch going.
   useEffect(() => {
     if (open) {
       queryClient.invalidateQueries({
         queryKey: chatQueryKeys.unreadSessionCount(),
       })
+      void queryClient.refetchQueries(
+        { queryKey: UNREAD_LIST_QUERY_KEY },
+        { cancelRefetch: false }
+      )
       setFocusedIndex(0)
     }
   }, [open, queryClient])
+
+  // The badge count polls every server; refresh the warm list when it changes.
+  useEffect(() => {
+    if (unreadCount > 0) {
+      void queryClient.refetchQueries(
+        { queryKey: UNREAD_LIST_QUERY_KEY },
+        { cancelRefetch: false }
+      )
+    }
+  }, [unreadCount, queryClient])
 
   // Invalidate when any session is opened (so the count stays fresh)
   useEffect(() => {
@@ -209,7 +235,7 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
   }, [open])
 
   // Prune deleted sessions from the open snapshot. A session removed from the
-  // live ['all-sessions'] data (closed/archived/worktree deleted) is dropped,
+  // live ['all-sessions'] data (closed/worktree deleted) is dropped,
   // while a row that merely flipped status stays present in `entries` — so this
   // does not reintroduce the mid-interaction yank the snapshot prevents.
   useEffect(() => {
@@ -246,18 +272,20 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
     return results.sort((a, b) => b.session.updated_at - a.session.updated_at)
   }, [allSessions])
 
-  // A separate query supplies the badge count. Do not freeze an old list when
-  // that count says a newly finished session is still missing from it.
+  // Freeze the list only after the open refetch is done. A snapshot of cached
+  // rows can hold sessions read elsewhere; pruning them leaves an empty list.
+  // A separate query supplies the badge count, so also wait until it agrees.
   useEffect(() => {
     if (
       !open ||
       !allSessions ||
+      isFetching ||
       unreadItems.length === 0 ||
       unreadItems.length !== unreadCount
     )
       return
     setSnapshotItems(prev => prev ?? unreadItems)
-  }, [allSessions, open, unreadCount, unreadItems])
+  }, [allSessions, isFetching, open, unreadCount, unreadItems])
 
   // Items rendered inside the popover. While open, prefer the snapshot taken at
   // open time so a queued prompt restarting a session (status flip → unread=false)
@@ -398,31 +426,6 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
     [markSessionsOpened]
   )
 
-  const handleTriggerClick = useCallback(() => {
-    if (
-      allSessions &&
-      unreadItems.length > 0 &&
-      unreadItems.length === unreadCount
-    ) {
-      setSnapshotItems(unreadItems)
-    }
-  }, [allSessions, unreadCount, unreadItems])
-
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      if (
-        next &&
-        allSessions &&
-        unreadItems.length > 0 &&
-        unreadItems.length === unreadCount
-      ) {
-        setSnapshotItems(unreadItems)
-      }
-      setOpen(next)
-    },
-    [allSessions, unreadCount, unreadItems]
-  )
-
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       const total = displayItems.length
@@ -488,38 +491,49 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
   // a status flip, until the user dismisses).
   const displayCount =
     open && snapshotItems ? snapshotItems.length : unreadCount
+  const triggerLabel = `${displayCount} finished ${displayCount === 1 ? 'session' : 'sessions'}`
 
   return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <div>
-          <button
-            type="button"
-            onClick={handleTriggerClick}
-            className="relative z-[1] flex items-center gap-1.5 truncate rounded-md bg-background px-1.5 text-sm font-medium text-warning cursor-pointer"
-          >
-            <BellDot
-              className={cn(
-                'h-3.5 w-3.5 shrink-0',
-                animationEnabled &&
-                  'animate-[bell-ring_2s_ease-in-out_infinite]'
-              )}
-            />
-            {displayCount} finished{' '}
-            {displayCount === 1 ? 'session' : 'sessions'}
-            {showDesktopKeyboardAffordances && (
-              <Kbd className="ml-1 h-4 px-1 text-[10px] opacity-60">
-                {formatShortcutDisplay('mod+shift+f')}
-              </Kbd>
-            )}
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={triggerLabel}
+                className="relative z-[1] flex items-center gap-1 truncate rounded-md bg-background px-1.5 text-sm font-medium text-warning cursor-pointer"
+              >
+                <BellDot
+                  className={cn(
+                    'h-3.5 w-3.5 shrink-0',
+                    animationEnabled &&
+                      'animate-[bell-ring_2s_ease-in-out_infinite]'
+                  )}
+                />
+                {displayCount}
+                {showDesktopKeyboardAffordances && (
+                  <Kbd modHint className="ml-1">
+                    {formatShortcutDisplay('mod+shift+f')}
+                  </Kbd>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{triggerLabel}</TooltipContent>
+          </Tooltip>
         </div>
       </PopoverTrigger>
       <PopoverContent
         ref={contentRef}
         align="center"
         sideOffset={6}
-        className="w-[min(440px,calc(100vw-2rem))] p-0"
+        collisionPadding={16}
+        className={cn(
+          'p-0',
+          isMobile
+            ? 'w-[calc(100vw-2rem)]'
+            : 'w-[min(440px,calc(100vw-2rem))]'
+        )}
         tabIndex={-1}
         onKeyDown={handleKeyDown}
         onOpenAutoFocus={e => {
@@ -566,7 +580,7 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
                   onClick={() => handleSelect(item)}
                   onMouseEnter={() => setFocusedIndex(idx)}
                   className={cn(
-                    'w-full text-left px-2 py-1.5 rounded-md hover:bg-accent/50 transition-colors cursor-pointer flex items-start gap-2',
+                    'w-full text-left px-2 py-1.5 rounded-md transition-colors cursor-pointer flex items-start gap-2',
                     focusedIndex === idx && 'bg-accent'
                   )}
                 >
@@ -578,23 +592,20 @@ export function UnreadBell({ title, hideTitle }: UnreadBellProps) {
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/50 shrink-0">
+                      <span className="text-2xs font-medium uppercase tracking-wider text-muted-foreground/50 shrink-0">
                         {item.projectName}
                       </span>
                       {item.serverName && (
-                        <span className="truncate text-[11px] text-muted-foreground/50">
+                        <span className="truncate text-2xs text-muted-foreground/50">
                           · {item.serverName}
                         </span>
                       )}
-                      <span className="text-[11px] text-muted-foreground/40 shrink-0 ml-auto">
+                      <span className="text-2xs text-muted-foreground/40 shrink-0 ml-auto">
                         {formatRelativeTime(item.session.updated_at)}
                       </span>
                       {showDesktopKeyboardAffordances &&
                         focusedIndex === idx && (
-                          <Kbd
-                            className="h-4 min-w-4 px-1 text-[10px] opacity-70"
-                            title="Press R to mark read"
-                          >
+                          <Kbd title="Press R to mark read" className="-my-1">
                             R
                           </Kbd>
                         )}

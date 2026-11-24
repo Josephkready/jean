@@ -1,11 +1,4 @@
-import {
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-  lazy,
-  Suspense,
-} from 'react'
+import { useState, useEffect, useCallback, useMemo, Suspense } from 'react'
 import {
   FileText,
   ImageIcon,
@@ -17,11 +10,7 @@ import {
   Save,
   ExternalLink,
 } from '@/components/icons/reicon'
-import {
-  invoke,
-  invokeForOptionalServer,
-  invokeForServer,
-} from '@/lib/transport'
+import { invokeForOptionalServer } from '@/lib/transport'
 import {
   Dialog,
   DialogContent,
@@ -38,12 +27,13 @@ import { useTheme } from '@/hooks/use-theme'
 import { canOpenInEditor } from '@/lib/environment'
 import { usePreferences } from '@/services/preferences'
 import { cn } from '@/lib/utils'
+import { lazyWithPreload, preloadWhenIdle } from '@/lib/lazy-preload'
 import type { SyntaxTheme } from '@/types/preferences'
 import { toast } from 'sonner'
 import { FilePathCopyRow } from './FilePathCopyRow'
 
 // Lazy load CodeEditor (Pierre File + edit mode) so the main bundle stays lean
-const CodeEditor = lazy(() => import('@/components/ui/code-editor'))
+const CodeEditor = lazyWithPreload(() => import('@/components/ui/code-editor'))
 
 // Match the dialog close (X) button: same height, grey icon, square on mobile
 const HEADER_ICON_BUTTON_CLASS =
@@ -67,8 +57,8 @@ function isVideoFile(filename: string | null | undefined): boolean {
 interface FileContentModalProps {
   /** File path to display, or null to close the modal */
   filePath: string | null
-  /** Jean server that owns the file path. */
-  serverId?: string
+  /** Jean server that owns the file path; `undefined` means the active transport. */
+  serverId: string | undefined
   /** Callback when modal is closed */
   onClose: () => void
 }
@@ -131,6 +121,8 @@ export function FileContentModal({
   serverId,
   onClose,
 }: FileContentModalProps) {
+  // This modal is always mounted: fetch the editor before the first file opens.
+  useEffect(() => preloadWhenIdle([CodeEditor.preload]), [])
   const [content, setContent] = useState<string | null>(null)
   const [editedContent, setEditedContent] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -176,11 +168,11 @@ export function FileContentModal({
       setEditorEpoch(e => e + 1)
 
       try {
-        const fileContent = serverId
-          ? await invokeForServer<string>(serverId, 'read_file_content', {
-              path,
-            })
-          : await invoke<string>('read_file_content', { path })
+        const fileContent = await invokeForOptionalServer<string>(
+          serverId,
+          'read_file_content',
+          { path }
+        )
         if (signal.cancelled) return
         setContent(fileContent)
         setEditedContent(fileContent)
@@ -188,6 +180,7 @@ export function FileContentModal({
         if (signal.cancelled) return
         setError(err instanceof Error ? err.message : String(err))
       } finally {
+        // react-doctor-disable-next-line react-doctor/no-loading-flag-reset-outside-finally -- reset is in finally; cancelled guard hands flag ownership to the newer load
         if (!signal.cancelled) setIsLoading(false)
       }
     },
@@ -206,13 +199,11 @@ export function FileContentModal({
       setImageSrc(null)
 
       try {
-        const result = serverId
-          ? await invokeForServer<FileBase64Content>(
-              serverId,
-              'read_file_base64',
-              { path }
-            )
-          : await invoke<FileBase64Content>('read_file_base64', { path })
+        const result = await invokeForOptionalServer<FileBase64Content>(
+          serverId,
+          'read_file_base64',
+          { path }
+        )
         if (signal.cancelled) return
         setImageSrc(`data:${result.mimeType};base64,${result.data}`)
       } catch (err) {
@@ -220,6 +211,7 @@ export function FileContentModal({
         setError(err instanceof Error ? err.message : String(err))
         setImageError(true)
       } finally {
+        // react-doctor-disable-next-line react-doctor/no-loading-flag-reset-outside-finally -- reset is in finally; cancelled guard hands flag ownership to the newer load
         if (!signal.cancelled) setIsLoading(false)
       }
     },
@@ -271,11 +263,7 @@ export function FileContentModal({
     setIsSaving(true)
     try {
       const args = { path: filePath, content: editedContent }
-      if (serverId) {
-        await invokeForServer(serverId, 'write_file_content', args)
-      } else {
-        await invoke('write_file_content', args)
-      }
+      await invokeForOptionalServer(serverId, 'write_file_content', args)
       setContent(editedContent)
       toast.success('File saved')
     } catch (err) {
@@ -342,7 +330,7 @@ export function FileContentModal({
         }}
         // Sit above mobile sheets (z-80) so the viewer is interactive
         overlayClassName="z-[90]"
-        className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-auto sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95 z-[90]"
+        className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-fit sm:max-h-[85vh] sm:!top-[7.5vh] sm:!translate-y-0 sm:!rounded-lg sm:p-4 bg-background/95 z-[90]"
       >
         <div className="flex min-w-0 flex-col gap-1 px-4 pt-4 pr-14 sm:px-0 sm:pt-0 sm:pr-8">
           <DialogTitle>

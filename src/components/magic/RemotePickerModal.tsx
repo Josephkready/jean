@@ -10,25 +10,36 @@ import { useUIStore, getRemotePickerCallback } from '@/store/ui-store'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getGitRemotes, removeGitRemote } from '@/services/git-status'
 import { cn } from '@/lib/utils'
+import { Kbd } from '@/components/ui/kbd'
 import { useIsMobile } from '@/hooks/use-mobile'
 
 export function RemotePickerModal() {
-  const { remotePickerOpen, remotePickerRepoPath, closeRemotePicker } =
-    useUIStore()
+  const {
+    remotePickerOpen,
+    remotePickerRepoPath,
+    remotePickerOwner,
+    closeRemotePicker,
+  } = useUIStore()
   const contentRef = useRef<HTMLDivElement>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const queryClient = useQueryClient()
   const isMobile = useIsMobile()
 
   const { data: remotes = [] } = useQuery({
-    queryKey: ['git-remotes', remotePickerRepoPath],
+    queryKey: ['git-remotes', remotePickerRepoPath, remotePickerOwner],
     queryFn: async () => {
-      if (!remotePickerRepoPath) return []
-      const orderedRemotes = await getGitRemotes(remotePickerRepoPath)
+      if (!remotePickerRepoPath || !remotePickerOwner) return []
+      const orderedRemotes = await getGitRemotes(
+        remotePickerOwner,
+        remotePickerRepoPath
+      )
       setSelectedIndex(0)
       return orderedRemotes
     },
-    enabled: remotePickerOpen && remotePickerRepoPath !== null,
+    enabled:
+      remotePickerOpen &&
+      remotePickerRepoPath !== null &&
+      remotePickerOwner !== null,
     staleTime: 10_000,
   })
 
@@ -46,17 +57,27 @@ export function RemotePickerModal() {
   const handleRemoveRemote = useCallback(
     async (index: number) => {
       const remote = remotes[index]
-      if (!remote || !remotePickerRepoPath || remote.name === 'origin') return
+      if (
+        !remote ||
+        !remotePickerRepoPath ||
+        !remotePickerOwner ||
+        remote.name === 'origin'
+      )
+        return
 
-      await removeGitRemote(remotePickerRepoPath, remote.name)
+      await removeGitRemote(
+        remotePickerOwner,
+        remotePickerRepoPath,
+        remote.name
+      )
       await queryClient.invalidateQueries({
-        queryKey: ['git-remotes', remotePickerRepoPath],
+        queryKey: ['git-remotes', remotePickerRepoPath, remotePickerOwner],
       })
 
       // Adjust selection if we removed the last item
       setSelectedIndex(i => Math.min(i, remotes.length - 2))
     },
-    [remotes, remotePickerRepoPath, queryClient]
+    [remotes, remotePickerRepoPath, remotePickerOwner, queryClient]
   )
 
   const handleKeyDown = useCallback(
@@ -103,7 +124,7 @@ export function RemotePickerModal() {
       <DialogContent
         ref={contentRef}
         tabIndex={-1}
-        className="p-0 outline-none sm:max-w-[280px]"
+        className="p-0 outline-none sm:max-w-xs"
         onOpenAutoFocus={e => {
           e.preventDefault()
           contentRef.current?.focus()
@@ -139,11 +160,7 @@ export function RemotePickerModal() {
                     <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />
                     <span className="truncate">{remote.name}</span>
                   </div>
-                  {i < 9 && (
-                    <kbd className="ml-2 shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-                      {i + 1}
-                    </kbd>
-                  )}
+                  {i < 9 && <Kbd className="ml-2 shrink-0">{i + 1}</Kbd>}
                 </button>
                 {showRemove && (
                   <button
@@ -153,7 +170,7 @@ export function RemotePickerModal() {
                       e.stopPropagation()
                       handleRemoveRemote(i)
                     }}
-                    className="mr-3 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive focus:outline-none focus:ring-2 focus:ring-ring"
+                    className="mr-3 inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive focus:outline-none focus:ring-2 focus:ring-ring"
                   >
                     <Delete className="h-3.5 w-3.5" />
                   </button>

@@ -4,11 +4,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   chatQueryKeys,
+  recordUserTurnOutcome,
+  resetSendTracking,
+  restoreLastSentPrompt,
+  restoreReturnedQueuedMessage,
   upsertTurnAssistantMessage,
   useSendMessage,
+  USER_TURN_VERDICT_GRACE_MS,
 } from './chat'
 import { useChatStore } from '@/store/chat-store'
-import type { ChatMessage, Session } from '@/types/chat'
+import type { ChatMessage, QueuedMessage, Session } from '@/types/chat'
 
 const { mockInvoke } = vi.hoisted(() => ({ mockInvoke: vi.fn() }))
 
@@ -90,6 +95,35 @@ async function startSend(hook: ReturnType<typeof setup>['hook']) {
       finish(reply)
       await send
     })
+  }
+}
+
+type SendArgs = Parameters<ReturnType<typeof useSendMessage>['mutateAsync']>[0]
+
+/**
+ * Send, let the invoke reject, and wait out the verdict grace time. Returns
+ * the rejection reason.
+ */
+async function sendUntilRejected(
+  hook: ReturnType<typeof setup>['hook'],
+  args: SendArgs,
+  duringGrace?: () => void
+) {
+  vi.useFakeTimers()
+  try {
+    let reason: unknown
+    await act(async () => {
+      const send = hook.result.current.mutateAsync(args).catch(error => {
+        reason = error
+      })
+      await vi.advanceTimersByTimeAsync(USER_TURN_VERDICT_GRACE_MS / 2)
+      duringGrace?.()
+      await vi.advanceTimersByTimeAsync(USER_TURN_VERDICT_GRACE_MS)
+      await send
+    })
+    return reason
+  } finally {
+    vi.useRealTimers()
   }
 }
 
@@ -238,17 +272,15 @@ describe('useSendMessage completion', () => {
       useChatStore.getState().setInputDraft('session-1', newerDraft)
       mockInvoke.mockRejectedValue('Session not found: session-1')
 
-      await act(async () => {
-        await expect(
-          hook.result.current.mutateAsync({
-            sessionId: 'session-1',
-            worktreeId: 'worktree-1',
-            worktreePath: '/tmp/worktree-1',
-            message: 'do not lose this text',
-            backend: 'claude',
-          })
-        ).rejects.toBe('Session not found: session-1')
-      })
+      expect(
+        await sendUntilRejected(hook, {
+          sessionId: 'session-1',
+          worktreeId: 'worktree-1',
+          worktreePath: '/tmp/worktree-1',
+          message: 'do not lose this text',
+          backend: 'claude',
+        })
+      ).toBe('Session not found: session-1')
 
       expect(useChatStore.getState().inputDrafts['session-1']).toBe(
         newerDraft || 'do not lose this text'
@@ -284,18 +316,16 @@ describe('useSendMessage completion', () => {
     } as never)
     mockInvoke.mockRejectedValue('Codex could not start: login required')
 
-    await act(async () => {
-      await expect(
-        hook.result.current.mutateAsync({
-          sessionId: 'session-1',
-          worktreeId: 'worktree-1',
-          worktreePath: '/tmp/worktree-1',
-          message:
-            'check this\n\n[File: src/a.ts - Use the Read tool to view this file]\n\n[Image attached: /tmp/img.png - Use the Read tool to view this image]',
-          backend: 'codex',
-        })
-      ).rejects.toBe('Codex could not start: login required')
-    })
+    expect(
+      await sendUntilRejected(hook, {
+        sessionId: 'session-1',
+        worktreeId: 'worktree-1',
+        worktreePath: '/tmp/worktree-1',
+        message:
+          'check this\n\n[File: src/a.ts - Use the Read tool to view this file]\n\n[Image attached: /tmp/img.png - Use the Read tool to view this image]',
+        backend: 'codex',
+      })
+    ).toBe('Codex could not start: login required')
 
     const state = useChatStore.getState()
     expect(state.inputDrafts['session-1']).toBe('check this')
@@ -303,6 +333,73 @@ describe('useSendMessage completion', () => {
     expect(state.pendingFiles['session-1']).toEqual([file])
     expect(state.lastSentAttachments['session-1']).toBeUndefined()
     expect(state.lastSentMessages['session-1']).toBeUndefined()
+  })
+
+  it('keeps history and the composer when the backend recorded the prompt before failing', async () => {
+    const { hook, session } = setup([message('u1', 'user', 'first question')])
+    useChatStore.setState({
+      inputDrafts: {},
+      lastSentMessages: { 'session-1': 'second question' },
+    } as never)
+    mockInvoke.mockImplementation(() => {
+      // The backend reports the turn before the invoke rejects.
+      recordUserTurnOutcome('session-1', 'persisted')
+      return Promise.reject('CLI execution thread closed unexpectedly')
+    })
+
+    expect(
+      await sendUntilRejected(hook, {
+        sessionId: 'session-1',
+        worktreeId: 'worktree-1',
+        worktreePath: '/tmp/worktree-1',
+        message: 'second question',
+        backend: 'claude',
+      })
+    ).toBe('CLI execution thread closed unexpectedly')
+
+    expect(contents(session()?.messages)).toEqual([
+      'first question',
+      'second question',
+    ])
+    expect(useChatStore.getState().inputDrafts['session-1']).toBeUndefined()
+    expect(
+      useChatStore.getState().sendingSessionIds['session-1']
+    ).toBeUndefined()
+  })
+
+  it('keeps the prompt when the verdict arrives after the rejection (#927)', async () => {
+    const { hook, session } = setup([message('u1', 'user', 'first question')])
+    useChatStore.setState({
+      inputDrafts: {},
+      lastSentMessages: { 'session-1': 'second question' },
+    } as never)
+    mockInvoke.mockRejectedValue('API Error: rate limit reached')
+
+    const reason = await sendUntilRejected(
+      hook,
+      {
+        sessionId: 'session-1',
+        worktreeId: 'worktree-1',
+        worktreePath: '/tmp/worktree-1',
+        message: 'second question',
+        backend: 'claude',
+      },
+      () => {
+        // Before the verdict, the optimistic prompt is still on screen.
+        expect(contents(session()?.messages)).toEqual([
+          'first question',
+          'second question',
+        ])
+        recordUserTurnOutcome('session-1', 'persisted')
+      }
+    )
+
+    expect(reason).toBe('API Error: rate limit reached')
+    expect(contents(session()?.messages)).toEqual([
+      'first question',
+      'second question',
+    ])
+    expect(useChatStore.getState().inputDrafts['session-1']).toBeUndefined()
   })
 
   it('keeps newer typing and drops stale attachments after a rejected send', async () => {
@@ -322,21 +419,143 @@ describe('useSendMessage completion', () => {
     } as never)
     mockInvoke.mockRejectedValue('boom')
 
-    await act(async () => {
-      await expect(
-        hook.result.current.mutateAsync({
-          sessionId: 'session-1',
-          worktreeId: 'worktree-1',
-          worktreePath: '/tmp/worktree-1',
-          message: 'old\n\n[Image attached: /tmp/img.png]',
-          backend: 'claude',
-        })
-      ).rejects.toBe('boom')
-    })
+    expect(
+      await sendUntilRejected(hook, {
+        sessionId: 'session-1',
+        worktreeId: 'worktree-1',
+        worktreePath: '/tmp/worktree-1',
+        message: 'old\n\n[Image attached: /tmp/img.png]',
+        backend: 'claude',
+      })
+    ).toBe('boom')
 
     const state = useChatStore.getState()
     expect(state.inputDrafts['session-1']).toBe('newer draft')
     expect(state.pendingImages['session-1']).toBeUndefined()
     expect(state.lastSentAttachments['session-1']).toBeUndefined()
+  })
+})
+
+describe('restoreLastSentPrompt', () => {
+  beforeEach(() => {
+    useChatStore.setState({
+      inputDrafts: {},
+      lastSentMessages: {},
+      lastSentArgs: {},
+      lastSentAttachments: {},
+    })
+  })
+
+  it('does not restore an earlier finished send when this client did not send the withdrawn prompt', () => {
+    useChatStore.setState({
+      lastSentArgs: {
+        'session-1': {
+          sessionId: 'session-1',
+          worktreeId: 'wt-1',
+          worktreePath: '/wt',
+          message: 'prompt A, already in history',
+        },
+      },
+    })
+
+    expect(restoreLastSentPrompt('session-1')).toBe(false)
+    expect(useChatStore.getState().inputDrafts['session-1']).toBeUndefined()
+  })
+
+  it('restores the unfinished send of this client', () => {
+    useChatStore.setState({
+      lastSentMessages: { 'session-1': 'prompt B' },
+      lastSentArgs: {
+        'session-1': {
+          sessionId: 'session-1',
+          worktreeId: 'wt-1',
+          worktreePath: '/wt',
+          message: 'prompt B',
+        },
+      },
+    })
+
+    expect(restoreLastSentPrompt('session-1')).toBe(true)
+    expect(useChatStore.getState().inputDrafts['session-1']).toBe('prompt B')
+  })
+})
+
+describe('restoreReturnedQueuedMessage', () => {
+  const image = { id: 'image-1', path: '/tmp/image.png', filename: 'image.png' }
+  const queued = (overrides: Partial<QueuedMessage> = {}): QueuedMessage => ({
+    id: 'queued-1',
+    message: 'queued prompt',
+    pendingImages: [],
+    pendingFiles: [],
+    pendingSkills: [],
+    pendingTextFiles: [],
+    model: 'claude-sonnet-4-6',
+    provider: null,
+    executionMode: 'build',
+    thinkingLevel: 'off',
+    queuedAt: 1,
+    ...overrides,
+  })
+
+  beforeEach(() => {
+    resetSendTracking()
+    useChatStore.setState({
+      inputDrafts: {},
+      pendingImages: {},
+      pendingFiles: {},
+      pendingSkills: {},
+      pendingTextFiles: {},
+    })
+  })
+
+  it('puts the queued prompt into an empty composer', () => {
+    expect(restoreReturnedQueuedMessage('session-1', queued())).toBe(true)
+    expect(useChatStore.getState().inputDrafts['session-1']).toBe(
+      'queued prompt'
+    )
+  })
+
+  it('keeps a newer draft and appends the queued prompt below it', () => {
+    useChatStore.setState({ inputDrafts: { 'session-1': 'typing now' } })
+    restoreReturnedQueuedMessage('session-1', queued())
+    expect(useChatStore.getState().inputDrafts['session-1']).toBe(
+      'typing now\n\nqueued prompt'
+    )
+  })
+
+  it('brings the attachment chips back when the composer has none', () => {
+    restoreReturnedQueuedMessage(
+      'session-1',
+      queued({ pendingImages: [image] })
+    )
+    expect(useChatStore.getState().pendingImages['session-1']).toEqual([image])
+  })
+
+  it('leaves chips the user already attached alone', () => {
+    const mine = { ...image, id: 'image-mine' }
+    useChatStore.setState({ pendingImages: { 'session-1': [mine] } })
+    restoreReturnedQueuedMessage(
+      'session-1',
+      queued({ pendingImages: [image] })
+    )
+    expect(useChatStore.getState().pendingImages['session-1']).toEqual([mine])
+  })
+
+  it('restores the same returned prompt only once per client', () => {
+    expect(
+      restoreReturnedQueuedMessage(
+        'session-1',
+        queued({ pendingImages: [image] })
+      )
+    ).toBe(true)
+    expect(
+      restoreReturnedQueuedMessage(
+        'session-1',
+        queued({ pendingImages: [image] })
+      )
+    ).toBe(false)
+    const state = useChatStore.getState()
+    expect(state.inputDrafts['session-1']).toBe('queued prompt')
+    expect(state.pendingImages['session-1']).toEqual([image])
   })
 })

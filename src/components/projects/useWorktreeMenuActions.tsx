@@ -1,8 +1,6 @@
 import { useState, useCallback } from 'react'
 import { isBaseSession, type Worktree } from '@/types/projects'
 import {
-  useArchiveWorktree,
-  useCloseBaseSession,
   useDeleteWorktree,
   useOpenWorktreeInFinder,
   useOpenWorktreeInTerminal,
@@ -24,13 +22,11 @@ export function useWorktreeMenuActions({
   projectId,
 }: UseWorktreeMenuActionsProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const archiveWorktree = useArchiveWorktree()
-  const closeBaseSession = useCloseBaseSession()
   const deleteWorktree = useDeleteWorktree()
   const openInFinder = useOpenWorktreeInFinder()
   const openInTerminal = useOpenWorktreeInTerminal()
   const openInEditor = useOpenWorktreeInEditor()
-  const { data: runScripts = [] } = useRunScripts(worktree.path)
+  const { data: runScripts = [] } = useRunScripts(worktree.path, worktree.id)
   const { data: preferences } = usePreferences()
   const { data: sessionsData } = useSessions(worktree.id, worktree.path)
   const isBase = isBaseSession(worktree)
@@ -62,40 +58,33 @@ export function useWorktreeMenuActions({
   }, [worktree.id])
 
   const handleOpenInFinder = useCallback(() => {
-    openInFinder.mutate(worktree.path)
-  }, [openInFinder, worktree.path])
+    openInFinder.mutate({
+      worktreePath: worktree.path,
+      worktreeId: worktree.id,
+    })
+  }, [openInFinder, worktree.path, worktree.id])
 
   const handleOpenInTerminal = useCallback(() => {
     openInTerminal.mutate({
       worktreePath: worktree.path,
+      worktreeId: worktree.id,
       terminal: preferences?.terminal,
     })
-  }, [openInTerminal, worktree.path, preferences?.terminal])
+  }, [openInTerminal, worktree.path, worktree.id, preferences?.terminal])
 
   const handleOpenInEditor = useCallback(() => {
     openInEditor.mutate({
       worktreePath: worktree.path,
+      worktreeId: worktree.id,
       editor: preferences?.editor,
     })
-  }, [openInEditor, worktree.path, preferences?.editor])
+  }, [openInEditor, worktree.path, worktree.id, preferences?.editor])
 
-  const handleArchiveOrClose = useCallback(() => {
-    if (isBase) {
-      closeBaseSession.mutate({ worktreeId: worktree.id, projectId })
-    } else if (preferences?.removal_behavior === 'delete') {
-      deleteWorktree.mutate({ worktreeId: worktree.id, projectId })
-    } else {
-      archiveWorktree.mutate({ worktreeId: worktree.id, projectId })
-    }
-  }, [
-    isBase,
-    closeBaseSession,
-    archiveWorktree,
-    deleteWorktree,
-    worktree.id,
-    projectId,
-    preferences?.removal_behavior,
-  ])
+  // The base session is permanent: it never closes.
+  const handleClose = useCallback(() => {
+    if (isBase) return
+    deleteWorktree.mutate({ worktreeId: worktree.id, projectId })
+  }, [isBase, deleteWorktree, worktree.id, projectId])
 
   const handleDelete = useCallback(
     (skipTeardown = false) => {
@@ -111,6 +100,7 @@ export function useWorktreeMenuActions({
 
   return {
     // State
+    worktree,
     showDeleteConfirm,
     setShowDeleteConfirm,
     isBase,
@@ -125,7 +115,7 @@ export function useWorktreeMenuActions({
     handleOpenInFinder,
     handleOpenInTerminal,
     handleOpenInEditor,
-    handleArchiveOrClose,
+    handleClose,
     handleDelete,
   }
 }

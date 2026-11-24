@@ -1,6 +1,12 @@
 import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import { ChevronsUpDown, Zap } from '@/components/icons/reicon'
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import {
+  createElement,
+  useCallback,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react'
 import {
   Popover,
   PopoverContent,
@@ -27,7 +33,10 @@ import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
 import { useAvailableMuseModels } from '@/services/muse-cli'
 import { cn } from '@/lib/utils'
 import { Kbd } from '@/components/ui/kbd'
-import { BackendLabel } from '@/components/ui/backend-label'
+import {
+  getBackendIcon,
+  getBackendPlainLabel,
+} from '@/components/ui/backend-label'
 import { BackendModelPickerContent } from '@/components/chat/toolbar/BackendModelPickerContent'
 import {
   formatCursorModelLabel,
@@ -270,6 +279,8 @@ export function DesktopBackendModelPicker({
   }, [backendModelSections, installedBackends])
   const hasMultipleChoices = selectableChoiceCount > 1
 
+  const backendName = getBackendPlainLabel(selectedBackend)
+
   const handleOpenChange = useCallback(
     (nextOpen: boolean) => {
       setOpen(nextOpen)
@@ -298,11 +309,11 @@ export function DesktopBackendModelPicker({
                 <span className="min-w-0 truncate">{triggerLabel}</span>
               ) : (
                 <span className="min-w-0 flex items-center gap-1.5">
-                  <BackendLabel
-                    backend={selectedBackend}
-                    className="shrink-0"
-                    badgeClassName="text-[9px] leading-3"
-                  />
+                  {createElement(getBackendIcon(selectedBackend), {
+                    className: 'h-3.5 w-3.5 shrink-0',
+                    role: 'img',
+                    'aria-label': backendName,
+                  })}
                   {selectedAccountLabel && (
                     <span className="truncate">· {selectedAccountLabel}</span>
                   )}
@@ -326,9 +337,7 @@ export function DesktopBackendModelPicker({
                 </span>
               )}
               {keyboardShortcutsEnabled && installedBackends.length > 1 && (
-                <Kbd className="ml-1 hidden 2xl:inline-flex text-[10px]">
-                  Tab
-                </Kbd>
+                <Kbd className="ml-1 hidden 2xl:inline-flex text-2xs">Tab</Kbd>
               )}
               {hasMultipleChoices && (
                 <ChevronsUpDown
@@ -340,11 +349,11 @@ export function DesktopBackendModelPicker({
           </PopoverTrigger>
         </TooltipTrigger>
         <TooltipContent>
-          {keyboardShortcutsEnabled
-            ? installedBackends.length > 1
-              ? 'Backend + model (⌘⇧M) · Tab cycles backend'
-              : 'Backend + model (⌘⇧M)'
-            : 'Backend + model'}
+          {`${backendName} · ${selectedModelLabel}`}
+          {keyboardShortcutsEnabled &&
+            (installedBackends.length > 1
+              ? ' (⌘⇧M) · Tab cycles backend'
+              : ' (⌘⇧M)')}
         </TooltipContent>
       </Tooltip>
       <PopoverContent

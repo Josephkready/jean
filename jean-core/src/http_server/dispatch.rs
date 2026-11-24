@@ -120,6 +120,32 @@ fn parse_submit_bug_report_args(args: &Value) -> Result<SubmitBugReportArgs, Str
     })
 }
 
+/// Entry point for transports (native IPC, WebSocket, Jean MCP): dispatch a
+/// command on tokio's blocking pool.
+///
+/// Many handlers are `async fn` but call blocking git/gh/CLI/file APIs. On the
+/// core runtime they occupy worker threads, so a few slow commands (pull,
+/// push, fetch, status polling) stall every other command and event until
+/// they finish.
+pub async fn dispatch_command_off_runtime(
+    app: AppHandle,
+    command: String,
+    args: Value,
+) -> Result<Value, String> {
+    run_on_blocking_pool(async move { dispatch_command(&app, &command, args).await }).await
+}
+
+async fn run_on_blocking_pool<F>(future: F) -> Result<Value, String>
+where
+    F: std::future::Future<Output = Result<Value, String>> + Send + 'static,
+{
+    let handle = tokio::runtime::Handle::current();
+    // Boxed: the dispatch future is large and would otherwise sit on the stack.
+    tokio::task::spawn_blocking(move || handle.block_on(Box::pin(future)))
+        .await
+        .map_err(|error| format!("Command task failed: {error}"))?
+}
+
 /// Dispatch a command by name to the corresponding Rust handler.
 /// This mirrors Tauri's invoke system but routes through WebSocket.
 ///
@@ -255,12 +281,14 @@ pub async fn dispatch_command(
             let limit: Option<usize> = from_field_opt(&args, "limit")?;
             let include_session_ids: Option<Vec<String>> =
                 field_opt(&args, "includeSessionIds", "include_session_ids")?;
+            let active_since: Option<u64> = field_opt(&args, "activeSince", "active_since")?;
             let result = crate::projects::get_recent_worktrees(
                 app.clone(),
                 project_ids,
                 offset,
                 limit,
                 include_session_ids,
+                active_since,
             )
             .await?;
             to_value(result)
@@ -325,6 +353,24 @@ pub async fn dispatch_command(
             // (worktree:creating/created/error) that preserves the optimistic pending status.
             // Invalidating would refetch list_worktrees which overwrites status: 'pending',
             // preventing WorktreeSetupCard from appearing on the canvas.
+            to_value(result)
+        }
+        "start_prompt_on_models" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let prompt: String = from_field(&args, "prompt")?;
+            let targets: Vec<crate::projects::PromptModelTarget> = from_field(&args, "targets")?;
+            let execution_mode: Option<String> =
+                field_opt(&args, "executionMode", "execution_mode")?;
+            let result = Box::pin(crate::projects::start_prompt_on_models(
+                app.clone(),
+                project_id,
+                prompt,
+                targets,
+                execution_mode,
+            ))
+            .await?;
+            // Worktrees sync through worktree:* events (see create_worktree);
+            // each background task invalidates sessions once its prompt is queued.
             to_value(result)
         }
         "fork_session_to_worktree" => {
@@ -477,18 +523,6 @@ pub async fn dispatch_command(
             let project_id: String = field(&args, "projectId", "project_id")?;
             crate::projects::fetch_worktrees_status(app.clone(), project_id).await?;
             to_value(())
-        }
-        "archive_worktree" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            crate::projects::archive_worktree(app.clone(), worktree_id).await?;
-            emit_cache_invalidation(app, &["projects"]);
-            Ok(Value::Null)
-        }
-        "unarchive_worktree" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            let result = crate::projects::unarchive_worktree(app.clone(), worktree_id).await?;
-            emit_cache_invalidation(app, &["projects"]);
-            to_value(result)
         }
         "rename_worktree" => {
             let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
@@ -929,6 +963,20 @@ pub async fn dispatch_command(
             .await?;
             to_value(result)
         }
+        "attach_loaded_context_to_session" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let kind: String = from_field(&args, "kind")?;
+            let number: u32 = from_field(&args, "number")?;
+            let project_path: String = field(&args, "projectPath", "project_path")?;
+            crate::projects::attach_loaded_context_to_session(
+                app.clone(),
+                session_id,
+                kind,
+                number,
+                project_path,
+            )?;
+            Ok(Value::Null)
+        }
         "list_loaded_issue_contexts" => {
             let session_id: String = field(&args, "sessionId", "session_id")?;
             let worktree_id: Option<String> = field_opt(&args, "worktreeId", "worktree_id")?;
@@ -1300,15 +1348,12 @@ pub async fn dispatch_command(
         "get_sessions" => {
             let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let include_archived: Option<bool> =
-                field_opt(&args, "includeArchived", "include_archived")?;
             let include_message_counts: Option<bool> =
                 field_opt(&args, "includeMessageCounts", "include_message_counts")?;
             let result = crate::chat::get_sessions(
                 app.clone(),
                 worktree_id,
                 worktree_path,
-                include_archived,
                 include_message_counts,
             )
             .await?;
@@ -1317,20 +1362,18 @@ pub async fn dispatch_command(
         "list_sessions_summary" => {
             let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let include_archived: Option<bool> =
-                field_opt(&args, "includeArchived", "include_archived")?;
-            let result = crate::chat::list_sessions_summary(
-                app.clone(),
-                worktree_id,
-                worktree_path,
-                include_archived,
-            )
-            .await?;
+            let result =
+                crate::chat::list_sessions_summary(app.clone(), worktree_id, worktree_path).await?;
             to_value(result)
         }
         "get_session_status" => {
             let session_id: String = field(&args, "sessionId", "session_id")?;
             let result = crate::chat::get_session_status(app.clone(), session_id).await?;
+            to_value(result)
+        }
+        "get_run_states" => {
+            let session_ids: Option<Vec<String>> = field_opt(&args, "sessionIds", "session_ids")?;
+            let result = crate::chat::get_run_states(app.clone(), session_ids).await?;
             to_value(result)
         }
         "list_all_sessions" => {
@@ -1842,6 +1885,8 @@ pub async fn dispatch_command(
         // =====================================================================
         // Background Tasks (polling control)
         // =====================================================================
+        // Reached by native IPC; WebSocket clients report focus and active
+        // worktree per connection in `websocket::dispatch_client_invoke`.
         "set_app_focus_state" => {
             let focused: bool = from_field(&args, "focused")?;
             let state = app.state::<crate::background_tasks::BackgroundTaskManager>();
@@ -1849,22 +1894,7 @@ pub async fn dispatch_command(
             Ok(Value::Null)
         }
         "set_active_worktree_for_polling" => {
-            let worktree_id: Option<String> = field_opt(&args, "worktreeId", "worktree_id")?;
-            let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
-            let base_branch: Option<String> = field_opt(&args, "baseBranch", "base_branch")?;
-            let pr_number: Option<u32> = field_opt(&args, "prNumber", "pr_number")?;
-            let pr_url: Option<String> = field_opt(&args, "prUrl", "pr_url")?;
-            let state = app.state::<crate::background_tasks::BackgroundTaskManager>();
-            crate::background_tasks::commands::set_active_worktree_for_polling(
-                app.clone(),
-                state,
-                worktree_id,
-                worktree_path,
-                base_branch,
-                pr_number,
-                pr_url,
-            )?;
-            Ok(Value::Null)
+            set_active_worktree_for_polling(app, crate::background_tasks::UiClient::Native, &args)
         }
         "trigger_immediate_git_poll" => {
             let state = app.state::<crate::background_tasks::BackgroundTaskManager>();
@@ -1896,12 +1926,10 @@ pub async fn dispatch_command(
             let result = crate::chat::check_resumable_sessions(app.clone()).await?;
             to_value(result)
         }
-        "cleanup_old_archives" => {
-            let retention_days: u32 = field(&args, "retentionDays", "retention_days")?;
-            let result = crate::projects::cleanup_old_archives(app.clone(), retention_days).await?;
+        "cleanup_deleted_items" => {
+            let result = crate::projects::cleanup_deleted_items(app.clone()).await?;
             to_value(result)
         }
-
         "cleanup_combined_contexts" => {
             let result = crate::projects::cleanup_combined_contexts(app.clone()).await?;
             to_value(result)
@@ -2000,28 +2028,6 @@ pub async fn dispatch_command(
             emit_cache_invalidation(app, &["projects"]);
             to_value(result)
         }
-        "close_base_session" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            crate::projects::close_base_session(app.clone(), worktree_id).await?;
-            emit_cache_invalidation(app, &["projects"]);
-            Ok(Value::Null)
-        }
-        "close_base_session_clean" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            crate::projects::close_base_session_clean(app.clone(), worktree_id).await?;
-            emit_cache_invalidation(app, &["projects"]);
-            Ok(Value::Null)
-        }
-        "close_base_session_archive" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            crate::projects::close_base_session_archive(app.clone(), worktree_id).await?;
-            emit_cache_invalidation(app, &["projects"]);
-            Ok(Value::Null)
-        }
-        "list_archived_worktrees" => {
-            let result = crate::projects::list_archived_worktrees(app.clone()).await?;
-            to_value(result)
-        }
         "import_worktree" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
             let path: String = from_field(&args, "path")?;
@@ -2032,16 +2038,6 @@ pub async fn dispatch_command(
         "list_unmanaged_worktrees" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
             let result = crate::projects::list_unmanaged_worktrees(app.clone(), project_id).await?;
-            to_value(result)
-        }
-        "permanently_delete_worktree" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            crate::projects::permanently_delete_worktree(app.clone(), worktree_id).await?;
-            emit_cache_invalidation(app, &["projects"]);
-            Ok(Value::Null)
-        }
-        "delete_all_archives" => {
-            let result = crate::projects::delete_all_archives(app.clone()).await?;
             to_value(result)
         }
         "open_worktree_in_finder" => {
@@ -2575,71 +2571,6 @@ pub async fn dispatch_command(
             emit_cache_invalidation(app, &["sessions"]);
             Ok(Value::Null)
         }
-        "archive_session" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let session_id: String = field(&args, "sessionId", "session_id")?;
-            let result =
-                crate::chat::archive_session(app.clone(), worktree_id, worktree_path, session_id)
-                    .await?;
-            to_value(result)
-        }
-        "unarchive_session" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let session_id: String = field(&args, "sessionId", "session_id")?;
-            let result =
-                crate::chat::unarchive_session(app.clone(), worktree_id, worktree_path, session_id)
-                    .await?;
-            emit_cache_invalidation(app, &["sessions"]);
-            to_value(result)
-        }
-        "restore_session_with_base" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let session_id: String = field(&args, "sessionId", "session_id")?;
-            let project_id: String = field(&args, "projectId", "project_id")?;
-            let result = crate::chat::restore_session_with_base(
-                app.clone(),
-                worktree_id,
-                worktree_path,
-                session_id,
-                project_id,
-            )
-            .await?;
-            emit_cache_invalidation(app, &["sessions", "projects"]);
-            to_value(result)
-        }
-        "delete_archived_session" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let session_id: String = field(&args, "sessionId", "session_id")?;
-            crate::chat::delete_archived_session(
-                app.clone(),
-                worktree_id,
-                worktree_path,
-                session_id,
-            )
-            .await?;
-            emit_cache_invalidation(app, &["sessions"]);
-            Ok(Value::Null)
-        }
-        "list_archived_sessions" => {
-            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
-            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
-            let result =
-                crate::chat::list_archived_sessions(app.clone(), worktree_id, worktree_path)
-                    .await?;
-            to_value(result)
-        }
-        "list_all_archived_sessions" => {
-            let result = crate::chat::list_all_archived_sessions(app.clone()).await?;
-            to_value(result)
-        }
-
-        // =====================================================================
-        // Images & Pasted Text
-        // =====================================================================
         "save_pasted_image" => {
             let data: String = from_field(&args, "data")?;
             let mime_type: String = field(&args, "mimeType", "mime_type")?;
@@ -2718,6 +2649,10 @@ pub async fn dispatch_command(
             )
             .await?;
             to_value(result)
+        }
+        "get_usage_summary" => {
+            let days: Option<u32> = from_field_opt(&args, "days")?;
+            to_value(crate::chat::get_usage_summary(app.clone(), days).await?)
         }
         "resume_session" => {
             let session_id: String = field(&args, "sessionId", "session_id")?;
@@ -3295,6 +3230,59 @@ pub async fn dispatch_command(
             Ok(Value::Null)
         }
 
+        "save_secret_request" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let tool_call_id: String = field(&args, "toolCallId", "tool_call_id")?;
+            let label: String = from_field(&args, "label")?;
+            let secret: String = from_field(&args, "secret")?;
+            let retention: crate::chat::secrets::SecretRetention = from_field(&args, "retention")?;
+            let saved = crate::chat::secrets::save_secret_request(
+                app.clone(),
+                session_id,
+                tool_call_id,
+                label,
+                secret,
+                retention,
+            )?;
+            emit_cache_invalidation(app, &["secret-request"]);
+            to_value(saved)
+        }
+
+        "secret_request_status" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let tool_call_id: String = field(&args, "toolCallId", "tool_call_id")?;
+            to_value(crate::chat::secrets::secret_request_status(
+                app.clone(),
+                session_id,
+                tool_call_id,
+            )?)
+        }
+
+        "list_secrets" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let all_owners: Option<bool> = field_opt(&args, "allOwners", "all_owners")?;
+            to_value(crate::chat::secrets::list_secrets(
+                app.clone(),
+                session_id,
+                all_owners.unwrap_or(false),
+            )?)
+        }
+
+        "delete_secret" => {
+            let id: String = from_field(&args, "id")?;
+            crate::chat::secrets::delete_secret(app.clone(), id)?;
+            emit_cache_invalidation(app, &["secret-request"]);
+            Ok(Value::Null)
+        }
+
+        "forget_secret_request" => {
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let tool_call_id: String = field(&args, "toolCallId", "tool_call_id")?;
+            crate::chat::secrets::forget_secret_request(app.clone(), session_id, tool_call_id)?;
+            emit_cache_invalidation(app, &["secret-request"]);
+            Ok(Value::Null)
+        }
+
         "respond_claude_permission" => {
             let session_id: String = field(&args, "sessionId", "session_id")?;
             let rpc_id: u64 = field(&args, "rpcId", "rpc_id")?;
@@ -3452,14 +3440,14 @@ pub async fn dispatch_command(
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
             let session_id: String = field(&args, "sessionId", "session_id")?;
             let message_id: String = field(&args, "messageId", "message_id")?;
-            let message: String = from_field(&args, "message")?;
+            let edit: crate::chat::QueuedMessageEdit = from_field(&args, "edit")?;
             let result = crate::chat::update_queued_message(
                 app.clone(),
                 worktree_id,
                 worktree_path,
                 session_id,
                 message_id,
-                message,
+                edit,
             )
             .await?;
             to_value(result)
@@ -3622,6 +3610,23 @@ pub async fn dispatch_command(
             let result =
                 crate::chat::prepare_mcp_login(app.clone(), backend, server_name, worktree_path)
                     .await?;
+            to_value(result)
+        }
+        "add_remote_mcp_server" => {
+            let request = from_field(&args, "request")?;
+            let result = Box::pin(crate::jean_mcp_config::add_remote_mcp_server(
+                app.clone(),
+                request,
+            ))
+            .await?;
+            emit_cache_invalidation(app, &["mcp-servers"]);
+            to_value(result)
+        }
+        "remove_mcp_server" => {
+            let backend: String = from_field(&args, "backend")?;
+            let name: String = from_field(&args, "name")?;
+            let result = Box::pin(crate::jean_mcp_config::remove_mcp_server(backend, name)).await?;
+            emit_cache_invalidation(app, &["mcp-servers"]);
             to_value(result)
         }
         "get_mcp_servers" => {
@@ -4225,6 +4230,12 @@ pub async fn dispatch_command(
             crate::pi_cli::delete_pi_provider(name).await?;
             Ok(Value::Null)
         }
+        "fetch_qwencloud_models" => {
+            let base_url: String = field(&args, "baseUrl", "base_url")?;
+            let api_key_env: Option<String> = field_opt(&args, "apiKeyEnv", "api_key_env")?;
+            let result = crate::qwencloud::fetch_qwencloud_models(base_url, api_key_env).await?;
+            to_value(result)
+        }
 
         // =====================================================================
         // Background Tasks (additional)
@@ -4279,38 +4290,13 @@ pub async fn dispatch_command(
         "install_opinionated_plugin" => {
             let plugin_name: String = from_field(&args, "pluginName")?;
             let result =
-                crate::opinionated::install_opinionated_plugin(app.clone(), plugin_name.clone())
-                    .await?;
-            if plugin_name == "cliproxyapi" {
-                emit_cache_invalidation(app, &["preferences"]);
-            }
+                crate::opinionated::install_opinionated_plugin(app.clone(), plugin_name).await?;
             to_value(result)
         }
         "uninstall_opinionated_plugin" => {
             let plugin_name: String = from_field(&args, "pluginName")?;
             let result =
-                crate::opinionated::uninstall_opinionated_plugin(app.clone(), plugin_name.clone())
-                    .await?;
-            if plugin_name == "cliproxyapi" {
-                emit_cache_invalidation(app, &["preferences"]);
-            }
-            to_value(result)
-        }
-        "start_opinionated_plugin" => {
-            let plugin_name: String = from_field(&args, "pluginName")?;
-            let result =
-                crate::opinionated::start_opinionated_plugin(app.clone(), plugin_name).await?;
-            to_value(result)
-        }
-        "stop_opinionated_plugin" => {
-            let plugin_name: String = from_field(&args, "pluginName")?;
-            let result =
-                crate::opinionated::stop_opinionated_plugin(app.clone(), plugin_name).await?;
-            to_value(result)
-        }
-        "prepare_cliproxyapi_account_login" => {
-            let provider: String = from_field(&args, "provider")?;
-            let result = crate::opinionated::prepare_cliproxyapi_account_login(provider).await?;
+                crate::opinionated::uninstall_opinionated_plugin(app.clone(), plugin_name).await?;
             to_value(result)
         }
 
@@ -4324,8 +4310,43 @@ pub async fn dispatch_command(
         muse_command if MUSE_CLI_COMMANDS.contains(&muse_command) => {
             Box::pin(dispatch_muse_cli_command(app, muse_command, &args)).await
         }
+        "get_diff_viewed_files" | "set_diff_file_viewed" => {
+            Box::pin(dispatch_diff_viewed_command(app, command, &args)).await
+        }
         _ => Err(format!("Unknown command: {command}")),
     }
+}
+
+async fn dispatch_diff_viewed_command(
+    app: &AppHandle,
+    command: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let worktree_id: String = field(args, "worktreeId", "worktree_id")?;
+    let diff_type: String = field(args, "diffType", "diff_type")?;
+    if command == "get_diff_viewed_files" {
+        let result = crate::projects::diff_viewed::get_diff_viewed_files(
+            app.clone(),
+            worktree_id,
+            diff_type,
+        )
+        .await?;
+        return to_value(result);
+    }
+    let path: String = from_field(args, "path")?;
+    let hash: String = from_field(args, "hash")?;
+    let viewed: bool = from_field(args, "viewed")?;
+    let result = crate::projects::diff_viewed::set_diff_file_viewed(
+        app.clone(),
+        worktree_id,
+        path,
+        hash,
+        viewed,
+        diff_type,
+    )
+    .await?;
+    emit_cache_invalidation(app, &["diff-viewed"]);
+    to_value(result)
 }
 
 const MUSE_CLI_COMMANDS: &[&str] = &[
@@ -4694,6 +4715,31 @@ pub(crate) fn field<T: serde::de::DeserializeOwned>(
     from_field(args, camel).or_else(|_| from_field(args, snake))
 }
 
+/// Parse `set_active_worktree_for_polling` args and record the worktree
+/// `client` selected. Shared by the native arm and per-connection WebSocket
+/// handling.
+pub(super) fn set_active_worktree_for_polling(
+    app: &AppHandle,
+    client: crate::background_tasks::UiClient,
+    args: &Value,
+) -> Result<Value, String> {
+    let worktree_id: Option<String> = field_opt(args, "worktreeId", "worktree_id")?;
+    let worktree_path: Option<String> = field_opt(args, "worktreePath", "worktree_path")?;
+    let base_branch: Option<String> = field_opt(args, "baseBranch", "base_branch")?;
+    let pr_number: Option<u32> = field_opt(args, "prNumber", "pr_number")?;
+    let pr_url: Option<String> = field_opt(args, "prUrl", "pr_url")?;
+    crate::background_tasks::commands::set_active_worktree_for_polling(
+        app.clone(),
+        client,
+        worktree_id,
+        worktree_path,
+        base_branch,
+        pr_number,
+        pr_url,
+    )?;
+    Ok(Value::Null)
+}
+
 /// Try camelCase field first, then snake_case. For optional fields.
 pub(crate) fn field_opt<T: serde::de::DeserializeOwned>(
     args: &Value,
@@ -4810,6 +4856,33 @@ mod tests {
             }
 
             crate::platform::set_allow_native_open(previous);
+        });
+    }
+
+    #[test]
+    fn blocking_command_does_not_starve_the_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let slow = tokio::spawn(run_on_blocking_pool(async {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                Ok(Value::Null)
+            }));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            // Wall-clock check: a blocked lone worker also stops tokio's timer.
+            let started = std::time::Instant::now();
+            assert_eq!(tokio::spawn(async { 7 }).await.unwrap(), 7);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "runtime starved for {:?}",
+                started.elapsed()
+            );
+            assert_eq!(slow.await.unwrap(), Ok(Value::Null));
         });
     }
 

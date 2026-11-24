@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle,
-  FileText,
   Loader2,
   RefreshCw,
   Tag,
@@ -73,6 +72,7 @@ export function ReleaseNotesDialog() {
     try {
       setReleases(
         await invoke<GitHubRelease[]>('list_github_releases', {
+          projectId: project.id,
           projectPath: project.path,
         })
       )
@@ -81,7 +81,7 @@ export function ReleaseNotesDialog() {
     } finally {
       setIsLoading(false)
     }
-  }, [project?.path])
+  }, [project?.id, project?.path])
 
   useEffect(() => {
     if (releaseNotesModalOpen) void fetchReleases()
@@ -143,6 +143,7 @@ export function ReleaseNotesDialog() {
         store.setExecutionMode(session.id, 'yolo')
 
         const { mcpConfig, enabledServers } = await resolveMcpConfigForSend({
+          worktreeId: baseWorktree.id,
           worktreePath: baseWorktree.path,
           backend,
           projectEnabled: project.enabled_mcp_servers,
@@ -220,7 +221,6 @@ export function ReleaseNotesDialog() {
       >
         <DialogHeader className="px-4 pt-4 pb-0">
           <DialogTitle className="flex items-center gap-2">
-            <FileText className="h-4 w-4" />
             <span className="flex-1">
               Release Notes for {project?.name ?? 'Project'}
             </span>

@@ -1,3 +1,8 @@
+import {
+  AddMcpEndpoint,
+  EDITABLE_MCP_BACKENDS,
+} from '@/components/mcp/AddMcpEndpoint'
+import { RemoveMcpServerButton } from '@/components/mcp/RemoveMcpServerButton'
 import React, { useEffect, useMemo } from 'react'
 import {
   CheckCircle,
@@ -5,6 +10,7 @@ import {
   ShieldAlert,
   XCircle,
 } from '@/components/icons/reicon'
+import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -34,9 +40,10 @@ import { McpSignInButton } from '@/components/mcp/McpSignInButton'
 import type { McpHealthStatus } from '@/types/chat'
 import type { CliBackend } from '@/types/preferences'
 import { SettingsSection } from '../SettingsSection'
-import { AgentBrowserSection } from './AgentBrowserSection'
-import { JeanMcpSection } from './JeanMcpSection'
-import { DevinMcpSection } from './DevinMcpSection'
+import { ExtensionGroup } from '../ExtensionRow'
+import { AgentBrowserRow } from './AgentBrowserRow'
+import { JeanMcpRow } from './JeanMcpRow'
+import { DevinMcpRows } from './DevinMcpRows'
 
 function mcpAuthHint(backend: CliBackend): string {
   switch (backend) {
@@ -237,17 +244,22 @@ export const McpServersPane: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <JeanMcpSection mcpServers={mcpServers ?? []} />
-      <AgentBrowserSection />
-      <DevinMcpSection />
+      <SettingsSection
+        title="Add MCP Server"
+        description="Paste an endpoint to add it across your harnesses."
+      >
+        <AddMcpEndpoint
+          key={serverId}
+          installedBackends={installedBackends}
+          serverId={serverId}
+          onAdded={checkHealth}
+        />
+      </SettingsSection>
       <SettingsSection
         title="Default MCP Servers"
+        description="Defaults for new sessions. Change a session from its toolbar."
         anchorId="pref-mcp-section-default-servers"
       >
-        <p className="text-sm text-muted-foreground">
-          Defaults for new sessions. Change a session from its toolbar.
-        </p>
-
         {isLoading ? (
           <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
@@ -299,9 +311,9 @@ export const McpServersPane: React.FC = () => {
                       {server.name}
                     </Label>
                     {jeanMcpMode(server.name, server.config) && (
-                      <span className="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase text-muted-foreground">
+                      <Badge variant="subtle" className="text-2xs uppercase">
                         {jeanMcpMode(server.name, server.config)}
-                      </span>
+                      </Badge>
                     )}
                     <HealthIndicator
                       status={healthStatuses[mcpKey(backend, server.name)]}
@@ -325,12 +337,37 @@ export const McpServersPane: React.FC = () => {
                           ? 'automatic'
                           : server.scope}
                     </span>
+                    {server.scope === 'user' &&
+                      EDITABLE_MCP_BACKENDS.has(backend) &&
+                      !jeanMcpMode(server.name, server.config) && (
+                        <RemoveMcpServerButton
+                          backend={backend}
+                          serverName={server.name}
+                          serverId={serverId}
+                          onRemoved={checkHealth}
+                        />
+                      )}
                   </div>
                 ))}
               </div>
             ))}
           </div>
         )}
+      </SettingsSection>
+      <SettingsSection
+        title="Recommended MCP Servers"
+        description="MCP servers that Jean manages or recommends for its AI backends."
+        anchorId="pref-mcp-section-recommended"
+      >
+        <div className="space-y-4">
+          <ExtensionGroup id="mcp-servers-managed" title="Managed by Jean">
+            <JeanMcpRow mcpServers={mcpServers ?? []} />
+            <AgentBrowserRow />
+          </ExtensionGroup>
+          <ExtensionGroup id="mcp-servers-manual" title="Manual setup">
+            <DevinMcpRows />
+          </ExtensionGroup>
+        </div>
       </SettingsSection>
     </div>
   )

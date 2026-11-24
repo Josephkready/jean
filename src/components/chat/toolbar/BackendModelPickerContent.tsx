@@ -31,18 +31,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { toast } from 'sonner'
 import type { CliBackend, CustomCliProfile } from '@/types/preferences'
 import { usePatchPreferences, usePreferences } from '@/services/preferences'
-import {
-  useAvailableOpencodeModels,
-  useRefreshOpencodeModels,
-} from '@/services/opencode-cli'
-import { useAvailableCursorModels } from '@/services/cursor-cli'
-import { useAvailablePiModels } from '@/services/pi-cli'
-import { useAvailableCommandCodeModels } from '@/services/commandcode-cli'
-import { useAvailableGrokModels } from '@/services/grok-cli'
-import { useAvailableKimiModels } from '@/services/kimi-cli'
-import { useAvailableDevinModels } from '@/services/devin-cli'
-import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
-import { useAvailableMuseModels } from '@/services/muse-cli'
+import { useRefreshOpencodeModels } from '@/services/opencode-cli'
 import {
   getCatalogModelFastInfo,
   useModelCatalog,
@@ -54,13 +43,8 @@ import {
   getBackendPlainLabel,
   isBetaBackend,
 } from '@/components/ui/backend-label'
-import {
-  formatCursorModelLabel,
-  formatOpencodeModelLabel,
-  formatPiModelLabel,
-  getProviderDisplayName,
-} from '@/components/chat/toolbar/toolbar-utils'
-import { useToolbarDerivedState } from '@/components/chat/toolbar/useToolbarDerivedState'
+import { getProviderDisplayName } from '@/components/chat/toolbar/toolbar-utils'
+import { useBackendModelSections } from '@/components/chat/toolbar/useBackendModelSections'
 import {
   buildClaudeAccountRows,
   buildFavoriteRows,
@@ -70,6 +54,7 @@ import {
   type PickerRow,
 } from '@/components/chat/toolbar/model-picker-rows'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { getOlderModelValues } from '@/lib/model-utils'
 import { getModifierSymbol } from '@/lib/platform'
 
 const FAVORITES_TAB = 'favorites'
@@ -130,6 +115,7 @@ export function BackendModelPickerContent({
   const [search, setSearch] = useState('')
   const [activeTab, setActiveTab] = useState<PickerTab>(selectedBackend)
   const [highlightedValue, setHighlightedValue] = useState('')
+  const [showOlderModels, setShowOlderModels] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const isMobile = useIsMobile()
   const fastModifier = getModifierSymbol()
@@ -187,157 +173,24 @@ export function BackendModelPickerContent({
     [favKey, fastSet, fastModels, patchPreferences]
   )
 
-  const { data: availableOpencodeModels, isError: opencodeModelsError } =
-    useAvailableOpencodeModels({
-      enabled: installedBackends.includes('opencode'),
-    })
-  const { data: availableCursorModels } = useAvailableCursorModels({
-    enabled: installedBackends.includes('cursor'),
-  })
-  const { data: availablePiModels } = useAvailablePiModels({
-    enabled: installedBackends.includes('pi'),
-  })
-  const { data: availableCommandCodeModels } = useAvailableCommandCodeModels({
-    enabled: installedBackends.includes('commandcode'),
-  })
-  const { data: availableGrokModels } = useAvailableGrokModels({
-    enabled: installedBackends.includes('grok'),
-  })
-  const { data: availableKimiModels } = useAvailableKimiModels({
-    enabled: installedBackends.includes('kimi'),
-  })
-  const { data: availableDevinModels } = useAvailableDevinModels({
-    enabled: installedBackends.includes('devin'),
-  })
-  const { data: availableAntigravityModels } = useAvailableAntigravityModels({
-    enabled: installedBackends.includes('antigravity'),
-  })
-  const { data: availableMuseModels } = useAvailableMuseModels({
-    enabled: installedBackends.includes('muse'),
+  const baseBackendModelSections = useBackendModelSections({
+    selectedBackend,
+    selectedProvider,
+    selectedModel,
+    installedBackends,
+    customCliProfiles,
   })
 
-  const opencodeModelOptions = useMemo(() => {
-    if (opencodeModelsError) return []
-    return availableOpencodeModels?.map(model => ({
-      value: model,
-      label: formatOpencodeModelLabel(model),
-    }))
-  }, [availableOpencodeModels, opencodeModelsError])
-  const cursorModelOptions = useMemo(
+  const backendModelSections = useMemo(
     () =>
-      availableCursorModels?.length
-        ? availableCursorModels.map(model => ({
-            value: `cursor/${model.id}`,
-            label: model.label || formatCursorModelLabel(model.id),
+      defaultModelOption
+        ? baseBackendModelSections.map(section => ({
+            ...section,
+            options: [defaultModelOption, ...section.options],
           }))
-        : undefined,
-    [availableCursorModels]
+        : baseBackendModelSections,
+    [baseBackendModelSections, defaultModelOption]
   )
-  const piModelOptions = useMemo(
-    () =>
-      availablePiModels?.map(model => ({
-        value: `pi/${model.id}`,
-        label: model.label || formatPiModelLabel(model.id),
-        is_default: model.is_default,
-      })),
-    [availablePiModels]
-  )
-  const commandcodeModelOptions = useMemo(
-    () =>
-      availableCommandCodeModels?.map(model => ({
-        value: `commandcode/${model.id}`,
-        label: model.label,
-      })),
-    [availableCommandCodeModels]
-  )
-  const grokModelOptions = useMemo(
-    () =>
-      availableGrokModels?.map(model => ({
-        value: `grok/${model.id}`,
-        label: model.label,
-      })),
-    [availableGrokModels]
-  )
-  const kimiModelOptions = useMemo(
-    () =>
-      availableKimiModels?.map(model => ({
-        value: `kimi/${model.id}`,
-        label: model.label,
-      })),
-    [availableKimiModels]
-  )
-  const devinModelOptions = useMemo(
-    () =>
-      availableDevinModels?.map(model => ({
-        value: `devin/${model.id}`,
-        label: model.label,
-      })),
-    [availableDevinModels]
-  )
-  const antigravityModelOptions = useMemo(
-    () =>
-      availableAntigravityModels?.map(model => ({
-        value: `antigravity/${model.id}`,
-        label: model.label,
-      })),
-    [availableAntigravityModels]
-  )
-  const museModelOptions = useMemo(
-    () =>
-      availableMuseModels?.map(model => ({
-        value: model.id,
-        label: model.label,
-      })),
-    [availableMuseModels]
-  )
-
-  const { backendModelSections: baseBackendModelSections } =
-    useToolbarDerivedState({
-      selectedBackend,
-      selectedProvider,
-      selectedModel,
-      opencodeModelOptions,
-      cursorModelOptions,
-      piModelOptions,
-      commandcodeModelOptions,
-      grokModelOptions,
-      kimiModelOptions,
-      museModelOptions,
-      devinModelOptions,
-      customCliProfiles,
-      installedBackends,
-    })
-
-  const backendModelSections = useMemo(() => {
-    let sections = baseBackendModelSections
-    // useToolbarDerivedState only knows the static Antigravity fallback list;
-    // surface CLI-reported models first and keep static entries as fallbacks.
-    if (antigravityModelOptions?.length) {
-      const dynamicValues = new Set(
-        antigravityModelOptions.map(option => option.value)
-      )
-      sections = sections.map(section =>
-        section.backend === 'antigravity'
-          ? {
-              ...section,
-              options: [
-                ...antigravityModelOptions,
-                ...section.options.filter(
-                  option => !dynamicValues.has(option.value)
-                ),
-              ],
-            }
-          : section
-      )
-    }
-    if (defaultModelOption) {
-      sections = sections.map(section => ({
-        ...section,
-        options: [defaultModelOption, ...section.options],
-      }))
-    }
-    return sections
-  }, [antigravityModelOptions, baseBackendModelSections, defaultModelOption])
 
   const installedBackendsSet = useMemo(
     () => new Set(installedBackends),
@@ -390,37 +243,50 @@ export function BackendModelPickerContent({
 
   const showSidebar = sidebarBackends.length > 1 || showFavoritesTab
 
-  // Clear search only when the picker opens — not on every sidebarBackends
-  // identity change (that array is rebuilt often and wiping search mid-type
-  // left Cmd+F acting on the unfiltered first catalog row).
-  useEffect(() => {
-    if (!open) return
-    setSearch('')
-  }, [open])
-
   const fallbackBackend = sidebarBackends.includes(selectedBackend)
     ? selectedBackend
     : (sidebarBackends[0] ?? selectedBackend)
 
-  // Open on Favorites when there are any, else on the session's backend.
-  const pickOpenTab = useEffectEvent(() => {
-    setActiveTab(showFavoritesTab ? FAVORITES_TAB : fallbackBackend)
-  })
-  useEffect(() => {
-    if (open) pickOpenTab()
-  }, [open])
-
-  // Never leave the active tab on an uninstalled backend (empty model list)
-  // or on Favorites after the last favorite is removed.
-  useEffect(() => {
-    if (!open) return
-    setActiveTab(prev => {
-      if (prev === FAVORITES_TAB) {
-        return showFavoritesTab ? prev : fallbackBackend
+  // Adjusted during render (not in effects) so stale search / tab never
+  // paint. Null on mount so the first render syncs like an effect would.
+  const [syncDeps, setSyncDeps] = useState<{
+    open: boolean
+    showFavoritesTab: boolean
+    fallbackBackend: CliBackend
+    sidebarBackendsKey: string
+  } | null>(null)
+  // Compare by content: the array identity can change on every render.
+  const sidebarBackendsKey = sidebarBackends.join('\u0000')
+  if (
+    syncDeps?.open !== open ||
+    syncDeps.showFavoritesTab !== showFavoritesTab ||
+    syncDeps.fallbackBackend !== fallbackBackend ||
+    syncDeps.sidebarBackendsKey !== sidebarBackendsKey
+  ) {
+    const justOpened = open && !syncDeps?.open
+    setSyncDeps({ open, showFavoritesTab, fallbackBackend, sidebarBackendsKey })
+    if (open) {
+      if (justOpened) {
+        // Clear search only when the picker opens — not on every
+        // sidebarBackends identity change (that array is rebuilt often and
+        // wiping search mid-type left Cmd+F acting on the unfiltered first
+        // catalog row). Open on Favorites when there are any, else on the
+        // session's backend.
+        setSearch('')
+        setShowOlderModels(false)
+        setActiveTab(showFavoritesTab ? FAVORITES_TAB : fallbackBackend)
+      } else {
+        // Never leave the active tab on an uninstalled backend (empty model
+        // list) or on Favorites after the last favorite is removed.
+        setActiveTab(prev => {
+          if (prev === FAVORITES_TAB) {
+            return showFavoritesTab ? prev : fallbackBackend
+          }
+          return sidebarBackends.includes(prev) ? prev : fallbackBackend
+        })
       }
-      return sidebarBackends.includes(prev) ? prev : fallbackBackend
-    })
-  }, [open, showFavoritesTab, sidebarBackends, fallbackBackend])
+    }
+  }
 
   const activeSection = useMemo(
     () =>
@@ -429,6 +295,40 @@ export function BackendModelPickerContent({
         : backendModelSections.find(section => section.backend === activeTab),
     [backendModelSections, activeTab]
   )
+
+  // Older models stay hidden until the user asks for them or searches.
+  // Favourites and the selected model (or its fast variant) always show.
+  const hiddenOlderValues = useMemo(() => {
+    if (!activeSection || activeTab === FAVORITES_TAB || search.trim()) {
+      return new Set<string>()
+    }
+    const older = getOlderModelValues(
+      activeSection.options.map(option => option.value)
+    )
+    for (const value of older) {
+      const isSelected =
+        selectedBackend === activeTab &&
+        (selectedModel === value ||
+          getCatalogModelFastInfo(modelCatalog, activeTab, value).fastModel ===
+            selectedModel)
+      const isFavorite =
+        favoriteSet.has(modelKey(activeTab, value)) ||
+        accountNames.some(account =>
+          favoriteSet.has(modelKey(activeTab, value, account))
+        )
+      if (isSelected || isFavorite) older.delete(value)
+    }
+    return older
+  }, [
+    accountNames,
+    activeSection,
+    activeTab,
+    favoriteSet,
+    modelCatalog,
+    search,
+    selectedBackend,
+    selectedModel,
+  ])
 
   const filteredOptions = useMemo((): PickerRow[] => {
     let rows: PickerRow[]
@@ -449,11 +349,13 @@ export function BackendModelPickerContent({
       return []
     }
     const query = search.trim().toLowerCase()
-    const filtered = !query
-      ? rows
-      : rows.filter(row =>
+    const filtered = query
+      ? rows.filter(row =>
           `${row.label} ${row.value}`.toLowerCase().includes(query)
         )
+      : showOlderModels
+        ? rows
+        : rows.filter(row => !hiddenOlderValues.has(row.value))
     if (activeTab === FAVORITES_TAB) return filtered
     const favs: PickerRow[] = []
     const rest: PickerRow[] = []
@@ -490,7 +392,9 @@ export function BackendModelPickerContent({
     defaultRowLabel,
     favoriteRows,
     favoriteSet,
+    hiddenOlderValues,
     search,
+    showOlderModels,
   ])
 
   const getRowCommandValue = useCallback(
@@ -579,6 +483,7 @@ export function BackendModelPickerContent({
   const handleTabClick = useCallback((tab: PickerTab) => {
     setActiveTab(tab)
     setSearch('')
+    setShowOlderModels(false)
     window.requestAnimationFrame(() => {
       searchInputRef.current?.focus()
     })
@@ -883,7 +788,7 @@ export function BackendModelPickerContent({
                                 applyModel(option, next)
                               }}
                               className={cn(
-                                'flex h-6 shrink-0 items-center gap-1 rounded-md border border-border/60 px-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground transition-colors',
+                                'flex h-6 shrink-0 items-center gap-1 rounded-md border border-border/60 px-1.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground transition-colors',
                                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                                 'hover:bg-muted/80 hover:text-foreground'
                               )}
@@ -895,7 +800,10 @@ export function BackendModelPickerContent({
                                 )}
                               />
                               <span>Fast</span>
-                              <Kbd className="ml-0.5 h-4 min-w-0 bg-background/70 px-1 text-[9px] normal-case tracking-normal">
+                              <Kbd
+                                modHint
+                                className="ml-0.5 h-4 min-w-0 bg-background/70 px-1 text-2xs normal-case tracking-normal"
+                              >
                                 {fastShortcutLabel}
                               </Kbd>
                             </button>
@@ -956,6 +864,18 @@ export function BackendModelPickerContent({
                 </CommandItem>
               )
             })}
+            {hiddenOlderValues.size > 0 && (
+              <button
+                type="button"
+                onMouseDown={event => event.preventDefault()}
+                onClick={() => setShowOlderModels(prev => !prev)}
+                className="w-full rounded-sm px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {showOlderModels
+                  ? 'Hide older models'
+                  : `Show ${hiddenOlderValues.size} older ${hiddenOlderValues.size === 1 ? 'model' : 'models'}`}
+              </button>
+            )}
           </CommandList>
         </Command>
       </div>
@@ -1049,7 +969,7 @@ function SidebarBackends({
                   <span
                     aria-hidden
                     className={cn(
-                      'text-[9px] leading-none tabular-nums',
+                      'text-2xs leading-none tabular-nums',
                       isActive
                         ? 'text-muted-foreground'
                         : 'text-muted-foreground/60'

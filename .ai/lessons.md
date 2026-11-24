@@ -11,7 +11,7 @@
 - Register ownership at adapter boundaries so path-only commands and remote assets route through the correct server.
 - Keep ownership visible in multi-source UI and test duplicate display names.
 - Return one ID form per server on every transport path (ID-routed, path-routed, explicit server). Mixed scoped/raw IDs make valid resources look missing.
-- Path routing matches only exact registered worktree/project paths. A file path inside a worktree does not route, so pass the owning `serverId` (`invokeForOptionalServer`).
+- Path routing matches only exact registered worktree/project paths. A command whose arguments cannot name their owner (file paths, job ids, mixed-server batches) needs a `COMMAND_OWNERS` entry in `src/lib/server-command-routing.ts`; callers then send the owning id or use `invokeForOptionalServer`. `server-command-routing.dispatch.test.ts` fails when a dispatch command is missing one. Every direct `invoke` with a repository path must also send its owner id (`server-command-routing.callers.test.ts` enforces it).
 - Do not persist temporary session context under a broader worktree or project identity.
 
 ## Keep multi-server behavior at the correct boundary
@@ -30,6 +30,7 @@
 - Guard Zustand mutations against no-op updates so unchanged values do not notify all subscribers.
 - Serialize preference patches that fire in parallel. Local `patch_preferences` is load-merge-save and remote patches carry an expected revision, so concurrent patches lose keys or conflict.
 - Test timing-sensitive close, reopen, refresh, and restoration paths, not only the persistence call.
+- The backend owns run and prompt outcomes. Emit the decision (with a persisted status version) after it is final; never let the client infer it from stream timing, and reconcile from one snapshot command instead of per-signal patches.
 
 ## Verify behavior at system boundaries
 
@@ -137,3 +138,12 @@
 
 - Map a user's minified stack frame by building the release tag's frontend (`git archive <tag>`, `bun install --frozen-lockfile`, `vite build`). Vendor code keeps the same chunk lines, so the column points at the real library function.
 - Run a release build only in an isolated environment: `env -i` (inherited `JEAN_HEADLESS` starts headless server mode), a temporary `HOME`, `dbus-run-session`, and fake CLI scripts. Real CLIs on `PATH` get auto-updated.
+
+## Minimal UI primitives
+
+- Use `Badge` tone variants (`success`, `warning`, `info`, `danger`, `subtle`) instead of hand-made coloured pills.
+- Use `Kbd modHint` (or `data-mod-hint` on a raw `<kbd>`) for shortcut hints that need a modifier.
+- Use `text-2xs` instead of `text-[Npx]` for small text.
+- Use `Button size="icon-xs"`/`"icon-sm"` instead of overriding `size="icon"` with `h-6 w-6`/`h-7 w-7`.
+- Use `Empty` for empty states.
+- Take status colours only from tokens (`success`, `warning`, `info`, `destructive`, `muted-foreground`). Raw palette colours are for brand conventions only.

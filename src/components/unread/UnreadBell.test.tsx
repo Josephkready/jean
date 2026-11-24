@@ -18,6 +18,7 @@ let allSessions: AllSessionsResponse | undefined
 let allSessionsLoading = false
 let allSessionsFetching = false
 let unreadCount = 2
+let unreadSessionsEnabled: boolean | undefined
 let sendingSessionIds: Record<string, boolean> = {}
 
 vi.mock('@/lib/transport', () => ({
@@ -29,11 +30,14 @@ vi.mock('@/services/chat', () => ({
   chatQueryKeys: {
     unreadSessionCount: () => ['unread-session-count'],
   },
-  useUnreadSessions: () => ({
-    data: allSessions,
-    isLoading: allSessionsLoading,
-    isFetching: allSessionsFetching,
-  }),
+  useUnreadSessions: (enabled: boolean) => {
+    unreadSessionsEnabled = enabled
+    return {
+      data: allSessions,
+      isLoading: allSessionsLoading,
+      isFetching: allSessionsFetching,
+    }
+  },
 }))
 
 let finishedSessionAnimationEnabled = true
@@ -193,6 +197,17 @@ describe('UnreadBell', () => {
     invokeForServerMock.mockResolvedValue(undefined)
   })
 
+  it('loads the unread list before the popover opens while sessions are unread', () => {
+    renderWithQueryClient(<UnreadBell title="Jean" />)
+    expect(unreadSessionsEnabled).toBe(true)
+  })
+
+  it('does not load the unread list when nothing is unread', () => {
+    unreadCount = 0
+    renderWithQueryClient(<UnreadBell title="Jean" />)
+    expect(unreadSessionsEnabled).toBe(false)
+  })
+
   it('shows sessions that finish loading after the shortcut opens the popover', async () => {
     const loadedSessions = allSessions
     allSessions = undefined
@@ -300,6 +315,49 @@ describe('UnreadBell', () => {
     view.rerender(<UnreadBell title="Jean" />)
 
     expect(await screen.findByText('Session two')).toBeInTheDocument()
+  })
+
+  it('shows the refetched session when the cached one was read elsewhere', async () => {
+    unreadCount = 1
+    allSessions = {
+      entries: [
+        {
+          project_id: 'project-1',
+          project_name: 'Jean',
+          worktree_id: 'worktree-1',
+          worktree_name: 'main',
+          worktree_path: '/repo',
+          sessions: [session({ id: 'session-1', name: 'Session one' })],
+        },
+      ],
+    }
+    allSessionsFetching = true
+    const view = renderWithQueryClient(<UnreadBell title="Jean" />)
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /1 finished session/i })
+    )
+
+    allSessions = {
+      entries: [
+        {
+          project_id: 'project-1',
+          project_name: 'Jean',
+          worktree_id: 'worktree-1',
+          worktree_name: 'main',
+          worktree_path: '/repo',
+          sessions: [session({ id: 'session-2', name: 'Session two' })],
+        },
+      ],
+    }
+    allSessionsFetching = false
+    view.rerender(<UnreadBell title="Jean" />)
+
+    expect(await screen.findByText('Session two')).toBeInTheDocument()
+    expect(screen.queryByText('No unread sessions')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /1 finished session/i })
+    ).toBeInTheDocument()
   })
 
   it('shows cached unread sessions on the first click while refetching', async () => {
@@ -444,12 +502,14 @@ describe('UnreadBell', () => {
     expect(within(firstRow).queryByText('R')).not.toBeInTheDocument()
   })
 
-  it('shows the finished sessions shortcut hint on native desktop', () => {
+  it('shows the finished sessions shortcut hint while a modifier is held on native desktop', () => {
     renderWithQueryClient(<UnreadBell title="Jean" />)
 
     expect(
-      screen.getByText(/(?:⌘|⌃|Ctrl) \+ ⇧|Shift \+ F/i)
-    ).toBeInTheDocument()
+      screen
+        .getByText(/(?:⌘|⌃|Ctrl) \+ ⇧|Shift \+ F/i)
+        .closest('[data-mod-hint]')
+    ).not.toBeNull()
   })
 
   it('uses a bell ring animation on the finished-sessions badge by default', () => {

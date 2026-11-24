@@ -8,10 +8,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
-import {
-  checkpointQueryKeys,
-  listAiCheckpoints,
-} from '@/services/checkpoints'
+import { checkpointQueryKeys, listAiCheckpoints } from '@/services/checkpoints'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import type { AiCheckpoint } from '@/types/checkpoints'
@@ -99,8 +96,6 @@ interface CheckpointTurnRestoreButtonProps {
    */
   hasFileEdits?: boolean
   className?: string
-  /** Icon-only button styling variant for user bubble vs edited-files row. */
-  variant?: 'userBubble' | 'inline'
 }
 
 /**
@@ -113,7 +108,6 @@ export const CheckpointTurnRestoreButton = memo(
     worktreeId: worktreeIdProp,
     hasFileEdits = false,
     className,
-    variant = 'userBubble',
   }: CheckpointTurnRestoreButtonProps) {
     const activeWorktreeId = useChatStore(s => s.activeWorktreeId)
     const sessionChatModalWorktreeId = useUIStore(
@@ -141,9 +135,7 @@ export const CheckpointTurnRestoreButton = memo(
 
     const checkpoint: AiCheckpoint | null = useMemo(() => {
       if (!worktreeId) return null
-      return (
-        checkpoints.find(c => c.userMessageId === userMessageId) ?? null
-      )
+      return checkpoints.find(c => c.userMessageId === userMessageId) ?? null
     }, [checkpoints, userMessageId, worktreeId])
 
     // Show as soon as we know the turn edited files (or checkpoint lists files).
@@ -175,14 +167,13 @@ export const CheckpointTurnRestoreButton = memo(
 
     if (!shouldShow || !worktreeId) return null
 
-    // Shared look for under-prompt and edited-files row (icon + label).
+    // Icon + label under the prompt.
     // Fine pointers: slightly muted until hover; touch: always readable.
     const buttonClass = cn(
-      'inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] cursor-pointer transition-colors',
+      'inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-2xs cursor-pointer transition-colors',
       'text-muted-foreground/80 hover:bg-muted/50 hover:text-foreground',
       'focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-      variant === 'userBubble' &&
-        '[@media(pointer:fine)]:text-muted-foreground/0 [@media(pointer:fine)]:group-hover:text-muted-foreground/70',
+      '[@media(pointer:fine)]:text-muted-foreground/0 [@media(pointer:fine)]:group-hover:text-muted-foreground/70',
       className
     )
 

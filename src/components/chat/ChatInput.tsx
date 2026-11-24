@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useAutoResize } from '@/hooks/use-auto-resize'
 import { invoke } from '@/lib/transport'
@@ -19,6 +19,7 @@ import type {
   SaveTextResponse,
   ReadTextResponse,
   ExecutionMode,
+  Session,
 } from '@/types/chat'
 import type { AppPreferences, CliBackend } from '@/types/preferences'
 import { preferencesQueryKeys, usePreferences } from '@/services/preferences'
@@ -29,14 +30,23 @@ import {
 import { queryClient } from '@/lib/query-client'
 import { parseServerResourceKey } from '@/lib/server-resource'
 import { fileQueryKeys } from '@/services/files'
+import { chatQueryKeys } from '@/services/chat'
+import { useCreateWorktree } from '@/services/projects'
 import { logger } from '@/lib/logger'
 import { reportBulkInvestigateResults } from '@/components/worktree/bulkInvestigateUtils'
 import {
+  buildInvestigatePrompt,
   investigateInNewSession,
+  investigatePRInNewWorktree,
+  isInvestigableContextItem,
   loadContextMentionItem,
+  planInvestigationBatches,
+  type InvestigatePromptTemplates,
 } from './context-mention-investigation'
 import type { WorktreeFile } from '@/types/chat'
 import { SlashPopover, type SlashPopoverHandle } from './SlashPopover'
+import { AgentMentionPopover } from './AgentMentionPopover'
+import type { MentionCandidate } from './agent-mentions'
 import {
   ContextMentionPopover,
   type ContextMentionPopoverHandle,
@@ -44,6 +54,7 @@ import {
 import type { ContextMentionItem } from './hooks/useContextMentionData'
 import { processAttachmentFile } from './attachment-processing'
 import { MAX_TEXT_SIZE } from './image-constants'
+import { continueListOnNewline } from './list-continuation'
 import {
   listControlChars,
   sanitizeTextInputValue,
@@ -55,13 +66,12 @@ import {
   type PromptAttachmentMetadata,
 } from './message-content-utils'
 import { isModKeyEvent } from '@/types/keybindings'
-import { isSteerCapableBackend } from '@/lib/backend-auto-steer'
+import {
+  isBackendAutoSteerEnabled,
+  isSteerCapableBackend,
+} from '@/lib/backend-auto-steer'
 import { isNativeApp } from '@/lib/environment'
 import { applyYoloInvestigationFixDirective } from '@/lib/investigation-prompt'
-import {
-  DEFAULT_INVESTIGATE_ISSUE_PROMPT,
-  DEFAULT_INVESTIGATE_PR_PROMPT,
-} from '@/types/preferences'
 
 /** Threshold for saving pasted text as file (2000 chars) */
 const TEXT_PASTE_THRESHOLD = 2000
@@ -77,7 +87,11 @@ interface ChatInputProps {
   focusChatShortcut: string
   onSubmit: (
     e: React.FormEvent | undefined,
-    options?: { forceSteer?: boolean; beforeSend?: () => Promise<void> }
+    options?: {
+      forceSteer?: boolean
+      forceQueue?: boolean
+      beforeSend?: () => Promise<void>
+    }
   ) => void
   onCancel: () => void
   onSwitchBackendWithTab?: () => void
@@ -94,6 +108,11 @@ interface ChatInputProps {
   investigatePRPrompt?: string | null
   /** Single-line pill style for the simple agent chat */
   pill?: boolean
+  /**
+   * Agent chats: `@` picks from these (agents, remote Jeans, projects)
+   * instead of files. Undefined keeps the file picker.
+   */
+  mentionCandidates?: MentionCandidate[]
 }
 
 export const ChatInput = memo(function ChatInput({
@@ -120,6 +139,7 @@ export const ChatInput = memo(function ChatInput({
   investigateIssuePrompt,
   investigatePRPrompt,
   pill = false,
+  mentionCandidates,
 }: ChatInputProps) {
   const isMobile = useIsMobile()
   const { data: preferences } = usePreferences()
@@ -464,10 +484,7 @@ export const ChatInput = memo(function ChatInput({
 
       // Detect / commands and $ skills (only if @/# popovers are not open)
       if (!fileMentionOpen && !contextMentionOpen) {
-        if (
-          prevChar === '/' ||
-          (prevChar === '$' && selectedBackend === 'codex')
-        ) {
+        if (prevChar === '/' || prevChar === '$') {
           // Check that it's at start or preceded by whitespace
           const charBeforeSlash = value[cursorPos - 2]
           if (
@@ -532,20 +549,25 @@ export const ChatInput = memo(function ChatInput({
         return
       }
 
-      const forceSteer =
+      // Holding the primary modifier inverts the default submit action of a
+      // steer-capable running turn: steer when auto-steer is off, queue when on.
+      const steerPreferences = queryClient.getQueryData<AppPreferences>(
+        preferencesQueryKeys.preferences(
+          activeWorktreeId
+            ? parseServerResourceKey(activeWorktreeId)?.serverId
+            : undefined
+        )
+      )
+      const modifierActive =
         isSending &&
-        isSteerCapableBackend(
-          selectedBackend,
-          queryClient.getQueryData<AppPreferences>(
-            preferencesQueryKeys.preferences(
-              activeWorktreeId
-                ? parseServerResourceKey(activeWorktreeId)?.serverId
-                : undefined
-            )
-          )
-        ) &&
+        isSteerCapableBackend(selectedBackend, steerPreferences) &&
         (e.metaKey || e.ctrlKey)
-      onSteerModifierChange?.(forceSteer)
+      onSteerModifierChange?.(modifierActive)
+      const submitOptions = modifierActive
+        ? isBackendAutoSteerEnabled(selectedBackend, steerPreferences)
+          ? { forceQueue: true }
+          : { forceSteer: true }
+        : undefined
 
       // When file mention popover is open, handle navigation
       if (fileMentionOpen) {
@@ -597,6 +619,12 @@ export const ChatInput = memo(function ChatInput({
           case 'Enter':
           case 'Tab':
             e.preventDefault()
+            if (
+              e.key === 'Enter' &&
+              (e.metaKey || e.ctrlKey) &&
+              contextMentionHandleRef.current?.investigateChecked(e.shiftKey)
+            )
+              return
             contextMentionHandleRef.current?.selectCurrent(
               e.key === 'Enter' && e.shiftKey
             )
@@ -665,6 +693,42 @@ export const ChatInput = memo(function ChatInput({
         return
       }
 
+      // Shift+Enter (or Enter on mobile) on a list item starts the next item,
+      // matching Claude's composer. Plain lines keep the default newline.
+      if (
+        e.key === 'Enter' &&
+        (e.shiftKey || isMobile) &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.nativeEvent.isComposing
+      ) {
+        const textarea = inputRef.current
+        if (textarea && textarea.selectionStart === textarea.selectionEnd) {
+          const continued = continueListOnNewline(
+            textarea.value,
+            textarea.selectionStart
+          )
+          if (continued) {
+            e.preventDefault()
+            textarea.value = continued.text
+            textarea.setSelectionRange(continued.caret, continued.caret)
+            valueRef.current = continued.text
+            if (activeSessionId) {
+              useChatStore
+                .getState()
+                .setInputDraft(activeSessionId, continued.text)
+            }
+            // Ending a list can empty the composer, so sync the empty state.
+            const isEmpty = !continued.text.trim()
+            setShowHint(isEmpty)
+            onHasValueChangeRef.current?.(!isEmpty)
+            resizeTextarea()
+            return
+          }
+        }
+      }
+
       // Enter without shift sends the message (on mobile, Enter adds a newline instead)
       if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
         e.preventDefault()
@@ -674,7 +738,25 @@ export const ChatInput = memo(function ChatInput({
             .getState()
             .setInputDraft(activeSessionId, valueRef.current)
         }
-        onSubmit(e, forceSteer ? { forceSteer: true } : undefined)
+        // Mod+Enter on an idle session sends the prompt in the background and
+        // opens a new session in this worktree. The send stays bound to this
+        // session.
+        const sendInBackground =
+          (e.metaKey || e.ctrlKey) && !isSending && !!activeSessionId
+        onSubmit(
+          e,
+          sendInBackground
+            ? {
+                beforeSend: async () => {
+                  window.dispatchEvent(
+                    new CustomEvent('create-new-session', {
+                      detail: { intent: 'default' },
+                    })
+                  )
+                },
+              }
+            : submitOptions
+        )
         // The submit handler clears accepted messages through the registered
         // clear handler. A blocked submit must keep the visible draft intact.
       }
@@ -777,17 +859,19 @@ export const ChatInput = memo(function ChatInput({
         if (mentions.length === 0) return
 
         // Get file list: cache-first, async fallback
+        const fileOwner = { worktreeId: activeWorktreeId ?? undefined }
         let fileList: WorktreeFile[] | undefined = queryClient.getQueryData(
-          fileQueryKeys.worktreeFiles(activeWorktreePath)
+          fileQueryKeys.worktreeFiles(activeWorktreePath, fileOwner)
         )
         if (!fileList) {
           try {
             fileList = await invoke<WorktreeFile[]>('list_worktree_files', {
+              worktreeId: fileOwner.worktreeId,
               worktreePath: activeWorktreePath,
               maxFiles: 5000,
             })
             queryClient.setQueryData(
-              fileQueryKeys.worktreeFiles(activeWorktreePath),
+              fileQueryKeys.worktreeFiles(activeWorktreePath, fileOwner),
               fileList
             )
           } catch {
@@ -869,7 +953,7 @@ export const ChatInput = memo(function ChatInput({
             try {
               const response = await invoke<ReadTextResponse>(
                 'read_pasted_text',
-                { path }
+                { path, sessionId: activeSessionId }
               )
               addPendingTextFile(activeSessionId, {
                 id: generateId(),
@@ -1023,7 +1107,13 @@ export const ChatInput = memo(function ChatInput({
       // Auto-resolve @file mentions in regular (small) text pastes
       await resolvePastedMentions(text)
     },
-    [activeSessionId, activeWorktreePath, inputRef, resizeTextarea]
+    [
+      activeSessionId,
+      activeWorktreeId,
+      activeWorktreePath,
+      inputRef,
+      resizeTextarea,
+    ]
   )
 
   const handleFileInputChange = useCallback(
@@ -1086,26 +1176,48 @@ export const ChatInput = memo(function ChatInput({
     [activeSessionId, atTriggerIndex, inputRef, resizeTextarea]
   )
 
-  const contextMentionToken = useCallback((item: ContextMentionItem) => {
-    switch (item.type) {
-      case 'issue':
-        return item.issue ? `#${item.issue.number}` : item.label
-      case 'pr':
-        return item.pr ? `PR#${item.pr.number}` : item.label.replace(/\s+/g, '')
-      case 'discussion':
-        return item.discussion
-          ? `Discussion#${item.discussion.number}`
-          : item.label.replace(/\s+/g, '')
-      case 'security':
-        return item.securityAlert
-          ? `Security#${item.securityAlert.number}`
-          : item.label.replace(/\s+/g, '')
-      case 'advisory':
-        return item.advisory?.ghsaId ?? item.label
-      case 'linear':
-        return item.linearIssue?.identifier ?? item.label
-    }
-  }, [])
+  // Handle agent/project/remote Jean selection from the agent chat @ popover
+  const handleMentionSelect = useCallback(
+    (candidate: MentionCandidate) => {
+      const triggerIndex = atTriggerIndex
+      const input = inputRef.current
+      if (triggerIndex !== null && input) {
+        const currentValue = valueRef.current
+        const cursorPos = input.selectionStart ?? currentValue.length
+        const inserted = `@${candidate.token} `
+        const newValue = `${currentValue.slice(0, triggerIndex)}${inserted}${currentValue.slice(cursorPos)}`
+        input.value = newValue
+        valueRef.current = newValue
+        if (activeSessionId) {
+          useChatStore.getState().setInputDraft(activeSessionId, newValue)
+        }
+        resizeTextarea()
+        setShowHint(false)
+        onHasValueChangeRef.current?.(true)
+        const newCursorPos = triggerIndex + inserted.length
+        requestAnimationFrame(() =>
+          inputRef.current?.setSelectionRange(newCursorPos, newCursorPos)
+        )
+      }
+      setFileMentionOpen(false)
+      setAtTriggerIndex(null)
+      setFileMentionQuery('')
+      input?.focus()
+    },
+    [activeSessionId, atTriggerIndex, inputRef, resizeTextarea]
+  )
+
+  const { mutateAsync: createWorktreeAsync } = useCreateWorktree()
+
+  const investigateTemplates = useMemo<InvestigatePromptTemplates>(
+    () => ({
+      issue: investigateIssuePrompt,
+      pr: investigatePRPrompt,
+      securityAlert: preferences?.magic_prompts?.investigate_security_alert,
+      advisory: preferences?.magic_prompts?.investigate_advisory,
+    }),
+    [investigateIssuePrompt, investigatePRPrompt, preferences?.magic_prompts]
+  )
 
   const handleContextSelect = useCallback(
     async (item: ContextMentionItem, investigate = false) => {
@@ -1154,20 +1266,10 @@ export const ChatInput = memo(function ChatInput({
         setContextMentionQuery('')
       }
 
-      let investigatePrompt = ''
-      if (investigate && item.type === 'issue') {
-        investigatePrompt = (
-          investigateIssuePrompt?.trim() || DEFAULT_INVESTIGATE_ISSUE_PROMPT
-        )
-          .replace(/\{issueWord\}/g, 'issue')
-          .replace(/\{issueRefs\}/g, contextMentionToken(item))
-      } else if (investigate && item.type === 'pr') {
-        investigatePrompt = (
-          investigatePRPrompt?.trim() || DEFAULT_INVESTIGATE_PR_PROMPT
-        )
-          .replace(/\{prWord\}/g, 'PR')
-          .replace(/\{prRefs\}/g, `#${item.pr?.number}`)
-      }
+      let investigatePrompt =
+        investigate && isInvestigableContextItem(item)
+          ? buildInvestigatePrompt([item], investigateTemplates)
+          : ''
       if (investigatePrompt) {
         investigatePrompt = applyYoloInvestigationFixDirective(
           investigatePrompt,
@@ -1214,12 +1316,10 @@ export const ChatInput = memo(function ChatInput({
       activeProjectId,
       activeSessionId,
       activeWorktreePath,
-      contextMentionToken,
       executionMode,
       hashTriggerIndex,
       inputRef,
-      investigateIssuePrompt,
-      investigatePRPrompt,
+      investigateTemplates,
       onSubmit,
       resizeTextarea,
     ]
@@ -1251,50 +1351,60 @@ export const ChatInput = memo(function ChatInput({
       setHashTriggerIndex(null)
       setContextMentionQuery('')
 
-      const investigate = (batch: ContextMentionItem[], openSession: boolean) =>
-        investigateInNewSession({
-          items: batch,
-          worktreeId: activeWorktreeId,
-          worktreePath: activeWorktreePath,
-          projectId: activeProjectId,
-          issueTemplate: investigateIssuePrompt,
-          prTemplate: investigatePRPrompt,
-          openSession,
-        })
-
-      if (!separate) {
-        const toastId = toast.loading(
-          `Starting investigation of ${items.length} items in a new session...`
-        )
-        try {
-          await investigate(items, true)
-          toast.success(
-            `Investigating ${items.length} items in a new session`,
-            { id: toastId }
+      // Reuse the current session when it is still empty
+      const currentSession = activeSessionId
+        ? queryClient.getQueryData<Session>(
+            chatQueryKeys.session(activeSessionId)
           )
-        } catch (error) {
-          toast.error(`Failed to start investigation: ${error}`, {
-            id: toastId,
-          })
-        }
-        return
-      }
+        : undefined
+      const reuseSessionId =
+        currentSession &&
+        currentSession.messages.length === 0 &&
+        !isSending &&
+        !valueRef.current.trim() &&
+        !useChatStore.getState().messageQueues[currentSession.id]?.length
+          ? currentSession.id
+          : undefined
+      const batches = planInvestigationBatches(items, separate, reuseSessionId)
+      // Open the new session or worktree only when it is the only one
+      const openResult = batches.length === 1
 
-      // One background session per item, started in parallel. The backend
-      // serializes session index writes per worktree.
       const toastId = toast.loading(
-        `Starting ${items.length} investigations in new sessions...`
+        `Starting investigation of ${items.length} ${items.length === 1 ? 'item' : 'items'}...`
       )
+      // Started in parallel. The backend serializes session index writes
+      // per worktree.
       const results = await Promise.allSettled(
-        items.map(item => investigate([item], false))
+        batches.map(async batch => {
+          if (batch.kind === 'session') {
+            return investigateInNewSession({
+              items: batch.items,
+              worktreeId: activeWorktreeId,
+              worktreePath: activeWorktreePath,
+              projectId: activeProjectId,
+              templates: investigateTemplates,
+              openSession: openResult,
+              reuseSessionId: batch.reuseSessionId,
+            })
+          }
+          if (!activeProjectId) throw new Error('No active project')
+          return investigatePRInNewWorktree({
+            pr: batch.pr,
+            projectId: activeProjectId,
+            projectPath: activeWorktreePath,
+            createWorktree: createWorktreeAsync,
+            background: !openResult,
+          })
+        })
       )
       let succeeded = 0
       results.forEach((result, index) => {
+        const batch = batches[index]
         if (result.status === 'fulfilled') {
-          succeeded += 1
+          succeeded += batch?.kind === 'session' ? batch.items.length : 1
         } else {
           logger.error('Context investigation failed', {
-            item: items[index]?.id,
+            batch,
             error: result.reason,
           })
         }
@@ -1313,9 +1423,10 @@ export const ChatInput = memo(function ChatInput({
       activeWorktreeId,
       activeWorktreePath,
       hashTriggerIndex,
+      createWorktreeAsync,
       inputRef,
-      investigateIssuePrompt,
-      investigatePRPrompt,
+      investigateTemplates,
+      isSending,
       resizeTextarea,
     ]
   )
@@ -1446,7 +1557,7 @@ export const ChatInput = memo(function ChatInput({
             ? 'Message...'
             : isSending
               ? 'Queue a follow-up...'
-              : 'Ask anything. @ files, # issues, / commands'
+              : 'Ask anything. @ files, # issues, / commands, $ skills'
         }
         // PERFORMANCE: Uncontrolled input - no value prop
         // Value is managed via valueRef and direct DOM manipulation
@@ -1475,18 +1586,32 @@ export const ChatInput = memo(function ChatInput({
         </span>
       )}
 
-      {/* File mention popover (@ mentions) */}
-      <FileMentionPopover
-        worktreePath={activeWorktreePath ?? null}
-        currentProjectId={activeProjectId ?? null}
-        open={fileMentionOpen}
-        onOpenChange={setFileMentionOpen}
-        onSelectFile={handleFileSelect}
-        searchQuery={fileMentionQuery}
-        anchorPosition={fileMentionAnchor}
-        containerWidth={fileMentionAnchor?.containerWidth}
-        handleRef={fileMentionHandleRef}
-      />
+      {/* @ mentions: agents/projects/remote Jeans in agent chats, else files */}
+      {mentionCandidates ? (
+        <AgentMentionPopover
+          candidates={mentionCandidates}
+          open={fileMentionOpen}
+          onOpenChange={setFileMentionOpen}
+          onSelect={handleMentionSelect}
+          searchQuery={fileMentionQuery}
+          anchorPosition={fileMentionAnchor}
+          containerWidth={fileMentionAnchor?.containerWidth}
+          handleRef={fileMentionHandleRef}
+        />
+      ) : (
+        <FileMentionPopover
+          worktreePath={activeWorktreePath ?? null}
+          worktreeId={activeWorktreeId ?? null}
+          currentProjectId={activeProjectId ?? null}
+          open={fileMentionOpen}
+          onOpenChange={setFileMentionOpen}
+          onSelectFile={handleFileSelect}
+          searchQuery={fileMentionQuery}
+          anchorPosition={fileMentionAnchor}
+          containerWidth={fileMentionAnchor?.containerWidth}
+          handleRef={fileMentionHandleRef}
+        />
+      )}
 
       {/* Context mention popover (# issues, PRs, security, Linear) */}
       <ContextMentionPopover
@@ -1516,6 +1641,7 @@ export const ChatInput = memo(function ChatInput({
         containerRef={formRef}
         isAtPromptStart={isSlashAtPromptStart}
         worktreePath={activeWorktreePath}
+        worktreeId={activeWorktreeId}
         handleRef={slashPopoverHandleRef}
         installedBackends={installedBackends}
         sessionBackend={selectedBackend}

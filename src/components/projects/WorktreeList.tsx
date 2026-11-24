@@ -18,6 +18,7 @@ import { useIsTouchDevice } from '@/hooks/use-touch-device'
 import { chatQueryKeys } from '@/services/chat'
 import { isTauri, useReorderWorktrees } from '@/services/projects'
 import { useProjectsStore } from '@/store/projects-store'
+import { useChatStore } from '@/store/chat-store'
 import {
   compareWorktreesForCanvasSort,
   getWorktreeLastActivity,
@@ -31,7 +32,6 @@ import {
 import { reorderWithClosestEdge } from '@/lib/drag-and-drop/reorder'
 import { announceDrag } from '@/lib/drag-and-drop/live-region'
 import { DropIndicator } from '@/components/drag-and-drop/DropIndicator'
-import { matchesWorktreeSearch } from './project-search'
 import {
   applyWorktreeDropSnapshot,
   emptyWorktreeDropSnapshot,
@@ -162,9 +162,6 @@ interface WorktreeListProps {
   projectPath: string
   worktrees: Worktree[]
   defaultBranch: string
-  searchQuery?: string
-  searchActive?: boolean
-  loadSessionCounts?: boolean
 }
 
 export function WorktreeList({
@@ -172,9 +169,6 @@ export function WorktreeList({
   projectPath,
   worktrees,
   defaultBranch,
-  searchQuery = '',
-  searchActive = false,
-  loadSessionCounts = true,
 }: WorktreeListProps) {
   const reorderWorktrees = useReorderWorktrees()
   // draggable="true" makes mobile browsers lift the row on long-press, which
@@ -185,26 +179,16 @@ export function WorktreeList({
       state.projectCanvasSettings[projectId]?.worktreeSortMode ?? 'created'
   )
 
-  const visibleWorktrees = useMemo(
-    () =>
-      searchQuery
-        ? worktrees.filter(worktree =>
-            matchesWorktreeSearch(worktree, searchQuery)
-          )
-        : worktrees,
-    [searchQuery, worktrees]
-  )
-
   const pendingWorktrees = useMemo(
-    () => visibleWorktrees.filter(w => w.status === 'pending'),
-    [visibleWorktrees]
+    () => worktrees.filter(w => w.status === 'pending'),
+    [worktrees]
   )
   const readyWorktrees = useMemo(
     () =>
-      visibleWorktrees.filter(
+      worktrees.filter(
         w => !w.status || w.status === 'ready' || w.status === 'error'
       ),
-    [visibleWorktrees]
+    [worktrees]
   )
 
   const sessionQueries = useQueries({
@@ -220,7 +204,7 @@ export function WorktreeList({
           includeMessageCounts: true,
         })
       },
-      enabled: loadSessionCounts && !!wt.id && !!wt.path,
+      enabled: !!wt.id && !!wt.path,
       // Prefer bootstrap/init-seeded cache; avoid N-way WS refetch on open
       staleTime: 1000 * 60 * 5,
       gcTime: 1000 * 60 * 5,
@@ -242,6 +226,8 @@ export function WorktreeList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionsFingerprint])
 
+  const sendingSessionIds = useChatStore(state => state.sendingSessionIds)
+
   // Match ProjectCanvasView ordering: pending first, then base session first,
   // then selected canvas sort mode using session last activity when requested.
   const sortedWorktrees = useMemo(() => {
@@ -253,7 +239,11 @@ export function WorktreeList({
       const sessions = sessionsByWorktreeId.get(worktree.id)?.sessions ?? []
       latestActivityByWorktreeId.set(
         worktree.id,
-        getWorktreeLastActivity(sessions, worktree.created_at)
+        getWorktreeLastActivity(
+          sessions,
+          worktree.created_at,
+          sendingSessionIds
+        )
       )
     }
 
@@ -270,7 +260,13 @@ export function WorktreeList({
     )
 
     return [...sortedPending, ...sortedReady]
-  }, [pendingWorktrees, readyWorktrees, sessionsByWorktreeId, worktreeSortMode])
+  }, [
+    pendingWorktrees,
+    readyWorktrees,
+    sessionsByWorktreeId,
+    sendingSessionIds,
+    worktreeSortMode,
+  ])
 
   const canReorderWorktree = useCallback((worktree: Worktree) => {
     return (
@@ -516,7 +512,7 @@ export function WorktreeList({
 
   return (
     <div
-      className="ml-4 border-l border-border/40 py-0.5"
+      className="ml-4 border-l border-border/20 py-0.5"
       onPointerDown={event => event.stopPropagation()}
       onKeyDown={event => event.stopPropagation()}
       onDragOver={handleNativeDragOver}
@@ -534,7 +530,6 @@ export function WorktreeList({
             defaultBranch={defaultBranch}
             disabled={
               isTouchDevice ||
-              searchActive ||
               reorderWorktrees.isPending ||
               !canReorderWorktree(worktree)
             }

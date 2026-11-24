@@ -34,22 +34,12 @@ describe('SessionChatModal responsive header actions', () => {
     )
   })
 
-  it('shows Open In and Scripts on smaller desktop windows', () => {
+  it('hides Open In and Scripts by header width, not window width', () => {
+    // The modal is narrower than the window when side panels are open
+    expect(source).toContain('@container/header')
     expect(source).toContain(
-      '<div className="hidden lg:flex items-center gap-1">'
+      '<div className="hidden items-center gap-1 @3xl/header:flex">'
     )
-    expect(source).not.toContain('hidden 2xl:flex items-center gap-1')
-  })
-
-  it('shows git diff stats beside the title at mobile and desktop widths', () => {
-    expect(source).toContain('diffAdded={uncommittedAdded}')
-    expect(source).toContain('diffRemoved={uncommittedRemoved}')
-    expect(source).toContain('branchDiffAdded={isBase ? 0 : branchDiffAdded}')
-    expect(source).toContain(
-      'branchDiffRemoved={isBase ? 0 : branchDiffRemoved}'
-    )
-    expect(source).not.toContain('diffAdded={isMobile ? 0 : uncommittedAdded}')
-    expect(source).not.toContain('isBase || isMobile')
   })
 })
 

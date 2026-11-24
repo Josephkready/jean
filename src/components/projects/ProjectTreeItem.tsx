@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDownUp, ChevronDown } from '@/components/icons/reicon'
-import {
-  convertFileSrc,
-  convertProjectFileSrc,
-  convertServerFileSrc,
-  convertServerProjectFileSrc,
-} from '@/lib/transport'
+import { ArrowDownUp } from '@/components/icons/reicon'
+import { DisclosureChevron } from './DisclosureChevron'
+import { ProjectAvatar } from './ProjectAvatar'
 import { cn } from '@/lib/utils'
 import type { Project } from '@/types/projects'
 import { isBaseSession } from '@/types/projects'
@@ -14,11 +10,7 @@ import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useRemotePicker } from '@/hooks/useRemotePicker'
-import {
-  useAppDataDir,
-  useUpdateProjectSettings,
-  useWorktrees,
-} from '@/services/projects'
+import { useUpdateProjectSettings, useWorktrees } from '@/services/projects'
 import {
   useFetchWorktreesStatus,
   useGitStatus,
@@ -31,18 +23,13 @@ import {
 } from '@/components/ui/tooltip'
 import { WorktreeList } from './WorktreeList'
 import { ProjectContextMenu } from './ProjectContextMenu'
-import { matchesProjectSearch, matchesWorktreeSearch } from './project-search'
 import { CollapsedCountBadge } from './CollapsedCountBadge'
 
 interface ProjectTreeItemProps {
   project: Project
-  searchQuery?: string
 }
 
-export function ProjectTreeItem({
-  project,
-  searchQuery = '',
-}: ProjectTreeItemProps) {
+export function ProjectTreeItem({ project }: ProjectTreeItemProps) {
   const isMobile = useIsMobile()
   const isOffline = project.offline === true
   const isProjectExpanded = useProjectsStore(state =>
@@ -54,16 +41,10 @@ export function ProjectTreeItem({
     state => state.toggleProjectExpanded
   )
   const shouldLoadWorktrees =
-    !isOffline &&
-    (Boolean(searchQuery) ||
-      isProjectExpanded ||
-      selectedProjectId === project.id)
-  const { data: loadedWorktrees, isLoading: worktreesLoading } = useWorktrees(
-    project.id,
-    {
-      enabled: shouldLoadWorktrees,
-    }
-  )
+    !isOffline && (isProjectExpanded || selectedProjectId === project.id)
+  const { data: loadedWorktrees } = useWorktrees(project.id, {
+    enabled: shouldLoadWorktrees,
+  })
   const worktrees = useMemo(
     () =>
       (loadedWorktrees ?? []).filter(
@@ -71,53 +52,22 @@ export function ProjectTreeItem({
       ),
     [loadedWorktrees]
   )
-  const { data: appDataDir = '' } = useAppDataDir()
   // Prefer loaded worktrees: project.worktree_count can be stale
   const worktreeCount = loadedWorktrees
     ? worktrees.length
     : (project.worktree_count ?? 0)
   const hasWorktrees = !isOffline && worktreeCount > 0
-  const projectMatchesSearch = matchesProjectSearch(project, searchQuery)
-  const hasMatchingWorktree = worktrees.some(worktree =>
-    matchesWorktreeSearch(worktree, searchQuery)
-  )
-  const isExpanded = hasWorktrees && (Boolean(searchQuery) || isProjectExpanded)
-
-  const avatarKey = project.avatar_path ?? project.default_avatar_path ?? null
-
-  // Track image load errors to fall back to letter avatar
-  // Use avatar key to reset error state when it changes
-  const [imgErrorKey, setImgErrorKey] = useState<string | null>(null)
-  const imgError = imgErrorKey === avatarKey
-
-  // Build avatar URL from relative path
-  const avatarUrl =
-    project.avatar_path && !imgError
-      ? project.serverId
-        ? convertServerFileSrc(project.serverId, project.avatar_path)
-        : appDataDir
-          ? convertFileSrc(`${appDataDir}/${project.avatar_path}`)
-          : null
-      : project.default_avatar_path && !imgError
-        ? project.serverId
-          ? convertServerProjectFileSrc(
-              project.serverId,
-              project.default_avatar_path
-            )
-          : convertProjectFileSrc(project.default_avatar_path)
-        : null
+  const isExpanded = hasWorktrees && isProjectExpanded
 
   // Fetch git status for all worktrees when project is expanded
-  useFetchWorktreesStatus(project.id, isExpanded && !searchQuery)
+  useFetchWorktreesStatus(project.id, isExpanded)
 
   // Check if base session exists
   const hasBaseSession = worktrees.some(w => isBaseSession(w))
 
   // Get base branch status from any worktree (all have it)
   const firstWorktree = worktrees[0]
-  const { data: gitStatus } = useGitStatus(
-    searchQuery ? null : (firstWorktree?.id ?? null)
-  )
+  const { data: gitStatus } = useGitStatus(firstWorktree?.id ?? null)
 
   // Only show on project line when no base session
   const baseBranchBehindCount = !hasBaseSession
@@ -225,7 +175,9 @@ export function ProjectTreeItem({
     [project.id, toggleProjectExpanded]
   )
 
-  const pickRemoteOrRun = useRemotePicker(project.path)
+  const pickRemoteOrRun = useRemotePicker(project.path, {
+    projectId: project.id,
+  })
 
   const handleBaseSync = useCallback(
     (e: React.MouseEvent) => {
@@ -254,15 +206,6 @@ export function ProjectTreeItem({
     ]
   )
 
-  if (
-    searchQuery &&
-    !projectMatchesSearch &&
-    !worktreesLoading &&
-    !hasMatchingWorktree
-  ) {
-    return null
-  }
-
   return (
     <div>
       {/* Project Row — only the row is the context-menu trigger, so worktree
@@ -276,25 +219,14 @@ export function ProjectTreeItem({
               ? 'bg-primary/10 text-foreground before:absolute before:left-0 before:top-0 before:h-full before:w-[3px] before:bg-primary'
               : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
           )}
+          // Mouse handlers catch events from the name button and the rest of
+          // the row.
+          role="presentation"
           onClick={handleClick}
           onDoubleClick={handleDoubleClick}
           data-testid={`project-row-${project.id}`}
         >
-          {/* Avatar */}
-          {avatarUrl ? (
-            <img
-              src={avatarUrl}
-              alt={project.name}
-              className="size-4 shrink-0 rounded object-cover"
-              onError={() => setImgErrorKey(avatarKey)}
-            />
-          ) : (
-            <div className="flex size-4 shrink-0 items-center justify-center rounded bg-muted-foreground/20">
-              <span className="text-[10px] font-medium uppercase">
-                {project.name[0]}
-              </span>
-            </div>
-          )}
+          <ProjectAvatar project={project} />
 
           {/* Name + Chevron */}
           {isEditing ? (
@@ -312,9 +244,16 @@ export function ProjectTreeItem({
             />
           ) : (
             <span className="flex flex-1 items-center gap-0.5 truncate text-sm">
-              <span className="truncate">{project.name}</span>
+              <button
+                type="button"
+                aria-current={isSelected || undefined}
+                aria-disabled={isOffline || undefined}
+                className="truncate rounded-sm text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                {project.name}
+              </button>
               {isOffline && (
-                <span className="shrink-0 rounded bg-warning/10 px-1 py-0.5 text-[10px] text-warning">
+                <span className="shrink-0 rounded bg-warning/10 px-1 py-0.5 text-2xs text-warning">
                   Offline
                 </span>
               )}
@@ -332,14 +271,15 @@ export function ProjectTreeItem({
                   )}
                   onClick={handleChevronClick}
                 >
-                  <ChevronDown
-                    className={cn(
-                      'size-3 transition-transform',
-                      isExpanded && 'rotate-180'
-                    )}
-                  />
+                  <DisclosureChevron open={isExpanded} className="size-3" />
                 </button>
               )}
+              {/* Left of the sync badge so it does not move it on hover (#912) */}
+              <CollapsedCountBadge
+                count={worktreeCount}
+                label="workspaces"
+                isExpanded={isExpanded}
+              />
             </span>
           )}
 
@@ -351,7 +291,7 @@ export function ProjectTreeItem({
                   <button
                     type="button"
                     onClick={handleBaseSync}
-                    className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                   >
                     <span className="flex items-center gap-0.5">
                       <ArrowDownUp className="h-3 w-3" />
@@ -381,12 +321,6 @@ export function ProjectTreeItem({
                 </TooltipContent>
               </Tooltip>
             )}
-
-          <CollapsedCountBadge
-            count={worktreeCount}
-            label="workspaces"
-            isExpanded={isExpanded}
-          />
         </div>
       </ProjectContextMenu>
 
@@ -397,9 +331,6 @@ export function ProjectTreeItem({
           projectPath={project.path}
           worktrees={worktrees}
           defaultBranch={project.default_branch}
-          searchQuery={projectMatchesSearch ? '' : searchQuery}
-          searchActive={Boolean(searchQuery)}
-          loadSessionCounts={!searchQuery}
         />
       )}
     </div>

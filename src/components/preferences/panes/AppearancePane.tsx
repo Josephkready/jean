@@ -35,24 +35,15 @@ import { invoke } from '@/lib/transport'
 import { toast } from 'sonner'
 import { Input } from '@/components/ui/input'
 import { isValidHex } from '@/lib/terminal-theme'
+import { Button } from '@/components/ui/button'
+import { serializeCustomTheme } from '@/lib/custom-themes'
+import { copyToClipboard } from '@/lib/clipboard'
+import { importThemeFiles } from '@/lib/vscode-themes'
+import { readClientPreferences } from '@/lib/client-preferences'
+import { useClientPreferences } from '@/hooks/useClientPreferences'
 import { useClientZoom } from '@/lib/client-zoom'
 import { SettingsSection } from '../SettingsSection'
-
-const InlineField: React.FC<{
-  label: string
-  description?: string
-  children: React.ReactNode
-}> = ({ label, description, children }) => (
-  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
-    <div className="space-y-0.5 sm:w-56 sm:shrink-0 lg:w-72">
-      <Label className="text-sm text-foreground">{label}</Label>
-      {description && (
-        <p className="text-xs text-muted-foreground">{description}</p>
-      )}
-    </div>
-    {children}
-  </div>
-)
+import { InlineField } from '../InlineField'
 
 const ScalingField: React.FC<{
   label: string
@@ -75,6 +66,7 @@ function getErrorMessage(error: unknown): string {
 }
 
 const modKey = getModifierSymbol()
+const NO_CUSTOM_THEME = 'none'
 
 export const AppearancePane: React.FC = () => {
   const { theme, setTheme } = useTheme()
@@ -84,6 +76,7 @@ export const AppearancePane: React.FC = () => {
 
   // Zoom is client-local (issue #622) — not written to shared AppPreferences.
   // Commit-only slider updates avoid flickering the webview during drag.
+  const hasPreferences = preferences != null
   const zoomSeed = useMemo(
     () =>
       preferences
@@ -97,7 +90,7 @@ export const AppearancePane: React.FC = () => {
       preferences?.zoom_level,
       preferences?.mobile_zoom_level,
       preferences?.sync_zoom_levels,
-      preferences == null,
+      hasPreferences,
     ]
   )
   const {
@@ -120,6 +113,70 @@ export const AppearancePane: React.FC = () => {
     },
     [setTheme, patchPreferences]
   )
+
+  const { preferences: clientPreferences, update: updateClientPreferences } =
+    useClientPreferences()
+  const themeFileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleCustomThemeImport = useCallback(
+    async (files: File[]) => {
+      const { themes, errors } = importThemeFiles(
+        await Promise.all(
+          files.map(async file => ({
+            fileName: file.name,
+            text: await file.text(),
+          }))
+        )
+      )
+      if (themes.length > 0) {
+        let { custom_themes } = readClientPreferences()
+        let selected = ''
+        for (const imported of themes) {
+          // Re-importing a theme with the same name updates it in place.
+          const existing = custom_themes.find(t => t.name === imported.name)
+          const theme = existing ? { ...imported, id: existing.id } : imported
+          custom_themes = existing
+            ? custom_themes.map(t => (t.id === existing.id ? theme : t))
+            : [...custom_themes, theme]
+          selected = theme.id
+        }
+        updateClientPreferences({ custom_themes, custom_theme: selected })
+        toast.success(
+          themes.length === 1
+            ? `Imported theme "${themes[0]?.name}"`
+            : `Imported ${themes.length} themes`
+        )
+      }
+      if (errors.length > 0) {
+        toast.error('Could not import theme', {
+          description: errors.join('\n'),
+        })
+      }
+    },
+    [updateClientPreferences]
+  )
+
+  const handleCustomThemeExport = useCallback(async () => {
+    const { custom_themes, custom_theme } = readClientPreferences()
+    const theme = custom_themes.find(t => t.id === custom_theme)
+    if (!theme) return
+    try {
+      await copyToClipboard(serializeCustomTheme(theme))
+      toast.success(`Copied theme "${theme.name}" as JSON`)
+    } catch (error) {
+      toast.error('Could not copy theme', {
+        description: getErrorMessage(error),
+      })
+    }
+  }, [])
+
+  const handleCustomThemeRemove = useCallback(() => {
+    const { custom_themes, custom_theme } = readClientPreferences()
+    updateClientPreferences({
+      custom_themes: custom_themes.filter(t => t.id !== custom_theme),
+      custom_theme: null,
+    })
+  }, [updateClientPreferences])
 
   const handleFontSizeChange = useCallback(
     (field: 'ui_font_size' | 'chat_font_size', value: number) => {
@@ -320,6 +377,71 @@ export const AppearancePane: React.FC = () => {
           </InlineField>
 
           <InlineField
+            label="Custom theme"
+            description="Imported Jean, VS Code or T3 Code theme that recolours light and dark mode"
+          >
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+              <Select
+                value={clientPreferences.custom_theme ?? NO_CUSTOM_THEME}
+                onValueChange={value =>
+                  updateClientPreferences({
+                    custom_theme: value === NO_CUSTOM_THEME ? null : value,
+                  })
+                }
+              >
+                <SelectTrigger className="w-full sm:w-80">
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_CUSTOM_THEME}>None</SelectItem>
+                  {clientPreferences.custom_themes.map(custom => (
+                    <SelectItem key={custom.id} value={custom.id}>
+                      {custom.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <input
+                ref={themeFileInputRef}
+                type="file"
+                accept="application/json,.json,.jsonc"
+                multiple
+                className="hidden"
+                onChange={e => {
+                  const files = [...(e.target.files ?? [])]
+                  e.target.value = ''
+                  if (files.length > 0) void handleCustomThemeImport(files)
+                }}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => themeFileInputRef.current?.click()}
+              >
+                Import
+              </Button>
+              {clientPreferences.custom_theme && (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleCustomThemeExport()}
+                  >
+                    Export
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleCustomThemeRemove}
+                  >
+                    Remove
+                  </Button>
+                </>
+              )}
+            </div>
+          </InlineField>
+
+          <InlineField
             label="Syntax theme (dark)"
             description="Highlighting theme for code in dark mode"
           >
@@ -376,7 +498,8 @@ export const AppearancePane: React.FC = () => {
           {isClientMacOS && (
             <InlineField
               label="Window transparency"
-              description="Translucent window with desktop blur (uses significant GPU; can soften text on external monitors)"
+              description="Translucent window with desktop blur"
+              help="Uses significant GPU and can soften text on external monitors."
             >
               <Switch
                 aria-label="Window transparency"
@@ -397,38 +520,6 @@ export const AppearancePane: React.FC = () => {
               onCheckedChange={checked =>
                 patchPreferences.mutate({
                   finished_session_animation_enabled: checked,
-                })
-              }
-              disabled={patchPreferences.isPending}
-            />
-          </InlineField>
-
-          <InlineField
-            label="Compact chat view"
-            description="Compact answers into one section for a cleaner chat, showing only the last prompt and answer by default."
-          >
-            <Switch
-              aria-label="Compact chat view"
-              checked={preferences?.compact_chat_view_enabled ?? true}
-              onCheckedChange={checked =>
-                patchPreferences.mutate({
-                  compact_chat_view_enabled: checked,
-                })
-              }
-              disabled={patchPreferences.isPending}
-            />
-          </InlineField>
-
-          <InlineField
-            label="Expand tool calls by default"
-            description="Automatically expand tool call details in chat instead of showing a collapsed summary"
-          >
-            <Switch
-              aria-label="Expand tool calls by default"
-              checked={preferences?.expand_tool_calls_by_default ?? false}
-              onCheckedChange={checked =>
-                patchPreferences.mutate({
-                  expand_tool_calls_by_default: checked,
                 })
               }
               disabled={patchPreferences.isPending}
@@ -536,7 +627,8 @@ export const AppearancePane: React.FC = () => {
 
           <InlineField
             label="Font weight"
-            description="Overall text weight for UI and chat. Light softens emphasis for long reading, especially in dark mode."
+            description="Text weight for UI and chat"
+            help="Light softens emphasis for long reading, especially in dark mode."
           >
             <Select
               value={preferences?.font_weight ?? FONT_WEIGHT_DEFAULT}
@@ -609,7 +701,7 @@ export const AppearancePane: React.FC = () => {
 
           <ScalingField
             label="Desktop zoom level"
-            description="Adjust the interface size on this device (not shared with remote clients)"
+            description="Interface size on this device only"
           >
             <Slider
               ticks={zoomLevelTicks}
@@ -650,7 +742,7 @@ export const AppearancePane: React.FC = () => {
         <div className="space-y-4">
           <InlineField
             label="Open from screen edge"
-            description="Temporarily reveal the collapsed sidebar when the pointer rests on the left edge. Off by default."
+            description="Reveal the collapsed sidebar at the left edge"
           >
             <Switch
               aria-label="Open sidebar from screen edge"

@@ -133,6 +133,18 @@ export function normalizeExecutionModeForBackend(
   return 'plan'
 }
 
+/**
+ * Agents run unattended and need the Jean MCP tools, which Plan mode blocks.
+ * Same rule as the backend wake: use Build, or Yolo for Cursor (no Build).
+ */
+export function agentExecutionMode(
+  backend: Backend | undefined,
+  mode: ExecutionMode
+): ExecutionMode {
+  if (mode !== 'plan') return mode
+  return backend === 'cursor' ? 'yolo' : 'build'
+}
+
 export function permissionModeForExecution(
   mode: ExecutionMode
 ): PermissionMode {
@@ -347,10 +359,8 @@ export interface Session {
   selected_permission_mode?: PermissionMode
   /** Whether session naming has been attempted for this session */
   session_naming_completed?: boolean
-  /** Unix timestamp when session was archived (undefined = not archived) */
+  /** Unix timestamp when the session was deleted (undefined = live). Purged after 30 days. */
   archived_at?: number
-  /** Whether this session was archived by the base close operation (vs user action) */
-  archived_by_base_close?: boolean
 
   // ========================================================================
   // Session-specific UI state (moved from ui-state.json)
@@ -432,6 +442,33 @@ export interface Session {
   loaded_run_start_index?: number
   /** Pending ScheduleWakeup request (one per session, last-wins) */
   scheduled_wakeup?: ScheduledWakeup
+  /** Session that started this one through Jean MCP and receives its updates */
+  delegated_by?: SessionDelegator
+}
+
+/** Origin of a delegated session. Ids are scoped like `Session.id`. */
+export interface SessionDelegator {
+  origin_session_id: string
+  origin_worktree_id: string
+  origin_name?: string | null
+  /** End of the last run the origin started, once that run ended */
+  outcome?: DelegationOutcome | null
+}
+
+export type DelegationStatus =
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'waiting_plan'
+  | 'question'
+
+export interface DelegationOutcome {
+  status: DelegationStatus
+  /** Error line and the session's last reply, truncated */
+  body: string
+  ended_at: number
+  /** When the origin received this outcome; unset while one is owed */
+  reported_at?: number | null
 }
 
 /**
@@ -475,29 +512,6 @@ export interface WakeupCancelledEvent {
   session_id: string
   worktree_id: string
   tool_call_id: string | null
-}
-
-/**
- * Result of loading a window of session messages from disk.
- * Returned by `load_older_session_messages`.
- */
-export interface LoadedMessages {
-  messages: ChatMessage[]
-  total_runs: number
-  loaded_run_start_index: number
-}
-
-/**
- * An archived session with its worktree context
- * Used for displaying archived sessions in the ArchivedModal
- */
-export interface ArchivedSessionEntry {
-  session: Session
-  worktree_id: string
-  worktree_name: string
-  worktree_path: string
-  project_id: string
-  project_name: string
 }
 
 /**
@@ -548,6 +562,8 @@ export interface UsageData {
   cache_read_input_tokens?: number
   /** Cache creation tokens (cached for future requests) */
   cache_creation_input_tokens?: number
+  /** Cost in USD as reported by the CLI (Claude, OpenCode); absent otherwise */
+  cost_usd?: number
 }
 
 // ============================================================================
@@ -599,6 +615,13 @@ export interface DoneEvent {
   worktree_id: string // Kept for backward compatibility
   /** True when a Codex/Opencode plan-mode run completed with content */
   waiting_for_plan?: boolean
+  /** Run this event closes, when the emitter knows it. */
+  run_id?: string
+  /**
+   * Session run-state version after the run log was persisted. Absent from
+   * backend modules that emit before Jean's metadata is final.
+   */
+  status_version?: number | null
   /**
    * Authoritative final assistant text from the backend (e.g. Grok).
    * When present, prefer this over streamed chunk accumulation so
@@ -616,12 +639,38 @@ export interface CompactingEvent {
 }
 
 /**
+ * Event payload when the Claude CLI retries a failed API request
+ */
+export interface ApiRetryEvent {
+  session_id: string
+  worktree_id: string
+  attempt: number
+  max_retries: number
+  retry_delay_ms: number
+  error: string | null
+}
+
+/**
  * Event payload for context compaction complete from Rust
  */
 export interface CompactedEvent {
   session_id: string
   worktree_id: string
   metadata: CompactMetadata
+}
+
+/**
+ * Event payload for chat:backend_retry: the backend waits `delay_ms` before it
+ * retries a failed provider request (rate limit, overload).
+ */
+export interface BackendRetryEvent {
+  session_id: string
+  worktree_id: string
+  backend: string
+  /** 1-based retry number */
+  attempt: number
+  delay_ms: number
+  reason: string
 }
 
 /**
@@ -635,15 +684,72 @@ export interface ErrorEvent {
 
 /**
  * Event payload for cancellation from Rust (user pressed Escape).
- * undo_send only indicates whether the user turn should be removed from
- * history; a prompt with no streamed output may still be restored when false.
+ * Fires as soon as the process or turn is stopped, before the backend has
+ * decided what to do with the prompt. Stop rendering the live turn; the
+ * prompt's fate arrives in `chat:user-turn`.
  */
 export interface CancelledEvent {
   session_id: string
   worktree_id: string // Kept for backward compatibility
-  undo_send: boolean
   emitted_at_ms: number
   run_id?: string
+  /** Run-state version at cancel time, before the run log is final. */
+  status_version?: number
+}
+
+/**
+ * What the backend did with the user's prompt once a send finished.
+ * `not_accepted` is never sent as an event: a rejected `send_chat_message`
+ * invoke means the backend never recorded the prompt.
+ */
+export type UserTurnOutcome = 'not_accepted' | 'withdrawn' | 'persisted'
+
+/**
+ * Event payload for `chat:user-turn`, the backend's final word on a send.
+ * Emitted once per accepted send after the run log is final. `restore_draft`
+ * is true when the prompt is not in history and belongs back in the composer.
+ */
+export interface UserTurnEvent {
+  session_id: string
+  worktree_id: string
+  run_id: string
+  /** Id of the user message the verdict is about; `chat:sending` carries the same id. */
+  user_message_id?: string
+  user_turn: Exclude<UserTurnOutcome, 'not_accepted'>
+  restore_draft: boolean
+  /** The prompt stays in history but got no answer; the sender gets it back in the composer. */
+  failed?: boolean
+  emitted_at_ms: number
+  /** Run-state version of the final metadata this verdict was read from. */
+  status_version?: number
+}
+
+/** Lifecycle of a session's latest run as the owning backend sees it. */
+export type RunStateStatus =
+  | 'running'
+  | 'resumable'
+  | 'cancelled'
+  | 'error'
+  | 'idle'
+
+/**
+ * Versioned run-state snapshot from `get_run_states`, `/api/init`
+ * (`runStates`) and `bootstrap_project`. `statusVersion` is per session and
+ * monotonic across backend restarts; a client drops anything older than the
+ * version it already applied.
+ */
+export interface RunState {
+  sessionId: string
+  worktreeId: string
+  status: RunStateStatus
+  statusVersion: number
+  activelyManaged: boolean
+  runId?: string
+  /** Unix seconds; present only while the run is live. */
+  startedAt?: number
+  executionMode?: string
+  waitingForInput: boolean
+  waitingForInputType?: string | null
 }
 
 /**
@@ -1691,6 +1797,23 @@ export interface ReviewFinding {
  * A message waiting in the queue to be sent
  * Captures all settings at the time of queueing so they're preserved
  */
+export type ChatMentionType = 'agent' | 'project' | 'remote_jean'
+
+/**
+ * `@` mention in an agent chat. It only adds context for the agent; it does
+ * not run an action. See `src/components/chat/agent-mentions.ts`.
+ */
+export interface ChatMention {
+  type: ChatMentionType
+  /** Agent ID or project ID on its own server, or the remote Jean's ID */
+  id: string
+  name: string
+  /** Set when the item is on another Jean than the chat */
+  serverName?: string
+  /** Remote Jean URL (remote_jean only) */
+  url?: string
+}
+
 export interface QueuedMessage {
   /** Unique ID for this queued message (for reordering/removal) */
   id: string
@@ -1704,6 +1827,8 @@ export interface QueuedMessage {
   pendingSkills: PendingSkill[]
   /** Snapshot of pending text files at time of queue */
   pendingTextFiles: PendingTextFile[]
+  /** `@` mentions of agents, projects, and remote Jeans (agent chats only) */
+  mentions?: ChatMention[]
   /** Model to use for this message (snapshot at queue time) */
   model: string
   /** Provider profile name to use (snapshot at queue time, null = default) */
@@ -1720,9 +1845,22 @@ export interface QueuedMessage {
   commandAllowedTools?: string[]
   /** Backend to use for this message (snapshot at queue time) */
   backend?: Backend
+  /** Never auto-steer into a running turn; wait for the run to finish */
+  noSteer?: boolean
   /** Timestamp when queued (for display ordering) */
   queuedAt: number
 }
+
+/** Editable part of a queued message: text plus every attachment kind */
+export type QueuedMessageEdit = Pick<
+  QueuedMessage,
+  | 'message'
+  | 'pendingImages'
+  | 'pendingFiles'
+  | 'pendingSkills'
+  | 'pendingTextFiles'
+  | 'mentions'
+>
 
 // ============================================================================
 // MCP Server Types

@@ -1,8 +1,16 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useChatStore } from '@/store/chat-store'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import {
   Select,
@@ -12,9 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
-  AlertCircle,
   AlertTriangle,
-  Lightbulb,
   CheckCircle2,
   MessageSquare,
   FileCode,
@@ -25,6 +31,7 @@ import {
 } from '@/components/icons/reicon'
 import type {
   ReviewFinding,
+  ReviewJobStatus,
   ReviewResponse,
   StoredReviewResults,
 } from '@/types/projects'
@@ -77,43 +84,21 @@ function formatReviewBackendName(backend: string): string {
 }
 
 /** Get severity icon and color */
-function getSeverityConfig(severity: string) {
+function getSeverityConfig(severity: string): {
+  variant: 'danger' | 'warning' | 'info' | 'success' | 'subtle'
+  label: string
+} {
   switch (severity) {
     case 'critical':
-      return {
-        icon: AlertCircle,
-        color: 'text-destructive',
-        bgColor: 'bg-destructive/15 text-destructive',
-        label: 'Critical',
-      }
+      return { variant: 'danger', label: 'High' }
     case 'warning':
-      return {
-        icon: AlertTriangle,
-        color: 'text-warning',
-        bgColor: 'bg-warning/15 text-warning',
-        label: 'Warning',
-      }
+      return { variant: 'warning', label: 'Medium' }
     case 'suggestion':
-      return {
-        icon: Lightbulb,
-        color: 'text-info',
-        bgColor: 'bg-info/15 text-info',
-        label: 'Suggestion',
-      }
+      return { variant: 'info', label: 'Low' }
     case 'praise':
-      return {
-        icon: CheckCircle2,
-        color: 'text-success',
-        bgColor: 'bg-success/15 text-success',
-        label: 'Praise',
-      }
+      return { variant: 'success', label: 'Praise' }
     default:
-      return {
-        icon: MessageSquare,
-        color: 'text-muted-foreground',
-        bgColor: 'bg-muted text-muted-foreground',
-        label: severity,
-      }
+      return { variant: 'subtle', label: severity }
   }
 }
 
@@ -142,6 +127,35 @@ function sortFindingsBySeverity(
     )
 }
 
+const SEVERITY_ID_PREFIX: Record<string, string> = {
+  critical: 'H',
+  warning: 'M',
+  suggestion: 'L',
+}
+
+/**
+ * Finding numbers (H1, M2, L3) keyed by original index. Uses the reviewer's
+ * ids when every finding has one; otherwise numbers each severity in order
+ * (older results and CodeRabbit have no ids).
+ */
+export function getFindingIds(
+  sorted: { finding: ReviewFinding; originalIndex: number }[]
+): Map<number, string> {
+  const ids = new Map<number, string>()
+  const useReviewerIds = sorted.every(({ finding }) => finding.id?.trim())
+  const counters: Record<string, number> = {}
+  for (const { finding, originalIndex } of sorted) {
+    if (useReviewerIds) {
+      ids.set(originalIndex, (finding.id ?? '').trim())
+      continue
+    }
+    const prefix = SEVERITY_ID_PREFIX[finding.severity] ?? 'L'
+    counters[prefix] = (counters[prefix] ?? 0) + 1
+    ids.set(originalIndex, `${prefix}${counters[prefix]}`)
+  }
+  return ids
+}
+
 function formatReviewMetadata(value: string): string {
   return value
     .split('_')
@@ -153,16 +167,23 @@ function isFixableFinding(finding: ReviewFinding): boolean {
   return (finding.severity as string) !== 'praise'
 }
 
-function formatFindingMessage(finding: ReviewFinding): string {
+function formatBaseBehavior(finding: ReviewFinding): string {
+  return finding.base_behavior?.trim()
+    ? `\n**Base branch behavior:** ${finding.base_behavior.trim()}\n`
+    : ''
+}
+
+function formatFindingMessage(finding: ReviewFinding, id: string): string {
   const suggestionToApply = finding.suggestion ?? ''
   return `Fix the following code review finding:
 
+**Finding:** ${id}
 **File:** ${finding.file}
 **Line:** ${finding.line ?? 'N/A'}
 **Issue:** ${finding.title}
 
 ${finding.description}
-
+${formatBaseBehavior(finding)}
 **Suggested fix:**
 ${suggestionToApply || '(Please determine the best fix)'}
 
@@ -170,19 +191,19 @@ Please apply this fix to the file.`
 }
 
 function formatCombinedFindingsMessage(
-  findings: { finding: ReviewFinding }[]
+  findings: { finding: ReviewFinding; id: string }[]
 ): string {
   return `Fix the following ${findings.length} code review findings:
 
 ${findings
   .map(
-    ({ finding }, i) => `
-### ${i + 1}. ${finding.title}
+    ({ finding, id }) => `
+### ${id}. ${finding.title}
 **File:** ${finding.file}
 **Line:** ${finding.line ?? 'N/A'}
 
 ${finding.description}
-
+${formatBaseBehavior(finding)}
 **Suggested fix:**
 ${finding.suggestion ?? '(Please determine the best fix)'}
 `
@@ -194,43 +215,105 @@ Please apply all these fixes to the codebase.`
 
 function SeverityBadge({ severity }: { severity: string }) {
   const config = getSeverityConfig(severity)
-  const Icon = config.icon
   return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0',
-        config.bgColor
-      )}
-    >
-      <Icon className="size-2.5" />
+    <Badge variant={config.variant} className="text-2xs">
       {config.label}
-    </span>
+    </Badge>
   )
 }
 
-/** Empty state when no review results */
-function EmptyState({ isReviewing = false }: { isReviewing?: boolean }) {
-  if (isReviewing) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="mx-auto h-10 w-10 animate-spin text-muted-foreground/60" />
-          <p className="mt-3 text-sm font-medium">Review running...</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Results will appear here when the review finishes.
-          </p>
-        </div>
-      </div>
-    )
-  }
+function ReviewHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2">
+      <span className="flex items-center gap-1.5 text-sm font-medium">
+        <MessageSquare className="size-4 text-muted-foreground" />
+        Review Findings
+      </span>
+      {children}
+    </div>
+  )
+}
+
+const REPORT_SECTIONS = [
+  { key: 'suggested_order', title: 'Suggested Order' },
+  { key: 'release_notes', title: 'Release Notes' },
+  { key: 'looked_correct', title: 'Looked Correct' },
+] as const
+
+/** Report sections that the pre-release review shows after its tables */
+function ReviewReportSections({ review }: { review: ReviewResponse }) {
+  const sections = REPORT_SECTIONS.map(section => ({
+    ...section,
+    items: (review[section.key] ?? []).filter(item => item.trim()),
+  })).filter(section => section.items.length > 0)
+  if (sections.length === 0) return null
 
   return (
-    <div className="flex h-full items-center justify-center">
-      <div className="text-center">
-        <FileCode className="mx-auto h-12 w-12 text-muted-foreground/30" />
-        <p className="mt-2 text-sm text-muted-foreground">No review results</p>
-      </div>
+    <div className="space-y-3 border-t px-4 py-3">
+      {sections.map(section => (
+        <section key={section.key} aria-label={section.title}>
+          <h4 className="mb-1 text-xs font-medium text-muted-foreground">
+            {section.title}
+          </h4>
+          <ul className="list-disc space-y-0.5 pl-4 text-xs leading-relaxed text-foreground/90 select-text">
+            {section.items.map((item, index) => (
+              // Items are plain strings and can repeat, so include the index.
+              <li key={`${index}:${item}`} className="break-words">
+                {item}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
     </div>
+  )
+}
+
+/** Empty state when no review results: running, failed, cancelled, or none */
+function EmptyState({
+  isReviewing = false,
+  status,
+  error,
+}: {
+  isReviewing?: boolean
+  status?: ReviewJobStatus
+  error?: string
+}) {
+  const failed = !isReviewing && status === 'failed'
+  const cancelled = !isReviewing && status === 'cancelled'
+  const title = isReviewing
+    ? 'Review running...'
+    : failed
+      ? 'Review failed'
+      : cancelled
+        ? 'Review cancelled'
+        : 'No review results'
+  const description = isReviewing
+    ? 'Results will appear here when the review finishes.'
+    : failed
+      ? error?.trim() || 'The reviewer returned no result.'
+      : undefined
+
+  return (
+    <Empty className="h-full p-6 md:p-6">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          {isReviewing ? (
+            <Loader2 className="animate-spin" />
+          ) : failed ? (
+            <AlertTriangle className="text-destructive" />
+          ) : (
+            <FileCode />
+          )}
+        </EmptyMedia>
+        <EmptyTitle className="text-sm">{title}</EmptyTitle>
+        {description && (
+          <EmptyDescription className="text-xs break-words select-text">
+            {description}
+          </EmptyDescription>
+        )}
+      </EmptyHeader>
+    </Empty>
   )
 }
 
@@ -314,6 +397,11 @@ export function ReviewResultsPanel({
     [reviewResults]
   )
 
+  const findingIds = useMemo(
+    () => getFindingIds(sortedFindings),
+    [sortedFindings]
+  )
+
   const fixableIndices = useMemo(
     () =>
       sortedFindings.flatMap(({ finding, originalIndex }) =>
@@ -334,13 +422,20 @@ export function ReviewResultsPanel({
     row?.scrollIntoView?.({ block: 'nearest' })
   }, [])
 
-  // Default-select all fixable findings when results/reviewer change
-  useEffect(() => {
+  // Default-select all fixable findings when results/reviewer change.
+  // State is adjusted during render so stale selections never paint; focus
+  // stays in an effect because it touches the DOM.
+  const resetKey = `${sessionId}\u0000${effectiveReviewKey}\u0000${fixableIndices.join(',')}`
+  const [prevResetKey, setPrevResetKey] = useState<string | null>(null)
+  if (prevResetKey !== resetKey) {
+    setPrevResetKey(resetKey)
     setSelected(new Set(fixableIndices))
     setExpanded(new Set())
     setActiveIndex(0)
+  }
+  useEffect(() => {
     requestAnimationFrame(() => focusActiveRow(0))
-  }, [sessionId, effectiveReviewKey, fixableIndices.join(','), focusActiveRow]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [resetKey, focusActiveRow])
 
   const handleReviewSelect = useCallback((key: string) => {
     setSelectedReviewKey(key)
@@ -392,11 +487,13 @@ export function ReviewResultsPanel({
   )
 
   const getSelectedFindings = useCallback(() => {
-    return sortedFindings.filter(
-      ({ finding, originalIndex }) =>
-        selected.has(originalIndex) && isFixableFinding(finding)
-    )
-  }, [sortedFindings, selected])
+    return sortedFindings
+      .filter(
+        ({ finding, originalIndex }) =>
+          selected.has(originalIndex) && isFixableFinding(finding)
+      )
+      .map(item => ({ ...item, id: findingIds.get(item.originalIndex) ?? '' }))
+  }, [findingIds, sortedFindings, selected])
 
   const reviewFixOptions = useMemo((): ReviewFixOptions | undefined => {
     if (!selectedReviewEntry) return undefined
@@ -439,7 +536,9 @@ export function ReviewResultsPanel({
     try {
       markSelectedFixed(selectedFindings.map(f => f.originalIndex))
       onSendFix(
-        selectedFindings.map(({ finding }) => formatFindingMessage(finding)),
+        selectedFindings.map(({ finding, id }) =>
+          formatFindingMessage(finding, id)
+        ),
         fixExecutionMode,
         reviewFixOptions
       )
@@ -539,19 +638,14 @@ export function ReviewResultsPanel({
   if (!reviewResults) {
     return (
       <div className="relative flex h-full min-w-0 flex-col overflow-hidden bg-background">
-        {reviewSelector && (
-          <div className="flex items-center gap-3 border-b px-4 py-2">
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Review
-            </span>
-            {reviewSelector}
-          </div>
-        )}
+        {reviewSelector && <ReviewHeader>{reviewSelector}</ReviewHeader>}
         <div className="min-h-0 flex-1">
           <EmptyState
             isReviewing={
               isReviewing || selectedReviewEntry?.status === 'running'
             }
+            status={selectedReviewEntry?.status}
+            error={selectedReviewEntry?.error}
           />
         </div>
       </div>
@@ -588,9 +682,6 @@ export function ReviewResultsPanel({
   })()
   const ApprovalIcon = approvalConfig.icon
 
-  const fixedCount = reviewResults.findings.filter((f, i) =>
-    isFindingFixed(f, i)
-  ).length
   const selectedCount = getSelectedFindings().length
   const hasFindings = sortedFindings.length > 0
 
@@ -602,40 +693,35 @@ export function ReviewResultsPanel({
       tabIndex={0}
       onKeyDown={handlePanelKeyDown}
     >
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="flex items-center gap-1.5 text-sm font-medium">
-            <MessageSquare className="size-4 text-muted-foreground" />
-            Review Findings
+      <ReviewHeader>
+        {reviewSelector}
+        <div className="flex items-center gap-1.5">
+          <ApprovalIcon className={cn('size-3.5', approvalConfig.color)} />
+          <span className={cn('text-xs font-medium', approvalConfig.color)}>
+            {approvalConfig.label}
           </span>
-          {reviewSelector}
-          <div className="flex items-center gap-1.5">
-            <ApprovalIcon className={cn('h-3.5 w-3.5', approvalConfig.color)} />
-            <span className={cn('text-xs font-medium', approvalConfig.color)}>
-              {approvalConfig.label}
-            </span>
-          </div>
-          {fixedCount > 0 && (
-            <span className="inline-flex items-center gap-1 rounded border border-success px-1.5 py-0 text-[10px] font-medium text-success">
-              {fixedCount} fixed
-            </span>
-          )}
         </div>
-      </div>
+      </ReviewHeader>
 
       {!hasFindings ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4">
-          <FileCode className="size-10 text-muted-foreground/30" />
-          <p className="text-sm text-muted-foreground">
-            No specific findings — code looks good!
-          </p>
-          {reviewResults.summary && (
-            <p className="max-w-md text-center text-xs text-muted-foreground">
-              {reviewResults.summary}
-            </p>
-          )}
-        </div>
+        <ScrollArea className="min-h-0 flex-1">
+          <Empty className="p-6 md:p-6">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <FileCode />
+              </EmptyMedia>
+              <EmptyTitle className="text-sm">
+                No specific findings, code looks good
+              </EmptyTitle>
+              {reviewResults.summary && (
+                <EmptyDescription className="text-xs">
+                  {reviewResults.summary}
+                </EmptyDescription>
+              )}
+            </EmptyHeader>
+          </Empty>
+          <ReviewReportSections review={reviewResults} />
+        </ScrollArea>
       ) : (
         <>
           {/* Selection controls */}
@@ -647,15 +733,15 @@ export function ReviewResultsPanel({
               {showKeyboardHints && (
                 <>
                   <span className="inline-flex items-center gap-1">
-                    <Kbd className="h-4 min-w-0 px-1 text-[10px]">↑/↓</Kbd>
+                    <Kbd className="h-4 min-w-0 px-1 text-2xs">↑/↓</Kbd>
                     move
                   </span>
                   <span className="inline-flex items-center gap-1">
-                    <Kbd className="h-4 min-w-0 px-1 text-[10px]">↵</Kbd>
+                    <Kbd className="h-4 min-w-0 px-1 text-2xs">↵</Kbd>
                     expand
                   </span>
                   <span className="inline-flex items-center gap-1">
-                    <Kbd className="h-4 min-w-0 px-1 text-[10px]">Space</Kbd>
+                    <Kbd className="h-4 min-w-0 px-1 text-2xs">Space</Kbd>
                     select
                   </span>
                 </>
@@ -682,10 +768,10 @@ export function ReviewResultsPanel({
                 const isActive = safeActiveIndex === listIndex
                 const canSelect = isFixableFinding(finding)
                 const lineInfo = finding.line ? `:${finding.line}` : ''
-                const severityConfig = getSeverityConfig(finding.severity)
-                const SeverityIcon = severityConfig.icon
+                const findingId = findingIds.get(originalIndex)
 
                 return (
+                  // react-doctor-disable-next-line react-doctor/no-static-element-interactions -- pointer mirror of the panel's handlePanelKeyDown roving navigation; checkbox/expand are real controls
                   <div
                     key={getReviewFindingKey(finding, originalIndex)}
                     ref={node => {
@@ -723,12 +809,9 @@ export function ReviewResultsPanel({
                             ) : (
                               <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
                             )}
-                            <SeverityIcon
-                              className={cn(
-                                'size-3.5 shrink-0',
-                                severityConfig.color
-                              )}
-                            />
+                            <span className="shrink-0 font-mono text-xs font-medium text-muted-foreground">
+                              {findingId}
+                            </span>
                             <p className="min-w-0 flex-1 truncate text-sm text-foreground">
                               {finding.title}
                             </p>
@@ -747,6 +830,32 @@ export function ReviewResultsPanel({
                                 {formatReviewMetadata(finding.category)}
                               </span>
                             )}
+                            {finding.introduced_by_diff !== undefined && (
+                              <span
+                                className={cn(
+                                  'shrink-0',
+                                  finding.introduced_by_diff
+                                    ? 'text-warning'
+                                    : 'text-muted-foreground/70'
+                                )}
+                              >
+                                {finding.introduced_by_diff
+                                  ? 'Regression'
+                                  : 'Old bug'}
+                              </span>
+                            )}
+                            {finding.verified !== undefined && (
+                              <span
+                                className={cn(
+                                  'shrink-0',
+                                  finding.verified
+                                    ? 'text-success'
+                                    : 'text-muted-foreground/70'
+                                )}
+                              >
+                                {finding.verified ? 'Verified' : 'Unverified'}
+                              </span>
+                            )}
                           </div>
                         </button>
 
@@ -758,7 +867,7 @@ export function ReviewResultsPanel({
 
                             {finding.failure_scenario && (
                               <div>
-                                <h4 className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                                <h4 className="mb-1 text-xs font-medium text-muted-foreground">
                                   Failure Scenario
                                 </h4>
                                 <p className="break-words text-sm leading-relaxed text-foreground/90 select-text">
@@ -767,9 +876,20 @@ export function ReviewResultsPanel({
                               </div>
                             )}
 
+                            {finding.base_behavior?.trim() && (
+                              <div>
+                                <h4 className="mb-1 text-xs font-medium text-muted-foreground">
+                                  Base Branch Behavior
+                                </h4>
+                                <p className="break-words text-sm leading-relaxed text-foreground/90 select-text">
+                                  {finding.base_behavior}
+                                </p>
+                              </div>
+                            )}
+
                             {finding.suggestion && (
                               <div>
-                                <h4 className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                                <h4 className="mb-1 text-xs font-medium text-muted-foreground">
                                   Suggested Fix
                                 </h4>
                                 <pre className="whitespace-pre-wrap break-words rounded-md border bg-muted/50 p-2 text-xs font-mono text-foreground/80 select-text">
@@ -780,26 +900,15 @@ export function ReviewResultsPanel({
 
                             <div className="flex flex-wrap gap-1.5">
                               {finding.confidence && (
-                                <span className="rounded border px-1.5 py-0 text-[10px] text-muted-foreground">
+                                <Badge variant="subtle" className="text-2xs">
                                   {formatReviewMetadata(finding.confidence)}{' '}
                                   confidence
-                                </span>
+                                </Badge>
                               )}
                               {finding.blocking === true && (
-                                <span className="rounded border border-destructive px-1.5 py-0 text-[10px] text-destructive">
+                                <Badge variant="danger" className="text-2xs">
                                   Blocking
-                                </span>
-                              )}
-                              {finding.introduced_by_diff === true && (
-                                <span className="rounded border px-1.5 py-0 text-[10px] text-muted-foreground">
-                                  Introduced by diff
-                                </span>
-                              )}
-                              {isFixed && (
-                                <span className="inline-flex items-center gap-1 rounded border border-success px-1.5 py-0 text-[10px] text-success">
-                                  <CheckCircle2 className="size-3" />
-                                  Fix sent
-                                </span>
+                                </Badge>
                               )}
                             </div>
                           </div>
@@ -810,6 +919,7 @@ export function ReviewResultsPanel({
                 )
               })}
             </div>
+            <ReviewReportSections review={reviewResults} />
           </ScrollArea>
 
           {/* Summary */}
@@ -836,9 +946,9 @@ export function ReviewResultsPanel({
               )}
               Send to Chat ({selectedCount})
               {showKeyboardHints && (
-                <KbdGroup className="ml-1.5">
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">⇧</Kbd>
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">⌘↵</Kbd>
+                <KbdGroup modHint className="ml-1.5">
+                  <Kbd className="h-4 min-w-4 px-1 text-2xs">⇧</Kbd>
+                  <Kbd className="h-4 min-w-4 px-1 text-2xs">⌘↵</Kbd>
                 </KbdGroup>
               )}
             </Button>
@@ -854,9 +964,9 @@ export function ReviewResultsPanel({
               )}
               Send Separately ({selectedCount})
               {showKeyboardHints && (
-                <KbdGroup className="ml-1.5">
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">⌘</Kbd>
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">↵</Kbd>
+                <KbdGroup modHint className="ml-1.5">
+                  <Kbd className="h-4 min-w-4 px-1 text-2xs">⌘</Kbd>
+                  <Kbd className="h-4 min-w-4 px-1 text-2xs">↵</Kbd>
                 </KbdGroup>
               )}
             </Button>

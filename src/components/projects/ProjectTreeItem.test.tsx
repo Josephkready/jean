@@ -199,6 +199,24 @@ describe('ProjectTreeItem', () => {
     ).not.toBeInTheDocument()
   })
 
+  // #912: a badge after the sync control pushed it left when it appeared.
+  it('places the workspace count before the base sync control', () => {
+    mocks.worktrees = [{ ...worktree, cached_base_branch_behind_count: 4 }]
+    useProjectsStore.setState({
+      selectedProjectId: null,
+      selectedWorktreeId: null,
+      expandedProjectIds: new Set(),
+    })
+
+    render(<ProjectTreeItem project={project} />)
+
+    const count = screen.getByRole('status', { name: '1 workspace' })
+    const sync = screen.getByRole('button', { name: '4' })
+    expect(
+      count.compareDocumentPosition(sync) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
   it('hides the count when workspaces are shown', () => {
     render(<ProjectTreeItem project={{ ...project, worktree_count: 1 }} />)
 
@@ -206,32 +224,6 @@ describe('ProjectTreeItem', () => {
       screen.queryByRole('status', { name: '1 workspace' })
     ).not.toBeInTheDocument()
     expect(screen.getByTestId('worktree-list')).toBeInTheDocument()
-  })
-
-  it('loads and shows worktrees that match the sidebar search', () => {
-    useProjectsStore.setState({
-      selectedProjectId: null,
-      selectedWorktreeId: null,
-      expandedProjectIds: new Set(),
-    })
-
-    render(<ProjectTreeItem project={project} searchQuery="feature" />)
-
-    expect(mocks.worktreeQueryOptions.at(-1)).toEqual({ enabled: true })
-    expect(screen.getByTestId('project-row-project-1')).toBeInTheDocument()
-    expect(screen.getByTestId('worktree-list')).toBeInTheDocument()
-  })
-
-  it('hides projects that do not match the sidebar search', () => {
-    useProjectsStore.setState({
-      selectedProjectId: null,
-      selectedWorktreeId: null,
-      expandedProjectIds: new Set(),
-    })
-
-    render(<ProjectTreeItem project={project} searchQuery="missing" />)
-
-    expect(screen.queryByTestId('project-row-project-1')).toBeNull()
   })
 
   it('opens project canvas when the project has no worktrees', async () => {

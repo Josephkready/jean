@@ -1,4 +1,5 @@
 import { useCallback } from 'react'
+import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -14,9 +15,7 @@ import {
   type AgentDelegation,
   type AgentSummary,
 } from '@/services/agents'
-import { useChatStore } from '@/store/chat-store'
-import { useProjectsStore } from '@/store/projects-store'
-import { useUIStore } from '@/store/ui-store'
+import { openSessionInWorktree } from '@/components/chat/open-session'
 import { AgentQuestionCard } from './AgentQuestionCard'
 import { useAgentsEnabledServers } from './agents-feature'
 import {
@@ -25,30 +24,16 @@ import {
   latestChangeIdForTarget,
 } from './agent-changes'
 import {
-  AgentBadge,
   AgentEmpty,
   AgentList,
+  AgentLoading,
   AgentNotice,
   AgentSection,
   AgentTabBody,
-  statusTone,
+  statusVariant,
+  AGENT_ROW,
 } from './agent-ui'
-
-/** "5m ago" / "in 2h" for unix seconds. */
-export function formatRelative(unixSeconds: number, now = Date.now()): string {
-  const diff = Math.round(unixSeconds - now / 1000)
-  const abs = Math.abs(diff)
-  const value =
-    abs < 60
-      ? `${abs}s`
-      : abs < 3600
-        ? `${Math.round(abs / 60)}m`
-        : abs < 86_400
-          ? `${Math.round(abs / 3600)}h`
-          : `${Math.round(abs / 86_400)}d`
-  if (abs < 5) return 'now'
-  return diff > 0 ? `in ${value}` : `${value} ago`
-}
+import { formatRelative } from '@/lib/relative-time'
 
 /** One line that says what an approval will do, with names, not IDs. */
 export function describeApproval(
@@ -72,15 +57,24 @@ export function describeApproval(
           : 'Update agent'
     return `${verb} ${who}`
   }
+  if (approval.tool === 'set_connector') {
+    const verb = text('action') === 'disable' ? 'Disable' : 'Enable'
+    const scope = text('scope')
+    const where =
+      scope === 'global'
+        ? 'for all sessions'
+        : scope === 'project'
+          ? targetName
+            ? `for project ${targetName}`
+            : 'for a project'
+          : 'for an agent'
+    return `${verb} MCP server ${text('backend')}:${text('name')} ${where}`
+  }
   // A deleted worktree has no name to look up: fall back to its folder name
   const target =
     targetName ?? text('worktreePath').split(/[\\/]/).filter(Boolean).pop()
   const labels: Record<string, [string, string]> = {
     delete_worktree: ['Delete worktree', 'Delete a worktree'],
-    permanently_delete_worktree: [
-      'Permanently delete worktree',
-      'Permanently delete a worktree',
-    ],
     push_worktree: ['Push worktree', 'Push a worktree'],
     merge_pull_request: [
       'Merge the pull request of',
@@ -102,17 +96,20 @@ const DENY = 'Deny'
 
 function useDecide(approval: AgentApproval) {
   const decide = useDecideAgentApproval()
-  const run = (approve: boolean) =>
+  const run = (approve: boolean) => {
+    // Approving runs the tool before the reply comes back (a pull request can take a while)
+    const id = toast.loading(approve ? 'Approved. Running…' : 'Denying…')
     decide.mutate(
       { agentId: approval.agentId, approvalId: approval.id, approve },
       {
         onSuccess: result =>
           result.status === 'failed'
-            ? toast.error(`It failed: ${result.result}`)
-            : toast.success(approve ? 'Approved' : 'Denied'),
-        onError: e => toast.error(`Failed: ${e}`),
+            ? toast.error(`It failed: ${result.result}`, { id })
+            : toast.success(approve ? 'Approved' : 'Denied', { id }),
+        onError: e => toast.error(`Failed: ${e}`, { id }),
       }
     )
+  }
   return { run, isPending: decide.isPending }
 }
 
@@ -134,16 +131,21 @@ function ApprovalRow({ approval }: { approval: AgentApproval }) {
   const targetName = useTargetName(approval)
   const run = decide.run
   return (
-    <li className="flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center">
+    <li
+      className={cn(
+        AGENT_ROW,
+        'flex flex-col gap-2 sm:flex-row sm:items-center'
+      )}
+    >
       <div className="min-w-0 flex-1">
         <p className="text-sm text-foreground">
           {describeApproval(approval, targetName)}
         </p>
         {approval.status !== 'pending' && (
           <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <AgentBadge tone={statusTone(approval.status)}>
+            <Badge variant={statusVariant(approval.status)}>
               {approval.status}
-            </AgentBadge>
+            </Badge>
             {approval.result ? (
               <span
                 className={cn(
@@ -204,45 +206,29 @@ function ApprovalQuestion({ approval }: { approval: AgentApproval }) {
   const targetName = useTargetName(approval)
   const pending = approval.status === 'pending'
   return (
-    <AgentQuestionCard
-      question={{
-        question: `${describeApproval(approval, targetName)}?`,
-        options: [APPROVE, DENY],
-        multiple: false,
-      }}
-      answer={
-        pending ? undefined : approval.status === 'denied' ? DENY : APPROVE
-      }
-      disabled={decide.isPending}
-      onSend={answer => decide.run(answer === APPROVE)}
-    >
+    <>
+      <AgentQuestionCard
+        id={`approval-${approval.id}`}
+        question={{
+          question: `${describeApproval(approval, targetName)}?`,
+          options: [APPROVE, DENY],
+          multiple: false,
+        }}
+        answer={
+          pending ? undefined : approval.status === 'denied' ? DENY : APPROVE
+        }
+        disabled={decide.isPending}
+        onSend={answer => decide.run(answer === APPROVE)}
+      />
+      {decide.isPending && (
+        <p className="text-xs text-muted-foreground">Running…</p>
+      )}
       {approval.status === 'failed' && (
         <p className="text-xs text-destructive">
           It failed: {approval.result ?? 'unknown error'}
         </p>
       )}
-    </AgentQuestionCard>
-  )
-}
-
-/** Pending approvals above the agent chat. */
-export function PendingApprovals({ agentId }: { agentId: string }) {
-  const { data } = useAgentDetails(agentId)
-  const pending = data?.approvals.filter(a => a.status === 'pending') ?? []
-  if (pending.length === 0) return null
-  return (
-    <div className="shrink-0 border-b bg-amber-500/5 px-4 py-3">
-      <div className="mx-auto flex max-w-3xl flex-col gap-2">
-        <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
-          The agent waits for your approval
-        </p>
-        <AgentList className="bg-background">
-          {pending.map(approval => (
-            <ApprovalRow key={approval.id} approval={approval} />
-          ))}
-        </AgentList>
-      </div>
-    </div>
+    </>
   )
 }
 
@@ -257,22 +243,11 @@ function DelegationRow({ delegation }: { delegation: AgentDelegation }) {
   )
 
   const open = useCallback(() => {
-    if (!worktree) return
-    const { selectProject, selectWorktree } = useProjectsStore.getState()
-    selectProject(worktree.project_id)
-    selectWorktree(worktree.id)
-    const chat = useChatStore.getState()
-    chat.registerWorktreePath(worktree.id, worktree.path)
-    chat.clearActiveWorktree()
-    chat.setActiveSession(worktree.id, delegation.sessionId)
-    const ui = useUIStore.getState()
-    ui.markWorktreeForAutoOpenSession(worktree.id, delegation.sessionId)
-    // Leave the Agents page so the project canvas can open the session
-    ui.setRailSection('workspace')
+    if (worktree) openSessionInWorktree(worktree, delegation.sessionId)
   }, [worktree, delegation.sessionId])
 
   return (
-    <li className="flex items-start gap-3 px-3 py-2.5">
+    <li className={cn(AGENT_ROW, 'flex items-start gap-2')}>
       <div className="min-w-0 flex-1">
         <p className="flex items-center gap-2 text-sm">
           <span className="truncate text-foreground">
@@ -280,10 +255,10 @@ function DelegationRow({ delegation }: { delegation: AgentDelegation }) {
               ? 'Agent request'
               : (worktree?.name ?? delegation.worktreeId)}
           </span>
-          <AgentBadge tone={statusTone(delegation.status)}>
+          <Badge variant={statusVariant(delegation.status)}>
             {delegation.status}
-          </AgentBadge>
-          <span className="shrink-0 text-xs text-muted-foreground">
+          </Badge>
+          <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
             {formatRelative(delegation.updatedAt)}
           </span>
         </p>
@@ -294,7 +269,12 @@ function DelegationRow({ delegation }: { delegation: AgentDelegation }) {
         ) : null}
       </div>
       {worktree && (
-        <Button size="sm" variant="ghost" onClick={open}>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 text-xs"
+          onClick={open}
+        >
           Open
         </Button>
       )}
@@ -314,10 +294,15 @@ function ChangeRow({
   const revert = useRevertAgentChange()
   const detail = agentChangeDetail(change)
   return (
-    <li className="flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center">
+    <li
+      className={cn(
+        AGENT_ROW,
+        'flex flex-col gap-2 sm:flex-row sm:items-center'
+      )}
+    >
       <div className="min-w-0 flex-1">
         <p className="text-sm text-foreground">{change.summary}</p>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-2xs text-muted-foreground">
           {agentChangeActorLabel(change.actorAgentId)} ·{' '}
           {formatRelative(change.createdAt)}
         </p>
@@ -328,7 +313,8 @@ function ChangeRow({
       {canRevert && (
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
+          className="h-7 self-start text-xs sm:self-auto"
           disabled={revert.isPending}
           onClick={() => {
             const id = toast.loading('Reverting change…')
@@ -380,9 +366,9 @@ export function AgentActivity({ agent }: { agent: AgentSummary }) {
   const { data, isLoading } = useAgentDetails(agent.id)
   if (isLoading || !data) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        Loading activity…
-      </div>
+      <AgentTabBody>
+        <AgentLoading label="Loading activity…" />
+      </AgentTabBody>
     )
   }
   const pending = data.approvals.filter(a => a.status === 'pending')

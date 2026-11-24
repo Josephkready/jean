@@ -24,7 +24,7 @@ For more information, take a look at [jean.build](https://jean.build).
 
 <table>
 <tr>
-<td><img src="screenshots/recent-sessions.webp" width="400" alt="Recent tab with sessions from many projects, next to parallel session tabs" /><br /><sub><b>Recent sessions & parallel agents</b></sub></td>
+<td><img src="screenshots/recent-sessions.webp" width="400" alt="Agent session with a recap, next to a second session tab" /><br /><sub><b>Parallel sessions with recaps</b></sub></td>
 <td><img src="screenshots/terminal.webp" width="400" alt="Terminal panel next to an agent session" /><br /><sub><b>Built-in terminal</b></sub></td>
 </tr>
 <tr>
@@ -49,7 +49,7 @@ For more information, take a look at [jean.build](https://jean.build).
 - **Opinionated Plugins** - One-click RTK (cuts tool-output tokens 60-90%) and Caveman (terse Claude replies)
 - **Local + Remote** - Add any number of `jean-server` instances to the desktop app (or install one over SSH); their projects appear next to your local ones and every action runs on the server that owns the project
 - **Web Access** - Every Jean instance (desktop or headless server) can serve the full UI over HTTP/WebSocket with token auth, including on phones
-- **Customization** - Themes (light/dark/system), custom fonts, configurable keybindings, mobile swipe gestures
+- **Customization** - Themes (light/dark/system, plus imported [custom colour themes](docs/custom-themes.md)), custom fonts, configurable keybindings, mobile swipe gestures
 
 ## Installation
 

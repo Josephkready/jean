@@ -9,12 +9,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import {
-  ChevronRight,
-  Loader2,
-  Activity,
-  Brain,
-} from '@/components/icons/reicon'
+import { ChevronRight, Activity, Brain } from '@/components/icons/reicon'
 import { Markdown } from '@/components/ui/markdown'
 import {
   REVEAL_CHAT_MESSAGE_EVENT,
@@ -31,7 +26,6 @@ import type {
   Question,
   QuestionAnswer,
   ReviewFinding,
-  ToolCall,
 } from '@/types/chat'
 import {
   getAskUserQuestions,
@@ -41,13 +35,21 @@ import {
   normalizeQuestionMultipleField,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
-import { ReplyBubbles } from './ReplyBubble'
+import { ReplyBubble, ReplyBubbles } from './ReplyBubble'
 import { getProviderChangeBeforeMessage } from './message-settings-labels'
 import { ProviderChangeSeparator } from './ProviderChangeSeparator'
-import { EditedFilesDisplay } from './EditedFilesDisplay'
-import { parseServerResourceKey } from '@/lib/server-resource'
 import { AskUserQuestion } from './AskUserQuestion'
+import { SecretRequestGroup } from './SecretRequestCard'
+import { SecretListCard } from './SecretListCard'
+import {
+  isSecretListTool,
+  isSecretRequestTool,
+  isSecretSavedMessage,
+  secretRequest,
+} from './secret-request'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
+import { findTurnPrompt } from './user-prompt-chrome'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import {
   assistantTextParts,
   buildTimeline,
@@ -70,23 +72,16 @@ import {
 import {
   TOOL_CALL_ROW_CLASS,
   TOOL_CALL_DETAIL_PILL_CLASS,
+  TOOL_CALL_LABEL_CLASS,
   summarizeToolCall,
 } from './ToolCallInline'
-import type { VirtualizedMessageListHandle } from './VirtualizedMessageList'
-import {
-  capturePrependScrollAnchor,
-  restorePrependScrollAnchor,
-  type PrependScrollAnchor,
-} from './message-scroll-anchor'
+import type { MessageListHandle } from './message-list-handle'
 import {
   RECAP_HEADING_RE,
   extractRecapSection,
   stripRecapFromMessage,
 } from './recap-utils'
 import { OPEN_SCROLL_ANCHOR_ATTR } from './open-scroll-target'
-
-const SCROLL_THRESHOLD = 300
-const EMPTY_TOOL_CALLS: ToolCall[] = []
 
 interface CompactMessageListProps {
   messages: ChatMessage[]
@@ -131,12 +126,6 @@ interface CompactMessageListProps {
   shouldScrollToBottom?: boolean
   onScrollToBottomHandled?: () => void
   completedDurationMs?: number | null
-  hasOlderOnDisk?: boolean
-  isLoadingOlder?: boolean
-  onLoadOlderRuns?: () => void
-  loadedRunStartIndex?: number
-  hiddenPromptCount?: number
-  onShowHiddenPrompts?: () => void
   /** Show only assistant prose: no tool activity rows or edited files */
   hideToolActivity?: boolean
   /** Sends a user message to this session (answers to `ask_user` questions) */
@@ -171,7 +160,11 @@ function messageContainsPlan(message: ChatMessage): boolean {
 }
 
 function messageContainsQuestion(message: ChatMessage): boolean {
-  return Boolean(message.tool_calls?.some(isAskUserQuestion))
+  return Boolean(
+    message.tool_calls?.some(
+      tc => isAskUserQuestion(tc) || secretRequest(tc) || isSecretListTool(tc)
+    )
+  )
 }
 
 type SteerSegment =
@@ -308,14 +301,16 @@ function findLatestAssistantText(
 }
 
 /**
- * Returns a clone of `message` with all AskUserQuestion tool calls / blocks
- * removed so {@link MessageItem} can render the surrounding timeline without
+ * Returns a clone of `message` with all AskUserQuestion and `request_secret`
+ * tool calls / blocks removed so {@link MessageItem} can render the surrounding timeline without
  * duplicating the question UI we render separately.
  */
 function stripQuestionsFromMessage(message: ChatMessage): ChatMessage {
   const questionIds = new Set(
     (message.tool_calls ?? []).flatMap(tc =>
-      isAskUserQuestion(tc) ? [tc.id] : []
+      isAskUserQuestion(tc) || isSecretRequestTool(tc) || isSecretListTool(tc)
+        ? [tc.id]
+        : []
     )
   )
   if (questionIds.size === 0) return message
@@ -401,7 +396,6 @@ interface CompactActivityRowProps {
       hasFollowUpMessage: boolean
       durationMs: number | null
       hideCancelledIndicator?: boolean
-      hideEditedFiles?: boolean
     }
   ) => React.ReactNode
   hasFollowUpFor: (globalIndex: number) => boolean
@@ -410,7 +404,6 @@ interface CompactActivityRowProps {
    * strip it from the latest assistant message inside the expanded body to
    * avoid duplicating the recap. */
   recapShownExternally?: boolean
-  editedFilesShownExternally?: boolean
 }
 
 const CompactActivityRow = memo(function CompactActivityRow({
@@ -420,7 +413,6 @@ const CompactActivityRow = memo(function CompactActivityRow({
   hasFollowUpFor,
   durationFor,
   recapShownExternally,
-  editedFilesShownExternally,
 }: CompactActivityRowProps) {
   const [isOpen, setIsOpen] = useState(false)
   // "Show in chat" on a pinned table opens the row that holds its message.
@@ -476,19 +468,14 @@ const CompactActivityRow = memo(function CompactActivityRow({
       onOpenChange={setIsOpen}
       className="group/message min-w-0 pb-4"
     >
-      <div
-        className={
-          'rounded-md border border-border/50 bg-muted/30 min-w-0' +
-          (isOpen ? ' bg-muted/50' : '')
-        }
-      >
+      <div className="min-w-0">
         <CollapsibleTrigger className={TOOL_CALL_ROW_CLASS}>
           {summary.isThinking ? (
             <Brain className="h-3.5 w-3.5 shrink-0 opacity-70" />
           ) : (
             <Activity className="h-3.5 w-3.5 shrink-0 opacity-70" />
           )}
-          <span className="font-medium shrink-0 flex-none whitespace-nowrap">
+          <span className={TOOL_CALL_LABEL_CLASS} title={summary.label}>
             {summary.label}
           </span>
           {summary.detail && (
@@ -511,14 +498,14 @@ const CompactActivityRow = memo(function CompactActivityRow({
           </span>
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <div className="border-t border-border/50 p-3 space-y-4">
+          <div className="p-3 space-y-4">
             {renderGroup.map(item => (
               <div key={item.message.id}>
                 {renderMessage(item, {
                   hasFollowUpMessage: hasFollowUpFor(item.globalIndex),
-                  durationMs: durationFor(item.globalIndex, item.message),
+                  // The row shows the turn's timing once, below the group
+                  durationMs: null,
                   hideCancelledIndicator: hasCancelledMessage,
-                  hideEditedFiles: editedFilesShownExternally,
                 })}
               </div>
             ))}
@@ -582,6 +569,8 @@ interface CompactQuestionMessageProps {
   hasFollowUpFor: (globalIndex: number) => boolean
   durationFor: (globalIndex: number, message: ChatMessage) => number | null
   hideToolActivity: boolean
+  isSending: boolean
+  onSendAnswer?: (text: string) => void
 }
 
 /**
@@ -607,6 +596,8 @@ function CompactQuestionMessage({
   hasFollowUpFor,
   durationFor,
   hideToolActivity,
+  isSending,
+  onSendAnswer,
 }: CompactQuestionMessageProps) {
   const stripped = useMemo(() => stripQuestionsFromMessage(message), [message])
 
@@ -617,6 +608,20 @@ function CompactQuestionMessage({
       item.type === 'askUserQuestion' ? [item] : []
     )
   }, [message])
+
+  const secretRequests = useMemo(
+    () =>
+      (message.tool_calls ?? []).flatMap(tool => {
+        const request = secretRequest(tool)
+        return request ? [{ id: tool.id, request }] : []
+      }),
+    [message]
+  )
+
+  const showsSecretList = useMemo(
+    () => (message.tool_calls ?? []).some(isSecretListTool),
+    [message]
+  )
 
   const hasNonQuestionContent = useMemo(() => {
     if (stripped.tool_calls && stripped.tool_calls.length > 0) return true
@@ -695,6 +700,16 @@ function CompactQuestionMessage({
           />
         )
       })}
+      {secretRequests.length > 0 && (
+        <SecretRequestGroup
+          sessionId={sessionId}
+          requests={secretRequests}
+          answered={hasFollowUpMessage}
+          disabled={isSending}
+          onSend={onSendAnswer}
+        />
+      )}
+      {showsSecretList && <SecretListCard sessionId={sessionId} />}
       {durationMs != null && durationMs > 0 && (
         <span className="mt-1 block min-h-4 text-xs leading-4 text-muted-foreground/40 tabular-nums font-mono">
           <MessageTiming
@@ -708,7 +723,7 @@ function CompactQuestionMessage({
 }
 
 /**
- * Compact replacement for {@link import('./VirtualizedMessageList').VirtualizedMessageList}
+ * Chat message list
  * used when the `compact_chat_view_enabled` preference is on.
  *
  * Behaviour:
@@ -723,7 +738,7 @@ function CompactQuestionMessage({
  *    on click to reveal the buffered messages.
  */
 export const CompactMessageList = memo(
-  forwardRef<VirtualizedMessageListHandle, CompactMessageListProps>(
+  forwardRef<MessageListHandle, CompactMessageListProps>(
     function CompactMessageList(
       {
         messages,
@@ -759,20 +774,12 @@ export const CompactMessageList = memo(
         shouldScrollToBottom,
         onScrollToBottomHandled,
         completedDurationMs,
-        hasOlderOnDisk = false,
-        isLoadingOlder = false,
-        onLoadOlderRuns,
-        loadedRunStartIndex = 0,
-        hiddenPromptCount = 0,
-        onShowHiddenPrompts,
         hideToolActivity = false,
         onSendAnswer,
       },
       ref
     ) {
       const messageRefs = useRef(new Map<number, HTMLDivElement>())
-      const pendingPrependAnchorRef = useRef<PrependScrollAnchor | null>(null)
-      const pendingPrependMessagesLengthRef = useRef<number | null>(null)
 
       // Stable accessor for the full message list. Kept in a ref so the
       // identity handed to memoized rows never changes — "subsequent edits"
@@ -784,7 +791,6 @@ export const CompactMessageList = memo(
       const getMessages = useCallback(() => messagesRef.current, [])
 
       const lastIndex = messages.length - 1
-      const hasHiddenPrompts = hiddenPromptCount > 0 && !!onShowHiddenPrompts
 
       const hasFollowUpMap = useMemo(() => {
         const map = new Map<number, boolean>()
@@ -914,6 +920,7 @@ export const CompactMessageList = memo(
         messages.forEach((message, globalIndex) => {
           if (message.role === 'user') {
             flush()
+            if (isSecretSavedMessage(message.content)) return
             items.push({ kind: 'message', message, globalIndex })
             return
           }
@@ -944,31 +951,6 @@ export const CompactMessageList = memo(
         return items
       }, [messages, lastIndex, hasFollowUpMap])
 
-      // Tool calls of the latest compact group, surfaced as edited files
-      // under the row. Memoized so EditedFilesDisplay gets a stable array.
-      const latestCompactToolCalls = useMemo(() => {
-        const last = renderItems[renderItems.length - 1]
-        if (!last || last.kind !== 'compact') return EMPTY_TOOL_CALLS
-        return last.messages.flatMap(({ message }) => message.tool_calls ?? [])
-      }, [renderItems])
-
-      // Once the latest turn finishes, its surfaced edited files also list
-      // the turn checkpoint's changes made without file tools (e.g. Bash).
-      const latestTurnUserMessageId = useMemo(() => {
-        if (isSending) return undefined
-        const last = renderItems[renderItems.length - 1]
-        if (!last || last.kind !== 'compact') return undefined
-        const firstIndex = last.messages[0]?.globalIndex ?? 0
-        for (let i = firstIndex - 1; i >= 0; i--) {
-          const message = messages[i]
-          if (message?.role === 'user') return message.id
-        }
-        return undefined
-      }, [renderItems, messages, isSending])
-      const ownerServerId = parseServerResourceKey(
-        worktreeId ?? sessionId
-      )?.serverId
-
       const renderMessageItem = useCallback(
         (
           item: { message: ChatMessage; globalIndex: number },
@@ -976,8 +958,9 @@ export const CompactMessageList = memo(
             hasFollowUpMessage: boolean
             durationMs: number | null
             hideCancelledIndicator?: boolean
-            hideEditedFiles?: boolean
             bubble?: boolean
+            /** Only for messages shown on their own, not inside a compact row */
+            onSendAnswer?: (text: string) => void
           }
         ) => (
           <MessageItem
@@ -1018,10 +1001,10 @@ export const CompactMessageList = memo(
             onCopyToInput={onCopyToInput}
             hideApproveButtons={hideApproveButtons}
             hideCancelledIndicator={extra.hideCancelledIndicator}
-            hideEditedFiles={extra.hideEditedFiles}
             bubble={extra.bubble}
             hideSettingsBadges={hideToolActivity}
             durationMs={extra.durationMs}
+            onSendAnswer={extra.onSendAnswer}
           />
         ),
         [
@@ -1058,73 +1041,25 @@ export const CompactMessageList = memo(
         ]
       )
 
-      const loadOlder = useCallback(() => {
-        const container = scrollContainerRef.current
-        if (
-          !container ||
-          !hasOlderOnDisk ||
-          isLoadingOlder ||
-          !onLoadOlderRuns ||
-          pendingPrependMessagesLengthRef.current !== null
-        ) {
-          return
-        }
-        pendingPrependAnchorRef.current = capturePrependScrollAnchor(container)
-        pendingPrependMessagesLengthRef.current = messages.length
-        onLoadOlderRuns()
-      }, [
-        scrollContainerRef,
-        hasOlderOnDisk,
-        isLoadingOlder,
-        onLoadOlderRuns,
-        messages.length,
-      ])
-
-      // Restore scroll position after older messages prepend.
+      // Scroll-to-bottom on new message arrival. Layout effect pins before
+      // paint, so a sent prompt never paints below the fold first. Pin the
+      // container (not the last message): content below the last message, such
+      // as the prompt top spacer, belongs to the tail too.
+      const prevMessageCountRef = useRef(messages.length)
       useLayoutEffect(() => {
         const container = scrollContainerRef.current
-        const anchor = pendingPrependAnchorRef.current
-        const prevLen = pendingPrependMessagesLengthRef.current
-        if (!container || prevLen === null) return
-        if (isLoadingOlder) return
-
-        pendingPrependAnchorRef.current = null
-        pendingPrependMessagesLengthRef.current = null
-
-        if (messages.length === prevLen) return
-
-        restorePrependScrollAnchor(container, anchor)
-      }, [scrollContainerRef, isLoadingOlder, messages.length])
-
-      // Scroll-to-top auto-load.
-      useEffect(() => {
-        const container = scrollContainerRef.current
-        if (!container || !hasOlderOnDisk || hasHiddenPrompts) return
-        const handleScroll = () => {
-          if (container.scrollTop < SCROLL_THRESHOLD) loadOlder()
-        }
-        container.addEventListener('scroll', handleScroll, { passive: true })
-        return () => container.removeEventListener('scroll', handleScroll)
-      }, [scrollContainerRef, hasOlderOnDisk, hasHiddenPrompts, loadOlder])
-
-      // Scroll-to-bottom on new message arrival.
-      const prevMessageCountRef = useRef(messages.length)
-      useEffect(() => {
         if (
+          container &&
           shouldScrollToBottom &&
-          pendingPrependMessagesLengthRef.current === null &&
           messages.length > prevMessageCountRef.current
         ) {
-          const lastEl = messageRefs.current.get(lastIndex)
-          if (lastEl) {
-            lastEl.scrollIntoView({ behavior: 'instant', block: 'end' })
-            onScrollToBottomHandled?.()
-          }
+          container.scrollTop = container.scrollHeight
+          onScrollToBottomHandled?.()
         }
         prevMessageCountRef.current = messages.length
       }, [
+        scrollContainerRef,
         messages.length,
-        lastIndex,
         shouldScrollToBottom,
         onScrollToBottomHandled,
       ])
@@ -1159,24 +1094,6 @@ export const CompactMessageList = memo(
 
       return (
         <div className="flex flex-col w-full">
-          {!hasHiddenPrompts && hasOlderOnDisk && (
-            <button
-              type="button"
-              onClick={loadOlder}
-              disabled={isLoadingOlder}
-              className="w-full text-center text-muted-foreground text-xs py-2 opacity-60 hover:opacity-100 transition-opacity cursor-pointer disabled:cursor-wait"
-            >
-              {isLoadingOlder ? (
-                <span className="inline-flex items-center gap-2">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  Loading old prompts…
-                </span>
-              ) : (
-                `↑ Load old prompts (${loadedRunStartIndex} older runs on disk)`
-              )}
-            </button>
-          )}
-
           {renderItems.map(item => {
             if (item.kind === 'message') {
               const hasFollowUpMessage =
@@ -1188,6 +1105,9 @@ export const CompactMessageList = memo(
                 <div
                   key={item.message.id}
                   data-message-anchor-id={item.message.id}
+                  data-user-prompt={
+                    item.message.role === 'user' ? true : undefined
+                  }
                   ref={el => {
                     if (el) messageRefs.current.set(item.globalIndex, el)
                     else messageRefs.current.delete(item.globalIndex)
@@ -1238,6 +1158,8 @@ export const CompactMessageList = memo(
                     hasFollowUpFor={hasFollowUpFor}
                     durationFor={durationFor}
                     hideToolActivity={hideToolActivity}
+                    isSending={isSending}
+                    onSendAnswer={onSendAnswer}
                   />
                 </div>
               )
@@ -1248,24 +1170,11 @@ export const CompactMessageList = memo(
                 <div key={item.key} className="pb-4">
                   <SteeredPromptGroup
                     texts={item.texts}
+                    bubble={hideToolActivity}
+                    settings={findTurnPrompt(messages, item.globalIndex)}
                     worktreePath={worktreePath}
-                    onCopyText={
-                      onCopyToInput
-                        ? text =>
-                            onCopyToInput({
-                              id: `${item.messageId}-steered-copy`,
-                              session_id:
-                                messages[item.globalIndex]?.session_id ??
-                                sessionId,
-                              role: 'user',
-                              content: text,
-                              timestamp:
-                                messages[item.globalIndex]?.timestamp ??
-                                Date.now(),
-                              content_blocks: [],
-                              tool_calls: [],
-                            })
-                        : undefined
+                    serverId={
+                      parseServerResourceKey(worktreeId ?? sessionId)?.serverId
                     }
                   />
                 </div>
@@ -1298,6 +1207,7 @@ export const CompactMessageList = memo(
                   {renderMessageItem(singleMessage, {
                     hasFollowUpMessage,
                     bubble: hideToolActivity,
+                    onSendAnswer,
                     durationMs: durationFor(
                       singleMessage.globalIndex,
                       singleMessage.message
@@ -1316,6 +1226,7 @@ export const CompactMessageList = memo(
                   {replyItems.map((reply, index) =>
                     reply.type === 'text' ? (
                       <ReplyBubbles
+                        // react-doctor-disable-next-line react-doctor/no-array-index-as-key -- text groups are derived in stream order and only append; messageId is positional too
                         key={`text-${index}`}
                         parts={reply.texts}
                         messageId={
@@ -1326,6 +1237,7 @@ export const CompactMessageList = memo(
                     ) : reply.type === 'question' ? (
                       <AgentQuestionCard
                         key={reply.toolId}
+                        id={reply.toolId}
                         question={reply.question}
                         answer={
                           userAnswers[
@@ -1371,10 +1283,17 @@ export const CompactMessageList = memo(
               !(latestTextIsRecap && latestRunHasPlan)
             const surfaceRecap = latestTextIsRecap && showLatestText
             const inlineQuestion = item.inlineQuestion
-            const surfacedLatestToolCalls =
-              isLatestCompact && (showLatestText || hasCancelledMessage)
-                ? latestCompactToolCalls
-                : EMPTY_TOOL_CALLS
+            const latestTextMarkdown = (
+              <Markdown
+                streaming={false}
+                messageId={item.key}
+                sessionId={sessionId}
+              >
+                {latestTextIsRecap
+                  ? (item.latestText ?? '').replace(RECAP_HEADING_RE, '').trim()
+                  : (item.latestText ?? '')}
+              </Markdown>
+            )
             return (
               <div key={item.key}>
                 <CompactActivityRow
@@ -1384,43 +1303,23 @@ export const CompactMessageList = memo(
                   hasFollowUpFor={hasFollowUpFor}
                   durationFor={durationFor}
                   recapShownExternally={surfaceRecap}
-                  editedFilesShownExternally={
-                    surfacedLatestToolCalls.length > 0
-                  }
                 />
-                {(showLatestText || surfacedLatestToolCalls.length > 0) && (
+                {showLatestText && (
                   <div
                     className="pb-4"
-                    {...(showLatestText && !isSending
-                      ? { [OPEN_SCROLL_ANCHOR_ATTR]: '' }
-                      : {})}
+                    {...(!isSending ? { [OPEN_SCROLL_ANCHOR_ATTR]: '' } : {})}
                   >
-                    {showLatestText && (
-                      <Markdown
-                        streaming={false}
-                        messageId={item.key}
-                        sessionId={sessionId}
-                      >
-                        {item.latestText ?? ''}
-                      </Markdown>
+                    {hideToolActivity ? (
+                      <ReplyBubble>{latestTextMarkdown}</ReplyBubble>
+                    ) : (
+                      latestTextMarkdown
                     )}
-                    {showLatestText && inlineQuestion && onSendAnswer && (
+                    {inlineQuestion && onSendAnswer && (
                       <InlineQuestionOptions
                         question={inlineQuestion.question}
                         options={inlineQuestion.options}
                         disabled={isSending}
                         onSend={onSendAnswer}
-                      />
-                    )}
-                    {surfacedLatestToolCalls.length > 0 && (
-                      <EditedFilesDisplay
-                        toolCalls={surfacedLatestToolCalls}
-                        worktreePath={worktreePath}
-                        serverId={
-                          ownerServerId === 'local' ? undefined : ownerServerId
-                        }
-                        worktreeId={worktreeId ?? undefined}
-                        turnUserMessageId={latestTurnUserMessageId}
                       />
                     )}
                   </div>

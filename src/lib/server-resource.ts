@@ -31,6 +31,21 @@ export function toRawLocalResourceId(key: string): string {
   return reference?.serverId === LOCAL_SERVER_ID ? reference.resourceId : key
 }
 
+/** Raw ids belong to the local server; `local:` ids are the same server. */
+export function isSameServerResource(a: string, b: string): boolean {
+  const owner = (key: string) =>
+    parseServerResourceKey(key)?.serverId ?? LOCAL_SERVER_ID
+  return owner(a) === owner(b)
+}
+
+/** Scope a raw id that belongs to the same server as `ownerKey`. */
+export function scopeLikeOwner(ownerKey: string, resourceId: string): string {
+  const serverId = parseServerResourceKey(ownerKey)?.serverId
+  return serverId && serverId !== LOCAL_SERVER_ID
+    ? serverResourceKey({ serverId, resourceId })
+    : resourceId
+}
+
 export function withServerId<T extends object>(
   serverId: ServerId,
   resource: T

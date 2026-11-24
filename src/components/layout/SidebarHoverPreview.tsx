@@ -230,7 +230,14 @@ export function SidebarHoverPreview({
       document.removeEventListener('dragend', handleDragEnd, true)
       documentObserver.disconnect()
     }
+    // react-doctor-disable-next-line react-doctor/prefer-use-effect-event -- cancelClose/closePreview/scheduleClose are useCallback chains with stable deps, so the effect only re-subscribes on `mounted`
   }, [cancelClose, closePreview, mounted, scheduleClose])
+
+  // Close during render when disabled; refs and timers reset in the effect.
+  if (!enabled && (open || mounted)) {
+    setOpen(false)
+    setMounted(false)
+  }
 
   useEffect(() => {
     if (enabled) return
@@ -242,8 +249,6 @@ export function SidebarHoverPreview({
     clearTimer(openTimer)
     clearTimer(closeTimer)
     clearTimer(unmountTimer)
-    setOpen(false)
-    setMounted(false)
   }, [clearTimer, enabled])
 
   useEffect(
@@ -273,7 +278,7 @@ export function SidebarHoverPreview({
           data-testid="sidebar-hover-preview"
           data-open={open}
           className={cn(
-            'fixed top-[calc(var(--titlebar-height)+var(--vv-offset-top,0px))] bottom-2 left-2 z-40 overflow-hidden border rounded-lg bg-sidebar' +
+            'fixed top-[calc(var(--titlebar-height)+var(--vv-offset-top,0px))] bottom-2 left-2 z-40 overflow-hidden border border-border/20 rounded-lg bg-sidebar' +
               ' shadow-xl',
             'transition-transform duration-180 ease-out motion-reduce:transition-none',
             open ? 'translate-x-0' : '-translate-x-full'

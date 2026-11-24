@@ -11,7 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use super::storage::{
-    get_session_dir, list_all_session_ids, load_metadata, save_metadata, with_metadata_mut,
+    get_session_dir, list_all_session_ids, load_metadata, save_metadata,
+    with_existing_metadata_mut, with_metadata_mut,
 };
 use super::types::{
     is_claude_compaction_summary_text, Backend, ChatMessage, ContentBlock, LoadedMessages,
@@ -330,6 +331,25 @@ impl RunLogWriter {
         Ok(())
     }
 
+    /// Record the OpenCode 2.x turn of this run, so a restarted Jean can
+    /// re-attach to it (`repair_session_runs`).
+    pub fn set_opencode_turn(&mut self, turn: super::types::OpenCodeTurnRef) -> Result<(), String> {
+        let run_id = self.run_id.clone();
+        with_metadata_mut(
+            &self.app,
+            &self.session_id,
+            &self.worktree_id,
+            &self.session_name,
+            self.order,
+            |metadata| {
+                if let Some(run) = metadata.find_run_mut(&run_id) {
+                    run.opencode_turn = Some(turn);
+                }
+                Ok(())
+            },
+        )
+    }
+
     /// Clear the Codex turn ID (turn completed successfully).
     pub fn clear_codex_turn_id(&mut self) -> Result<(), String> {
         let run_id = self.run_id.clone();
@@ -582,6 +602,7 @@ pub fn start_run(
         usage: None, // Set on completion via complete()
         codex_thread_id: None,
         codex_turn_id: None,
+        opencode_turn: None,
         cursor_chat_id: None,
         grok_session_id: None,
         kimi_session_id: None,
@@ -1996,6 +2017,7 @@ mod tests {
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -2629,6 +2651,51 @@ Move services between instances without downtime.
     }
 
     #[test]
+    fn cancelled_content_keeps_unconsumed_steer_without_duplicates() {
+        let run = sample_run();
+        // Codex writes its steer on accept; the Claude host writes it only
+        // when the CLI consumes it, so "pending" is not on disk at cancel.
+        let mut lines = vec![
+            r#"{"_run_meta":true}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#
+                .to_string(),
+            r#"{"type":"steered_user_message","text":"on disk"}"#.to_string(),
+        ];
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "working".to_string(),
+            },
+            ContentBlock::UserInput {
+                text: "on disk".to_string(),
+            },
+            ContentBlock::UserInput {
+                text: "pending".to_string(),
+            },
+        ];
+
+        let missing = missing_cancelled_content_lines(&lines, "working", &[], &blocks);
+        assert_eq!(
+            missing,
+            vec![serde_json::json!({"type": "steered_user_message", "text": "pending"})]
+        );
+
+        lines.extend(missing.iter().map(|l| l.to_string()));
+        let message = parse_run_to_message(&lines, &run).unwrap();
+        let steers: Vec<&str> = message
+            .content_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::UserInput { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(steers, vec!["on disk", "pending"]);
+
+        // Persisting again is a no-op.
+        assert!(missing_cancelled_content_lines(&lines, "working", &[], &blocks).is_empty());
+    }
+
+    #[test]
     fn parse_run_preserves_steered_user_messages() {
         let run = sample_run();
         let lines = vec![
@@ -3160,6 +3227,7 @@ Move services between instances without downtime.
             usage: None,
             codex_thread_id: None,
             codex_turn_id: None,
+            opencode_turn: None,
             cursor_chat_id: None,
             grok_session_id: None,
             kimi_session_id: None,
@@ -3268,29 +3336,75 @@ pub fn persist_partial_cancelled_content(
         .ok_or("No cancelled run found")?;
 
     let path = get_run_log_path(app, session_id, &run.run_id)?;
-
-    // Reconcile the frontend's authoritative streaming view with whatever the
-    // backend already managed to flush before the kill. The previous "skip if
-    // any assistant content exists" logic dropped tool calls in web access mode
-    // where the backend's incremental writes lagged behind frontend Zustand state.
-    //
-    // We scan the existing JSONL for tool_use ids, tool_result ids, and whether
-    // any text-bearing assistant block is present. Then we append only the
-    // pieces the disk is missing. parse_run_to_message() accumulates tool_calls
-    // and text across multiple assistant lines, so appending will not duplicate.
     let existing_lines = read_run_log(app, session_id, &run.run_id).unwrap_or_default();
+    let missing_lines =
+        missing_cancelled_content_lines(&existing_lines, content, tool_calls, content_blocks);
+
+    if missing_lines.is_empty() {
+        log::trace!(
+            "JSONL already in sync with frontend payload for session {session_id}, skipping persist"
+        );
+        return Ok(());
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open run log for partial content: {e}"))?;
+    for line in &missing_lines {
+        writeln!(file, "{line}").map_err(|e| format!("Failed to write partial content: {e}"))?;
+    }
+    file.flush()
+        .map_err(|e| format!("Failed to flush partial content: {e}"))?;
+
+    log::trace!(
+        "Reconciled partial cancelled content for session {session_id} \
+         (appended {} lines; total payload: {} chars, {} blocks, {} tool calls)",
+        missing_lines.len(),
+        content.len(),
+        content_blocks.len(),
+        tool_calls.len(),
+    );
+    Ok(())
+}
+
+/// JSONL lines to append so the cancelled run log holds everything the
+/// frontend showed when the user cancelled.
+///
+/// The frontend's streaming view is authoritative: the backend's incremental
+/// writes can lag behind it (web access), and a Claude steer accepted by the
+/// host is only written when the CLI consumes it, so a steer cancelled before
+/// that point exists only in the frontend. Only the pieces the disk is missing
+/// are returned. parse_run_to_message() accumulates tool calls and text across
+/// assistant lines, so appending does not duplicate.
+fn missing_cancelled_content_lines(
+    existing_lines: &[String],
+    content: &str,
+    tool_calls: &[ToolCall],
+    content_blocks: &[ContentBlock],
+) -> Vec<serde_json::Value> {
     let mut existing_tool_use_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut existing_tool_result_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Steer texts on disk, with counts: the same text can be steered twice.
+    let mut existing_steers: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut existing_has_text = false;
 
-    for line in &existing_lines {
+    for line in existing_lines {
         let msg: serde_json::Value = match serde_json::from_str(line) {
             Ok(m) => m,
             Err(_) => continue,
         };
         let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if msg_type == "steered_user_message" {
+            if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
+                *existing_steers.entry(text.to_string()).or_default() += 1;
+            }
+            continue;
+        }
         let blocks = msg
             .get("message")
             .and_then(|m| m.get("content"))
@@ -3320,89 +3434,81 @@ pub fn persist_partial_cancelled_content(
         }
     }
 
-    // Determine what's missing from disk
-    let missing_tool_calls: Vec<&ToolCall> = tool_calls
-        .iter()
-        .filter(|tc| !existing_tool_use_ids.contains(&tc.id))
-        .collect();
-    let missing_tool_results: Vec<&ToolCall> = tool_calls
-        .iter()
-        .filter(|tc| tc.output.is_some() && !existing_tool_result_ids.contains(&tc.id))
-        .collect();
     let needs_text = !existing_has_text
         && !content.trim().is_empty()
         && !is_claude_compaction_summary_text(content);
 
-    if missing_tool_calls.is_empty() && missing_tool_results.is_empty() && !needs_text {
-        log::trace!(
-            "JSONL already in sync with frontend payload for session {session_id}, skipping persist"
-        );
-        return Ok(());
-    }
-
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("Failed to open run log for partial content: {e}"))?;
-
-    // Build a single synthetic assistant line containing only the blocks the
-    // disk is missing. We prefer the order from `content_blocks` when present
-    // so text/tool_use interleaving roughly matches the original stream.
+    let mut lines: Vec<serde_json::Value> = Vec::new();
+    // Blocks for the next synthetic assistant line. Flushed before each
+    // missing steer so the steer keeps its place in the stream order.
     let mut blocks: Vec<serde_json::Value> = Vec::new();
+    let mut has_new_assistant_content = false;
     let mut wrote_text = !needs_text;
+    let flush = |blocks: &mut Vec<serde_json::Value>,
+                 has_new: &mut bool,
+                 lines: &mut Vec<serde_json::Value>| {
+        if *has_new {
+            lines.push(serde_json::json!({
+                "type": "assistant",
+                "message": { "content": std::mem::take(blocks) }
+            }));
+        }
+        blocks.clear();
+        *has_new = false;
+    };
 
-    if !content_blocks.is_empty() {
-        for cb in content_blocks {
-            match cb {
-                ContentBlock::Text { text } => {
-                    if !wrote_text
-                        && !text.trim().is_empty()
-                        && !is_claude_compaction_summary_text(text)
-                    {
-                        blocks.push(serde_json::json!({"type": "text", "text": text}));
-                        wrote_text = true;
-                    }
+    for cb in content_blocks {
+        match cb {
+            ContentBlock::Text { text } => {
+                if !wrote_text
+                    && !text.trim().is_empty()
+                    && !is_claude_compaction_summary_text(text)
+                {
+                    blocks.push(serde_json::json!({"type": "text", "text": text}));
+                    wrote_text = true;
+                    has_new_assistant_content = true;
                 }
-                ContentBlock::ToolUse { tool_call_id } => {
-                    if existing_tool_use_ids.contains(tool_call_id) {
-                        continue;
-                    }
-                    if let Some(tc) = tool_calls.iter().find(|t| t.id == *tool_call_id) {
-                        blocks.push(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.input
-                        }));
-                    } else {
-                        blocks.push(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tool_call_id,
-                            "name": "",
-                            "input": null
-                        }));
-                    }
+            }
+            ContentBlock::ToolUse { tool_call_id } => {
+                if existing_tool_use_ids.contains(tool_call_id) {
+                    continue;
                 }
-                ContentBlock::Thinking { thinking } => {
-                    blocks.push(serde_json::json!({"type": "thinking", "thinking": thinking}));
+                let (name, input) = tool_calls
+                    .iter()
+                    .find(|t| t.id == *tool_call_id)
+                    .map(|tc| (tc.name.as_str(), tc.input.clone()))
+                    .unwrap_or(("", serde_json::Value::Null));
+                blocks.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": tool_call_id,
+                    "name": name,
+                    "input": input
+                }));
+                has_new_assistant_content = true;
+            }
+            ContentBlock::Thinking { thinking } => {
+                // Rides along with new content only, so a cancel with nothing
+                // else missing does not duplicate thinking already on disk.
+                blocks.push(serde_json::json!({"type": "thinking", "thinking": thinking}));
+            }
+            ContentBlock::UserInput { text } => {
+                if let Some(count) = existing_steers.get_mut(text).filter(|c| **c > 0) {
+                    *count -= 1;
+                    continue;
                 }
-                ContentBlock::UserInput { text } => {
-                    blocks.push(serde_json::json!({"type": "user_input", "text": text}));
-                }
+                flush(&mut blocks, &mut has_new_assistant_content, &mut lines);
+                lines.push(serde_json::json!({"type": "steered_user_message", "text": text}));
             }
         }
     }
 
-    // Append any tool_calls that weren't represented in content_blocks (e.g.,
-    // when the frontend payload had tool_calls without matching ToolUse blocks).
-    for tc in &missing_tool_calls {
-        let already_in_blocks = blocks.iter().any(|b| {
-            b.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-                && b.get("id").and_then(|v| v.as_str()) == Some(tc.id.as_str())
-        });
-        if already_in_blocks {
+    // Tool calls without a matching ToolUse block in the payload.
+    for tc in tool_calls {
+        if existing_tool_use_ids.contains(&tc.id)
+            || content_blocks.iter().any(
+                |cb| matches!(cb, ContentBlock::ToolUse { tool_call_id } if *tool_call_id == tc.id),
+            )
+        {
             continue;
         }
         blocks.push(serde_json::json!({
@@ -3411,54 +3517,35 @@ pub fn persist_partial_cancelled_content(
             "name": tc.name,
             "input": tc.input
         }));
+        has_new_assistant_content = true;
     }
 
-    // Fallback: text-only when no structured blocks were supplied.
-    if blocks.is_empty() && !wrote_text && !content.trim().is_empty() {
+    // Text the disk needs but no Text block carried (e.g. text-only payload).
+    if !wrote_text {
         blocks.push(serde_json::json!({"type": "text", "text": content}));
-        wrote_text = true;
+        has_new_assistant_content = true;
     }
+    flush(&mut blocks, &mut has_new_assistant_content, &mut lines);
 
-    if !blocks.is_empty() {
-        let synthetic = serde_json::json!({
-            "type": "assistant",
-            "message": { "content": blocks }
-        });
-        writeln!(file, "{synthetic}")
-            .map_err(|e| format!("Failed to write partial content: {e}"))?;
-    }
-
-    // Write any tool_results the disk is missing as separate user messages so
-    // parse_run_to_message() can associate outputs with their tool calls.
-    for tc in &missing_tool_results {
-        let output = tc.output.as_deref().unwrap_or("");
-        let tool_result = serde_json::json!({
+    // Tool results the disk is missing, as user lines so parse_run_to_message()
+    // can attach outputs to their tool calls.
+    for tc in tool_calls {
+        if tc.output.is_none() || existing_tool_result_ids.contains(&tc.id) {
+            continue;
+        }
+        lines.push(serde_json::json!({
             "type": "user",
             "message": {
                 "content": [{
                     "type": "tool_result",
                     "tool_use_id": tc.id,
-                    "content": output
+                    "content": tc.output.as_deref().unwrap_or("")
                 }]
             }
-        });
-        writeln!(file, "{tool_result}").map_err(|e| format!("Failed to write tool result: {e}"))?;
+        }));
     }
 
-    file.flush()
-        .map_err(|e| format!("Failed to flush partial content: {e}"))?;
-
-    log::trace!(
-        "Reconciled partial cancelled content for session {session_id} \
-         (added {} tool_uses, {} tool_results, text_added={}; total payload: {} chars, {} blocks, {} tool calls)",
-        missing_tool_calls.len(),
-        missing_tool_results.len(),
-        wrote_text && needs_text,
-        content.len(),
-        content_blocks.len(),
-        tool_calls.len(),
-    );
-    Ok(())
+    lines
 }
 
 // ============================================================================
@@ -3483,167 +3570,57 @@ pub struct RecoveredRun {
 /// Check for and recover incomplete runs across all sessions
 /// Called on app startup to handle crashed runs from previous session
 pub fn recover_incomplete_runs(app: &tauri::AppHandle) -> Result<Vec<RecoveredRun>, String> {
-    use super::detached::is_process_alive;
-
     let session_ids = list_all_session_ids(app)?;
+    recover_incomplete_runs_for(app, session_ids)
+}
+
+/// Same repair as [`recover_incomplete_runs`], limited to the given sessions.
+/// Idempotent: a repaired session is left unchanged by a second pass.
+///
+/// Each session is read, judged, and written under its metadata lock, and the
+/// registry is re-checked inside that lock. A resume tail that finishes in
+/// the gap between an unlocked read and this write would otherwise have its
+/// completed run overwritten as crashed.
+pub fn recover_incomplete_runs_for(
+    app: &tauri::AppHandle,
+    session_ids: Vec<String>,
+) -> Result<Vec<RecoveredRun>, String> {
     let mut recovered = Vec::new();
 
-    // Sessions with active process/cancel-flag registrations are currently
-    // being managed by send_chat_message — skip them entirely. Without this
-    // guard, a web-access client refresh would call check_resumable_sessions,
-    // mark an already-tailed run as Resumable, and resume_session would start
-    // a second tail from the beginning of the file — duplicating every event.
-    let actively_managed = super::registry::get_actively_managed_sessions();
-
     for session_id in session_ids {
-        if actively_managed.contains(&session_id) {
+        // Sessions with active process/cancel-flag registrations are currently
+        // being managed by send_chat_message or a resume tail. Without this
+        // guard a client refresh would mark an already-tailed run as Resumable
+        // and resume_session would start a second tail from the beginning of
+        // the file, duplicating every event.
+        if super::registry::is_session_actively_managed(&session_id) {
             continue;
         }
-        // One unreadable/unwritable session (corrupt file, full disk) must not
-        // block recovery of every other session.
-        let mut metadata = match load_metadata(app, &session_id) {
-            Ok(Some(m)) => m,
-            Ok(None) => continue,
+        // Cheap unlocked pre-check so sessions with nothing to repair are not
+        // rewritten. One unreadable session must not block the others.
+        match load_metadata(app, &session_id) {
+            Ok(Some(metadata))
+                if metadata
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run.status, RunStatus::Running | RunStatus::Resumable)) => {
+            }
+            Ok(_) => continue,
             Err(e) => {
                 log::warn!("Skipping run recovery for session {session_id}: {e}");
                 continue;
             }
-        };
-        let metadata_backend = metadata.backend.clone();
-
-        let mut modified = false;
-
-        for run in &mut metadata.runs {
-            // Handle both Running (normal crash recovery) and Resumable (stale from
-            // a previous recovery that never completed — e.g. app crashed twice)
-            if run.status == RunStatus::Running || run.status == RunStatus::Resumable {
-                let process_alive = run.pid.map(is_process_alive).unwrap_or(false);
-
-                if run_can_resume_process(&metadata_backend, run, process_alive) {
-                    run.status = RunStatus::Resumable;
-                    modified = true;
-
-                    recovered.push(RecoveredRun {
-                        session_id: session_id.clone(),
-                        worktree_id: metadata.worktree_id.clone(),
-                        run_id: run.run_id.clone(),
-                        user_message: run.user_message.clone(),
-                        resumable: true,
-                        execution_mode: run.execution_mode.clone(),
-                        started_at: run.started_at,
-                    });
-
-                    log::trace!(
-                        "Found resumable run: {} in session {} (PID: {:?})",
-                        run.run_id,
-                        session_id,
-                        run.pid
-                    );
-                } else {
-                    // No resumable process - check if the run completed successfully.
-                    // A Grok cancel marker is `type:result` plus `cancelled:true`.
-                    // That is not a successful completion: keep the partial reply
-                    // and mark the run cancelled instead of "content was not captured".
-                    let completed = jsonl_has_result_line(app, &session_id, &run.run_id);
-                    let cancelled_result = !completed
-                        && jsonl_has_cancelled_result_line(app, &session_id, &run.run_id);
-
-                    if completed {
-                        run.status = RunStatus::Completed;
-                        metadata.is_reviewing = false;
-                        if metadata.status_override.as_deref() == Some("review") {
-                            metadata.status_override = None;
-                        }
-
-                        // Recover the provider-owned session id from JSONL so a
-                        // turn that completed while Jean was closed keeps its context.
-                        if let Some(sid) =
-                            extract_session_id_from_jsonl(app, &session_id, &run.run_id)
-                        {
-                            if run_uses_devin_history_parser(&metadata_backend, run) {
-                                run.devin_session_id = Some(sid.clone());
-                                metadata.devin_session_id = Some(sid);
-                            } else if run.backend.as_ref().unwrap_or(&metadata_backend)
-                                == &Backend::Kimi
-                            {
-                                run.kimi_session_id = Some(sid.clone());
-                                metadata.kimi_session_id = Some(sid);
-                            } else if run.backend.as_ref().unwrap_or(&metadata_backend)
-                                == &Backend::Muse
-                            {
-                                run.muse_session_id = Some(sid.clone());
-                                metadata.muse_session_id = Some(sid);
-                            } else if run.claude_session_id.is_none() {
-                                run.claude_session_id = Some(sid.clone());
-                                metadata.claude_session_id = Some(sid);
-                            }
-                        }
-                    } else if run.codex_thread_id.is_some() {
-                        // Codex sessions can be resumed via thread/resume even after
-                        // Jean crashes — threads are persisted to disk by app-server.
-                        // Mark as Resumable so resume_session can recover them.
-                        run.status = RunStatus::Resumable;
-
-                        recovered.push(RecoveredRun {
-                            session_id: session_id.clone(),
-                            worktree_id: metadata.worktree_id.clone(),
-                            run_id: run.run_id.clone(),
-                            user_message: run.user_message.clone(),
-                            resumable: true,
-                            execution_mode: run.execution_mode.clone(),
-                            started_at: run.started_at,
-                        });
-
-                        log::trace!(
-                            "Found resumable Codex run: {} in session {} (thread_id: {:?})",
-                            run.run_id,
-                            session_id,
-                            run.codex_thread_id
-                        );
-
-                        modified = true;
-                        continue;
-                    } else if cancelled_result {
-                        run.status = RunStatus::Cancelled;
-                        run.cancelled = true;
-                    } else {
-                        run.status = RunStatus::Crashed;
-                    }
-                    if run.ended_at.is_none() {
-                        run.ended_at = Some(now_timestamp());
-                    }
-                    run.recovered = true;
-                    if run.assistant_message_id.is_none() {
-                        run.assistant_message_id = Some(Uuid::new_v4().to_string());
-                    }
-                    modified = true;
-
-                    recovered.push(RecoveredRun {
-                        session_id: session_id.clone(),
-                        worktree_id: metadata.worktree_id.clone(),
-                        run_id: run.run_id.clone(),
-                        user_message: run.user_message.clone(),
-                        resumable: false,
-                        execution_mode: run.execution_mode.clone(),
-                        started_at: run.started_at,
-                    });
-
-                    log::trace!(
-                        "Recovered {} run: {} in session {} (user message: {})",
-                        if completed { "completed" } else { "crashed" },
-                        run.run_id,
-                        session_id,
-                        run.user_message.chars().take(50).collect::<String>()
-                    );
-                }
-            }
         }
 
-        if modified {
-            if let Err(e) = save_metadata(app, &metadata) {
-                log::warn!("Failed to save recovered runs for session {session_id}: {e}");
-                recovered.retain(|r| r.session_id != session_id);
+        let repaired = with_existing_metadata_mut(app, &session_id, |metadata| {
+            if super::registry::is_session_actively_managed(&session_id) {
+                return Vec::new();
             }
+            repair_session_runs(app, &session_id, metadata)
+        });
+        match repaired {
+            Ok(runs) => recovered.extend(runs),
+            Err(e) => log::warn!("Failed to save recovered runs for session {session_id}: {e}"),
         }
     }
 
@@ -3652,6 +3629,173 @@ pub fn recover_incomplete_runs(app: &tauri::AppHandle) -> Result<Vec<RecoveredRu
     }
 
     Ok(recovered)
+}
+
+/// Settle every unfinished run of one session, with the lock held by the
+/// caller. Returns what changed so startup can resume the resumable ones.
+fn repair_session_runs(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    metadata: &mut SessionMetadata,
+) -> Vec<RecoveredRun> {
+    use super::detached::is_process_alive;
+
+    let mut recovered = Vec::new();
+    let metadata_backend = metadata.backend.clone();
+    let worktree_id = metadata.worktree_id.clone();
+
+    for run in &mut metadata.runs {
+        // Handle both Running (normal crash recovery) and Resumable (stale from
+        // a previous recovery that never completed — e.g. app crashed twice)
+        if run.status == RunStatus::Running || run.status == RunStatus::Resumable {
+            let process_alive = run.pid.map(is_process_alive).unwrap_or(false);
+
+            if run_can_resume_process(&metadata_backend, run, process_alive) {
+                run.status = RunStatus::Resumable;
+
+                recovered.push(RecoveredRun {
+                    session_id: session_id.to_string(),
+                    worktree_id: worktree_id.clone(),
+                    run_id: run.run_id.clone(),
+                    user_message: run.user_message.clone(),
+                    resumable: true,
+                    execution_mode: run.execution_mode.clone(),
+                    started_at: run.started_at,
+                });
+
+                log::trace!(
+                    "Found resumable run: {} in session {} (PID: {:?})",
+                    run.run_id,
+                    session_id,
+                    run.pid
+                );
+            } else {
+                // No resumable process - check if the run completed successfully.
+                // A Grok cancel marker is `type:result` plus `cancelled:true`.
+                // That is not a successful completion: keep the partial reply
+                // and mark the run cancelled instead of "content was not captured".
+                let completed = jsonl_has_result_line(app, session_id, &run.run_id);
+                let cancelled_result =
+                    !completed && jsonl_has_cancelled_result_line(app, session_id, &run.run_id);
+
+                if completed {
+                    run.status = RunStatus::Completed;
+                    metadata.is_reviewing = false;
+                    if metadata.status_override.as_deref() == Some("review") {
+                        metadata.status_override = None;
+                    }
+
+                    // Recover the provider-owned session id from JSONL so a
+                    // turn that completed while Jean was closed keeps its context.
+                    if let Some(sid) = extract_session_id_from_jsonl(app, session_id, &run.run_id) {
+                        if run_uses_devin_history_parser(&metadata_backend, run) {
+                            run.devin_session_id = Some(sid.clone());
+                            metadata.devin_session_id = Some(sid);
+                        } else if run.backend.as_ref().unwrap_or(&metadata_backend)
+                            == &Backend::Kimi
+                        {
+                            run.kimi_session_id = Some(sid.clone());
+                            metadata.kimi_session_id = Some(sid);
+                        } else if run.backend.as_ref().unwrap_or(&metadata_backend)
+                            == &Backend::Muse
+                        {
+                            run.muse_session_id = Some(sid.clone());
+                            metadata.muse_session_id = Some(sid);
+                        } else if run.claude_session_id.is_none() {
+                            run.claude_session_id = Some(sid.clone());
+                            metadata.claude_session_id = Some(sid);
+                        }
+                    }
+                } else if run.opencode_turn.is_some() && cfg!(unix) {
+                    // The OpenCode 2.x server runs the turn and outlives Jean
+                    // on Unix; resume_session re-attaches to it.
+                    run.status = RunStatus::Resumable;
+                    recovered.push(RecoveredRun {
+                        session_id: session_id.to_string(),
+                        worktree_id: worktree_id.clone(),
+                        run_id: run.run_id.clone(),
+                        user_message: run.user_message.clone(),
+                        resumable: true,
+                        execution_mode: run.execution_mode.clone(),
+                        started_at: run.started_at,
+                    });
+                    continue;
+                } else if run.codex_thread_id.is_some() {
+                    // Codex sessions can be resumed via thread/resume even after
+                    // Jean crashes — threads are persisted to disk by app-server.
+                    // Mark as Resumable so resume_session can recover them.
+                    run.status = RunStatus::Resumable;
+
+                    recovered.push(RecoveredRun {
+                        session_id: session_id.to_string(),
+                        worktree_id: worktree_id.clone(),
+                        run_id: run.run_id.clone(),
+                        user_message: run.user_message.clone(),
+                        resumable: true,
+                        execution_mode: run.execution_mode.clone(),
+                        started_at: run.started_at,
+                    });
+
+                    log::trace!(
+                        "Found resumable Codex run: {} in session {} (thread_id: {:?})",
+                        run.run_id,
+                        session_id,
+                        run.codex_thread_id
+                    );
+                    continue;
+                } else if cancelled_result {
+                    run.status = RunStatus::Cancelled;
+                    run.cancelled = true;
+                } else {
+                    run.status = RunStatus::Crashed;
+                }
+                if run.ended_at.is_none() {
+                    run.ended_at = Some(now_timestamp());
+                }
+                run.recovered = true;
+                if run.assistant_message_id.is_none() {
+                    run.assistant_message_id = Some(Uuid::new_v4().to_string());
+                }
+
+                recovered.push(RecoveredRun {
+                    session_id: session_id.to_string(),
+                    worktree_id: worktree_id.clone(),
+                    run_id: run.run_id.clone(),
+                    user_message: run.user_message.clone(),
+                    resumable: false,
+                    execution_mode: run.execution_mode.clone(),
+                    started_at: run.started_at,
+                });
+
+                log::trace!(
+                    "Recovered {} run: {} in session {} (user message: {})",
+                    if completed { "completed" } else { "crashed" },
+                    run.run_id,
+                    session_id,
+                    run.user_message.chars().take(50).collect::<String>()
+                );
+            }
+        }
+    }
+
+    recovered
+}
+
+/// Whether any session has an unfinished OpenCode 2.x turn. While one
+/// exists, Jean keeps the OpenCode server running across a restart.
+pub fn has_incomplete_opencode_turns(app: &tauri::AppHandle) -> bool {
+    let Ok(session_ids) = super::storage::list_all_session_ids(app) else {
+        return false;
+    };
+    session_ids.into_iter().any(|session_id| {
+        let Ok(Some(metadata)) = load_metadata(app, &session_id) else {
+            return false;
+        };
+        metadata.runs.iter().any(|run| {
+            run.opencode_turn.is_some()
+                && matches!(run.status, RunStatus::Running | RunStatus::Resumable)
+        })
+    })
 }
 
 /// Check if a run's JSONL file contains a "type":"result" line,

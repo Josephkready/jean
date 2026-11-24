@@ -1,9 +1,23 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import userEvent from '@testing-library/user-event'
-import { render, screen } from '@/test/test-utils'
+import { render, screen, waitFor, within } from '@/test/test-utils'
 import { MobileToolbarMenu } from './MobileToolbarMenu'
 
+const mocks = vi.hoisted(() => ({
+  favoriteMagicOptions: [] as string[],
+  patchPreferences: vi.fn(),
+}))
+
+vi.mock('@/services/preferences', () => ({
+  usePreferences: () => ({
+    data: { favorite_magic_options: mocks.favoriteMagicOptions },
+  }),
+  usePatchPreferences: () => ({ mutate: mocks.patchPreferences }),
+}))
+
 beforeEach(() => {
+  mocks.favoriteMagicOptions = []
+  mocks.patchPreferences.mockReset()
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation(() => ({
@@ -25,13 +39,14 @@ beforeEach(() => {
 })
 
 describe('MobileToolbarMenu', () => {
-  it('uses a full-width two-column layout on mobile', async () => {
+  it('opens a bottom sheet on mobile and closes it after an action', async () => {
     const user = userEvent.setup()
     const originalInnerWidth = window.innerWidth
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
       value: 390,
     })
+    const handleSyncClick = vi.fn()
 
     render(
       <MobileToolbarMenu
@@ -39,7 +54,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -48,7 +62,7 @@ describe('MobileToolbarMenu', () => {
         onReview={vi.fn()}
         onMerge={vi.fn()}
         onMergePr={vi.fn()}
-        handleSyncClick={vi.fn()}
+        handleSyncClick={handleSyncClick}
         handlePullClick={vi.fn()}
         handlePushClick={vi.fn()}
       />
@@ -56,12 +70,21 @@ describe('MobileToolbarMenu', () => {
 
     await user.click(screen.getByRole('button', { name: /more actions/i }))
 
-    expect(screen.getByRole('menu')).toHaveClass(
-      'w-[calc(100vw-1rem)]',
-      'grid',
-      'grid-cols-2'
+    const sheet = screen.getByRole('dialog', { name: 'Magic' })
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(
+      within(sheet).getByRole('region', { name: 'Context' })
+    ).toBeInTheDocument()
+    expect(
+      within(sheet).getByRole('button', { name: 'Comment & Close Issue' })
+    ).toBeDisabled()
+
+    await user.click(within(sheet).getByRole('button', { name: 'Sync' }))
+
+    expect(handleSyncClick).toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     )
-    expect(screen.getByText('Context')).toHaveClass('col-span-2')
 
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
@@ -78,7 +101,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -95,7 +117,7 @@ describe('MobileToolbarMenu', () => {
 
     await user.click(screen.getByRole('button', { name: /more actions/i }))
 
-    expect(screen.getByText('Save Context')).toBeInTheDocument()
+    expect(screen.queryByText('Save Context')).not.toBeInTheDocument()
     expect(screen.getByText('Inject Context')).toBeInTheDocument()
     expect(screen.queryByText('Load Context')).not.toBeInTheDocument()
     expect(screen.getByText('Link PR')).toBeInTheDocument()
@@ -129,7 +151,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={true}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -166,7 +187,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -209,7 +229,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={true}
         hasPrContexts={true}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -252,7 +271,6 @@ describe('MobileToolbarMenu', () => {
         hasIssueContexts={false}
         hasPrContexts={false}
         hasAdvisoryContexts={true}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -295,7 +313,6 @@ describe('MobileToolbarMenu', () => {
         hasIssueContexts={false}
         hasSentryContexts={true}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -332,7 +349,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -370,7 +386,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -408,7 +423,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -441,7 +455,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -472,7 +485,6 @@ describe('MobileToolbarMenu', () => {
         hasOpenPr={false}
         hasIssueContexts={false}
         hasPrContexts={false}
-        onSaveContext={vi.fn()}
         onLoadContext={vi.fn()}
         onCommit={vi.fn()}
         onCommitAndPush={vi.fn()}
@@ -491,5 +503,71 @@ describe('MobileToolbarMenu', () => {
 
     expect(screen.queryByText('Magic')).not.toBeInTheDocument()
     expect(onOpenMagicModal).not.toHaveBeenCalled()
+  })
+
+  it('shows favorited options first on mobile and toggles favorites', async () => {
+    const user = userEvent.setup()
+    const originalInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+    mocks.favoriteMagicOptions = ['sync', 'not-a-real-option']
+
+    render(
+      <MobileToolbarMenu
+        isDisabled={false}
+        hasOpenPr={false}
+        hasIssueContexts={false}
+        hasPrContexts={false}
+        onLoadContext={vi.fn()}
+        onCommit={vi.fn()}
+        onCommitAndPush={vi.fn()}
+        onRevertLastCommit={vi.fn()}
+        onOpenPr={vi.fn()}
+        onReview={vi.fn()}
+        onMerge={vi.fn()}
+        onMergePr={vi.fn()}
+        handleSyncClick={vi.fn()}
+        handlePullClick={vi.fn()}
+        handlePushClick={vi.fn()}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /more actions/i }))
+
+    const sheet = screen.getByRole('dialog', { name: 'Magic' })
+    const [favorites] = within(sheet).getAllByRole('region')
+    if (!favorites) throw new Error('missing Favorites region')
+    expect(favorites).toHaveAccessibleName('Favorites')
+    expect(
+      within(favorites).getByRole('button', { name: 'Sync' })
+    ).toBeInTheDocument()
+    expect(
+      within(within(sheet).getByRole('region', { name: 'Sync' })).queryByRole(
+        'button',
+        { name: 'Sync' }
+      )
+    ).not.toBeInTheDocument()
+
+    await user.click(
+      within(sheet).getByRole('button', { name: 'Favorite Commit' })
+    )
+    expect(mocks.patchPreferences).toHaveBeenCalledWith({
+      favorite_magic_options: ['sync', 'not-a-real-option', 'commit'],
+    })
+
+    await user.click(
+      within(sheet).getByRole('button', { name: 'Unfavorite Sync' })
+    )
+    expect(mocks.patchPreferences).toHaveBeenLastCalledWith({
+      favorite_magic_options: ['not-a-real-option'],
+    })
+    expect(screen.getByRole('dialog', { name: 'Magic' })).toBeInTheDocument()
+
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: originalInnerWidth,
+    })
   })
 })

@@ -22,6 +22,7 @@ import { fileToBase64 } from '@/lib/file-base64'
 import { disposeAllWorktreeTerminals } from '@/lib/terminal-instances'
 import { toastActionLabel } from '@/lib/toast-action-label'
 import { parseUnmanagedWorktreeListing } from '@/lib/import-existing-worktree'
+import type { GitRepoOwner } from '@/services/git-status'
 import type {
   AutoFixStatus,
   AutoFixIssuePreview,
@@ -37,9 +38,6 @@ import type {
   WorktreeDeletingEvent,
   WorktreeDeletedEvent,
   WorktreeDeleteErrorEvent,
-  WorktreeArchivedEvent,
-  WorktreeUnarchivedEvent,
-  WorktreePermanentlyDeletedEvent,
   WorktreePathExistsEvent,
   WorktreeBranchExistsEvent,
   WorktreeSetupCompleteEvent,
@@ -47,7 +45,11 @@ import type {
   RecentWorktreesResponse,
 } from '@/types/projects'
 import { isFolder } from '@/types/projects'
-import type { AllSessionsResponse, WorktreeSessions } from '@/types/chat'
+import type {
+  AllSessionsResponse,
+  RunState,
+  WorktreeSessions,
+} from '@/types/chat'
 import { useProjectsStore } from '@/store/projects-store'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
@@ -154,6 +156,8 @@ export function invalidateProjectLists(
 
 export interface RecentWorktreesData {
   items: RecentWorktreeItem[]
+  /** Rows in the activity-ordered page, before pinned extras. */
+  pageSize: number
   total: number
   failedServerIds: string[]
   failedWorktreeIds: string[]
@@ -163,7 +167,9 @@ export interface RecentWorktreesData {
 export async function fetchRecentWorktrees(
   projects: Project[],
   limit: number,
-  includeSessionIds: string[]
+  includeSessionIds: string[],
+  /** Unix seconds. The page grows to hold every session active after it. */
+  activeSince?: number
 ): Promise<RecentWorktreesData> {
   const projectsByServer = new Map<string, Project[]>()
   for (const project of projects.filter(
@@ -193,6 +199,7 @@ export async function fetchRecentWorktrees(
           offset: 0,
           limit,
           includeSessionIds: serverSessionIds,
+          activeSince,
         }
       )
       return { serverId, response }
@@ -213,7 +220,15 @@ export async function fetchRecentWorktrees(
         b.worktree.created_at - a.worktree.created_at ||
         a.worktree.id.localeCompare(b.worktree.id)
     )
-  const visibleItems = items.slice(0, limit)
+  const activeCount =
+    activeSince === undefined
+      ? 0
+      : items.findIndex(item => item.lastActivityAt <= activeSince)
+  const pageSize = Math.max(
+    limit,
+    activeCount === -1 ? items.length : activeCount
+  )
+  const visibleItems = items.slice(0, pageSize)
   const visibleIds = new Set(visibleItems.map(item => item.session.id))
   const pinnedIds = new Set(includeSessionIds)
   for (const item of items) {
@@ -224,6 +239,7 @@ export async function fetchRecentWorktrees(
   }
   return {
     items: visibleItems,
+    pageSize,
     total: successful.reduce((sum, result) => sum + result.response.total, 0),
     failedServerIds: results.flatMap((result, index) => {
       const serverId = serverEntries[index]?.[0]
@@ -295,7 +311,8 @@ export function useProjects() {
 export interface ProjectBootstrap {
   worktrees: Worktree[]
   sessionsByWorktree: Record<string, WorktreeSessions>
-  runningSessions: string[]
+  /** Live run states of this project's sessions; any other project session is idle. */
+  runStates: RunState[]
 }
 
 /**
@@ -346,45 +363,9 @@ export async function fetchAndSeedProjectBootstrap(
 
   // A native remote-server switch does not reload App, so reconcile the
   // running indicators from this server-owned project snapshot here.
-  const runningSessionIds = new Set(bootstrap.runningSessions ?? [])
-  const runningStartTimes: Record<string, number> = {}
-  for (const sessions of Object.values(sessionsByWorktree)) {
-    for (const session of sessions.sessions) {
-      if (runningSessionIds.has(session.id) && session.last_run_started_at) {
-        runningStartTimes[session.id] = session.last_run_started_at * 1000
-      }
-    }
-  }
-  useChatStore.setState(state => {
-    const sendingSessionIds = Object.fromEntries(
-      Object.entries(state.sendingSessionIds).filter(
-        ([sessionId]) => !projectSessionIds.has(sessionId)
-      )
-    )
-    const sendStartedAt = Object.fromEntries(
-      Object.entries(state.sendStartedAt).filter(
-        ([sessionId]) => !projectSessionIds.has(sessionId)
-      )
-    )
-    for (const sessionId of runningSessionIds) {
-      if (!projectSessionIds.has(sessionId)) continue
-      sendingSessionIds[sessionId] = true
-      const startedAt =
-        runningStartTimes[sessionId] ?? state.sendStartedAt[sessionId]
-      if (startedAt) sendStartedAt[sessionId] = startedAt
-    }
-    const currentIds = Object.keys(state.sendingSessionIds)
-    const nextIds = Object.keys(sendingSessionIds)
-    const currentStartIds = Object.keys(state.sendStartedAt)
-    const nextStartIds = Object.keys(sendStartedAt)
-    const changed =
-      currentIds.length !== nextIds.length ||
-      nextIds.some(sessionId => !state.sendingSessionIds[sessionId]) ||
-      currentStartIds.length !== nextStartIds.length ||
-      nextStartIds.some(
-        sessionId => state.sendStartedAt[sessionId] !== sendStartedAt[sessionId]
-      )
-    return changed ? { sendingSessionIds, sendStartedAt } : state
+  useChatStore.getState().applyRunStateSnapshot(bootstrap.runStates ?? [], {
+    ownsSession: sessionId => projectSessionIds.has(sessionId),
+    requestedAt: Date.now(),
   })
 
   logger.info('Project bootstrap loaded', {
@@ -741,6 +722,7 @@ export function useInitProject() {
  * Used when user selects a folder that is not a git repository
  */
 export function useInitGitInFolder() {
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- git init before project exists; caller owns cache updates
   return useMutation({
     mutationFn: async (path: string): Promise<string> => {
       if (!isTauri()) {
@@ -1021,15 +1003,15 @@ export function useCreateWorktree() {
       return worktree
     },
     onSuccess: (worktree, { projectId, background: isBackground }) => {
+      if (failedWorktreeCreations.delete(worktree.id)) return
       const shouldAutoOpen = !isBackground
       // Check if this worktree was already resolved by an event handler
-      // (e.g. unarchive_worktree emits worktree:unarchived which sets status: 'ready')
       const existing = queryClient.getQueryData<Worktree[]>(
         projectsQueryKeys.worktrees(projectId)
       )
       const existingEntry = existing?.find(w => w.id === worktree.id)
       if (existingEntry?.status === 'ready') {
-        logger.info('Worktree already ready (unarchived), skipping pending', {
+        logger.info('Worktree already ready, skipping pending', {
           id: worktree.id,
           name: worktree.name,
         })
@@ -1189,6 +1171,18 @@ export function useCreateWorktreeFromExistingBranch() {
       return { ...worktree, status: 'pending' as const }
     },
     onSuccess: (pendingWorktree, { projectId, background: isBackground }) => {
+      if (failedWorktreeCreations.delete(pendingWorktree.id)) return
+      const { expandProject, selectWorktree } = useProjectsStore.getState()
+      // worktree:created can arrive before the command response
+      const existingEntry = queryClient
+        .getQueryData<Worktree[]>(projectsQueryKeys.worktrees(projectId))
+        ?.find(w => w.id === pendingWorktree.id)
+      if (existingEntry?.status === 'ready') {
+        expandProject(projectId)
+        if (!isBackground) selectWorktree(pendingWorktree.id)
+        return
+      }
+
       logger.info('Worktree creation from existing branch started (pending)', {
         id: pendingWorktree.id,
         name: pendingWorktree.name,
@@ -1210,7 +1204,6 @@ export function useCreateWorktreeFromExistingBranch() {
       )
 
       // Auto-expand the project and select the new worktree
-      const { expandProject, selectWorktree } = useProjectsStore.getState()
       expandProject(projectId)
       if (!isBackground) {
         selectWorktree(pendingWorktree.id)
@@ -1244,11 +1237,13 @@ export function useCreateWorktreeFromExistingBranch() {
  */
 export function useCreateWorktreeKeybinding() {
   useEffect(() => {
-    const handleCreateWorktree = async () => {
-      // Import dynamically to avoid circular dependency
-      const { useUIStore } = await import('@/store/ui-store')
-      const { setNewWorktreeModalOpen } = useUIStore.getState()
-      setNewWorktreeModalOpen(true)
+    const handleCreateWorktree = () => {
+      // The modal needs a target project; without one it renders empty.
+      if (!useProjectsStore.getState().selectedProjectId) {
+        toast.info('Select a project first')
+        return
+      }
+      useUIStore.getState().setNewWorktreeModalOpen(true)
     }
 
     window.addEventListener('create-new-worktree', handleCreateWorktree)
@@ -1257,7 +1252,14 @@ export function useCreateWorktreeKeybinding() {
   }, [])
 }
 
-/** Shared post-ready logic for both new and unarchived worktrees */
+/**
+ * Worktree ids whose `worktree:error` event arrived. The backend can fail fast
+ * (e.g. path already exists) and emit the error before the create command
+ * response reaches the client; the mutation's onSuccess must not re-add it.
+ */
+const failedWorktreeCreations = new Set<string>()
+
+/** Shared post-ready logic for ready worktrees */
 function handleWorktreeReady(
   worktree: Worktree,
   queryClient: ReturnType<typeof useQueryClient>,
@@ -1584,6 +1586,7 @@ export function useWorktreeEvents() {
       listen<WorktreeCreateErrorEvent>('worktree:error', event => {
         const { id, project_id, error } = event.payload
         logger.error('Worktree creation failed', { id, project_id, error })
+        failedWorktreeCreations.add(id)
 
         // Clear recovery timeout since we got the error event
         clearPendingTimeout(id)
@@ -1677,7 +1680,7 @@ export function useWorktreeEvents() {
         invalidateProjectLists(queryClient)
 
         // Clear chat/selection if this worktree was active
-        // (handles cases where worktree:deleting wasn't emitted, e.g. close_base_session)
+        // (handles cases where worktree:deleting wasn't emitted, e.g. project removal)
         const { activeWorktreeId, clearActiveWorktree } =
           useChatStore.getState()
         if (activeWorktreeId === id) {
@@ -1757,78 +1760,6 @@ export function useWorktreeEvents() {
     )
 
     // =========================================================================
-    // Archive events
-    // =========================================================================
-
-    // Listen for successful archive
-    unlistenPromises.push(
-      listen<WorktreeArchivedEvent>('worktree:archived', event => {
-        const { id, project_id } = event.payload
-        logger.info('Worktree archived', { id })
-        clearLocalWorktreeState(id, queryClient)
-
-        // Remove worktree from cache (archived worktrees are filtered out)
-        queryClient.setQueryData<Worktree[]>(
-          projectsQueryKeys.worktrees(project_id),
-          old => {
-            if (!old) return []
-            return old.filter(w => w.id !== id)
-          }
-        )
-        invalidateProjectLists(queryClient)
-
-        // Clear chat if this worktree was active
-        const { activeWorktreeId, clearActiveWorktree } =
-          useChatStore.getState()
-        if (activeWorktreeId === id) {
-          clearActiveWorktree()
-        }
-
-        // Clear selection if this worktree was selected
-        const { selectedWorktreeId, selectWorktree } =
-          useProjectsStore.getState()
-        if (selectedWorktreeId === id) {
-          selectWorktree(null)
-        }
-      })
-    )
-
-    // Listen for successful unarchive
-    unlistenPromises.push(
-      listen<WorktreeUnarchivedEvent>('worktree:unarchived', event => {
-        const { worktree } = event.payload
-        logger.info('Worktree unarchived', { id: worktree.id })
-
-        handleWorktreeReady(worktree, queryClient)
-        queryClient.invalidateQueries({ queryKey: ['archived-worktrees'] })
-      })
-    )
-
-    // Listen for permanent deletion
-    unlistenPromises.push(
-      listen<WorktreePermanentlyDeletedEvent>(
-        'worktree:permanently_deleted',
-        event => {
-          const { id, project_id } = event.payload
-          logger.info('Worktree permanently deleted', { id })
-          clearLocalWorktreeState(id, queryClient)
-
-          // Invalidate archived worktrees query
-          queryClient.invalidateQueries({ queryKey: ['archived-worktrees'] })
-
-          // Also remove from main cache just in case
-          queryClient.setQueryData<Worktree[]>(
-            projectsQueryKeys.worktrees(project_id),
-            old => {
-              if (!old) return []
-              return old.filter(w => w.id !== id)
-            }
-          )
-        }
-      )
-    )
-
-    // =========================================================================
     // Generic worktree change notification (for backend-created worktrees)
     // =========================================================================
 
@@ -1854,27 +1785,11 @@ export function useWorktreeEvents() {
           return
         }
 
-        const { path, archived_worktree_id, archived_worktree_name } =
-          event.payload
-
-        if (archived_worktree_id) {
-          logger.warn('Path conflict with archived worktree', {
-            path,
-            archivedName: archived_worktree_name,
-            archivedId: archived_worktree_id,
-          })
-          toast.error(
-            `Path conflict with archived worktree "${archived_worktree_name}"`,
-            {
-              description: 'Restore it or permanently delete it first.',
-            }
-          )
-        } else {
-          logger.warn('Path conflict with unknown directory', { path })
-          toast.error('Worktree path already exists', {
-            description: `Remove directory manually: ${path}`,
-          })
-        }
+        const { path } = event.payload
+        logger.warn('Path conflict with unknown directory', { path })
+        toast.error('Worktree path already exists', {
+          description: `Remove directory manually: ${path}`,
+        })
       })
     )
 
@@ -2047,111 +1962,6 @@ export function useDeleteWorktree() {
   })
 }
 
-// ============================================================================
-// Archive Operations
-// ============================================================================
-
-/**
- * Hook to archive a worktree
- * Archives the worktree (hides from UI) but keeps git worktree/branch on disk
- */
-export function useArchiveWorktree() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-      projectId,
-    }: {
-      worktreeId: string
-      projectId: string
-    }): Promise<{ worktreeId: string; projectId: string }> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Archiving worktree', { worktreeId })
-      await invoke('archive_worktree', { worktreeId })
-      logger.info('Worktree archived')
-      return { worktreeId, projectId }
-    },
-    onSuccess: ({ worktreeId, projectId }) => {
-      // Remove worktree from cache (event listener will also do this)
-      queryClient.setQueryData<Worktree[]>(
-        projectsQueryKeys.worktrees(projectId),
-        old => {
-          if (!old) return []
-          return old.filter(w => w.id !== worktreeId)
-        }
-      )
-
-      // Invalidate archived worktrees query so it shows up immediately
-      queryClient.invalidateQueries({ queryKey: ['archived-worktrees'] })
-
-      // Invalidate archived sessions query (worktree's sessions are also archived)
-      queryClient.invalidateQueries({ queryKey: ['all-archived-sessions'] })
-
-      // Cleanup terminal instances for this worktree
-      clearLocalWorktreeState(worktreeId, queryClient)
-
-      // Clear chat if this worktree was active
-      const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
-      if (activeWorktreeId === worktreeId) {
-        clearActiveWorktree()
-      }
-
-      // Clear selection if this worktree was selected
-      const { selectedWorktreeId, selectWorktree } = useProjectsStore.getState()
-      if (selectedWorktreeId === worktreeId) {
-        selectWorktree(null)
-      }
-
-      toast.success('Worktree archived')
-    },
-    onError: error => {
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to archive worktree', { error })
-      toast.error('Failed to archive worktree', { description: message })
-    },
-  })
-}
-
-/**
- * Hook to unarchive a worktree
- * Restores the worktree to the UI
- */
-export function useUnarchiveWorktree() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async (worktreeId: string): Promise<Worktree> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Unarchiving worktree', { worktreeId })
-      const worktree = await invoke<Worktree>('unarchive_worktree', {
-        worktreeId,
-      })
-      logger.info('Worktree unarchived', { worktree })
-      return worktree
-    },
-    onSuccess: () => {
-      // Note: Worktree is added to cache by the event listener for 'worktree:unarchived'
-      // Invalidate archived queries
-      queryClient.invalidateQueries({ queryKey: ['archived-worktrees'] })
-      queryClient.invalidateQueries({ queryKey: ['all-archived-sessions'] })
-
-      toast.success('Worktree restored')
-    },
-    onError: error => {
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to unarchive worktree', { error })
-      toast.error('Failed to restore worktree', { description: message })
-    },
-  })
-}
-
 /**
  * Hook to import an existing worktree directory
  * Used when a directory exists but isn't tracked by Jean
@@ -2231,57 +2041,6 @@ export function useUnmanagedWorktrees(
 }
 
 /**
- * Hook to list all archived worktrees
- */
-export function useArchivedWorktrees() {
-  return useQuery({
-    queryKey: ['archived-worktrees'],
-    queryFn: async (): Promise<Worktree[]> => {
-      if (!isTauri()) {
-        return []
-      }
-
-      logger.debug('Listing archived worktrees')
-      const worktrees = await invoke<Worktree[]>('list_archived_worktrees')
-      logger.debug('Got archived worktrees', { count: worktrees.length })
-      return worktrees
-    },
-    staleTime: 1000 * 60, // 1 minute
-  })
-}
-
-/**
- * Hook to permanently delete an archived worktree
- * This actually removes the git worktree and branch from disk
- */
-export function usePermanentlyDeleteWorktree() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async (worktreeId: string): Promise<string> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Permanently deleting worktree', { worktreeId })
-      await invoke('permanently_delete_worktree', { worktreeId })
-      logger.info('Worktree permanently deleted')
-      return worktreeId
-    },
-    onSuccess: () => {
-      // Invalidate archived worktrees query (event listener will also handle this)
-      queryClient.invalidateQueries({ queryKey: ['archived-worktrees'] })
-      toast.success('Worktree permanently deleted')
-    },
-    onError: error => {
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to permanently delete worktree', { error })
-      toast.error('Failed to delete worktree', { description: message })
-    },
-  })
-}
-
-/**
  * Hook to create or reopen a base branch session
  * Base sessions use the project's base directory directly (no git worktree)
  */
@@ -2339,168 +2098,19 @@ export function useCreateBaseSession() {
 }
 
 /**
- * Hook to close a base session (removes record, no git operations)
- * Preserves sessions for later restoration
- */
-export function useCloseBaseSession() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-    }: {
-      worktreeId: string
-      projectId: string
-    }): Promise<void> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Closing base session', { worktreeId })
-      await invoke('close_base_session', { worktreeId })
-      logger.info('Base session closed')
-    },
-    onSuccess: (_, { projectId, worktreeId }) => {
-      queryClient.invalidateQueries({
-        queryKey: projectsQueryKeys.worktrees(projectId),
-      })
-
-      // Cleanup terminal instances for this worktree
-      clearLocalWorktreeState(worktreeId, queryClient)
-
-      // Clear chat if the closed session was active
-      const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
-      if (activeWorktreeId === worktreeId) {
-        clearActiveWorktree()
-      }
-
-      toast.success('Session closed')
-    },
-    onError: error => {
-      const message =
-        error instanceof Error
-          ? error.message
-          : typeof error === 'string'
-            ? error
-            : 'Unknown error occurred'
-      logger.error('Failed to close session', { error })
-      toast.error('Failed to close session', { description: message })
-    },
-  })
-}
-
-/**
- * Hook to close a base session with clean state (no session preservation)
- * The base session will start fresh when reopened
- */
-export function useCloseBaseSessionClean() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-    }: {
-      worktreeId: string
-      projectId: string
-    }): Promise<void> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Closing base session (clean)', { worktreeId })
-      await invoke('close_base_session_clean', { worktreeId })
-      logger.info('Base session closed (clean)')
-    },
-    onSuccess: (_, { projectId, worktreeId }) => {
-      queryClient.invalidateQueries({
-        queryKey: projectsQueryKeys.worktrees(projectId),
-      })
-
-      // Cleanup terminal instances for this worktree
-      clearLocalWorktreeState(worktreeId, queryClient)
-
-      // Clear chat if the closed session was active
-      const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
-      if (activeWorktreeId === worktreeId) {
-        clearActiveWorktree()
-      }
-
-      toast.success('Session closed')
-    },
-    onError: error => {
-      const message =
-        error instanceof Error
-          ? error.message
-          : typeof error === 'string'
-            ? error
-            : 'Unknown error occurred'
-      logger.error('Failed to close session (clean)', { error })
-      toast.error('Failed to close session', { description: message })
-    },
-  })
-}
-
-export function useCloseBaseSessionArchive() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-    }: {
-      worktreeId: string
-      projectId: string
-    }): Promise<void> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Closing base session (archive)', { worktreeId })
-      await invoke('close_base_session_archive', { worktreeId })
-      logger.info('Base session closed (archive)')
-    },
-    onSuccess: (_, { projectId, worktreeId }) => {
-      queryClient.invalidateQueries({
-        queryKey: projectsQueryKeys.worktrees(projectId),
-      })
-
-      // Invalidate archived sessions query so they show up immediately
-      queryClient.invalidateQueries({ queryKey: ['all-archived-sessions'] })
-
-      // Cleanup terminal instances for this worktree
-      clearLocalWorktreeState(worktreeId, queryClient)
-
-      // Clear chat if the closed session was active
-      const { activeWorktreeId, clearActiveWorktree } = useChatStore.getState()
-      if (activeWorktreeId === worktreeId) {
-        clearActiveWorktree()
-      }
-
-      toast.success('Session archived & closed')
-    },
-    onError: error => {
-      const message =
-        error instanceof Error
-          ? error.message
-          : typeof error === 'string'
-            ? error
-            : 'Unknown error occurred'
-      logger.error('Failed to close session (archive)', { error })
-      toast.error('Failed to close session', { description: message })
-    },
-  })
-}
-
-/**
  * Hook to open a branch on GitHub
  * Works in both native (uses tauri-plugin-opener) and web (uses window.open)
  */
 export function useOpenBranchOnGitHub() {
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- opens a browser URL; no cached data changes
   return useMutation({
     mutationFn: async ({
       repoPath,
+      worktreeId,
       branch,
     }: {
       repoPath: string
+      worktreeId: string
       branch: string
     }): Promise<void> => {
       if (!isTauri()) {
@@ -2515,6 +2125,7 @@ export function useOpenBranchOnGitHub() {
       try {
         const url = await invoke<string>('get_github_branch_url', {
           repoPath,
+          worktreeId,
           branch,
         })
 
@@ -2548,12 +2159,21 @@ export interface GitHubRemote {
 /**
  * Hook to fetch all GitHub remotes for a repository
  */
-export function useGitHubRemotes(repoPath: string | null, enabled: boolean) {
+export function useGitHubRemotes(
+  repoPath: string | null,
+  owner: GitRepoOwner,
+  enabled: boolean
+) {
+  const { worktreeId, projectId } = owner
   return useQuery({
-    queryKey: ['github-remotes', repoPath],
+    queryKey: ['github-remotes', worktreeId ?? projectId ?? null, repoPath],
     queryFn: async () => {
       if (!repoPath) return []
-      return invoke<GitHubRemote[]>('get_github_remotes', { repoPath })
+      return invoke<GitHubRemote[]>('get_github_remotes', {
+        repoPath,
+        worktreeId,
+        projectId,
+      })
     },
     enabled: enabled && repoPath !== null,
     staleTime: 30_000,
@@ -2567,7 +2187,7 @@ export interface ProjectRemote {
 }
 
 /** Extract `owner/repo` from a normalized GitHub remote URL. */
-function githubRepoFromUrl(url: string): string | undefined {
+export function githubRepoFromUrl(url: string): string | undefined {
   const match = url.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/)
   return match?.[1]
 }
@@ -2581,18 +2201,29 @@ function githubRepoFromUrl(url: string): string | undefined {
  */
 export function useProjectRemotes(
   repoPath: string | null | undefined,
+  projectId: string | null | undefined,
   branch: string | null | undefined
 ) {
   return useQuery({
-    queryKey: ['project-remotes', repoPath ?? null, branch ?? null] as const,
+    queryKey: [
+      'project-remotes',
+      projectId ?? null,
+      repoPath ?? null,
+      branch ?? null,
+    ] as const,
     queryFn: async (): Promise<ProjectRemote[]> => {
       if (!repoPath || !branch) return []
 
       const [names, githubRemotes] = await Promise.all([
-        invoke<string[]>('list_remotes_with_branch', { repoPath, branch }),
-        invoke<GitHubRemote[]>('get_github_remotes', { repoPath }).catch(
-          () => [] as GitHubRemote[]
-        ),
+        invoke<string[]>('list_remotes_with_branch', {
+          repoPath,
+          projectId,
+          branch,
+        }),
+        invoke<GitHubRemote[]>('get_github_remotes', {
+          repoPath,
+          projectId,
+        }).catch(() => [] as GitHubRemote[]),
       ])
 
       const repoByRemote = new Map(
@@ -2621,8 +2252,13 @@ export function useProjectRemotes(
  * Hook to open a worktree in Finder
  */
 export function useOpenWorktreeInFinder() {
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- opens the OS file manager; no cached data changes
   return useMutation({
-    mutationFn: async (worktreePath: string): Promise<void> => {
+    mutationFn: async ({
+      worktreePath,
+      worktreeId,
+      projectId,
+    }: { worktreePath: string } & GitRepoOwner): Promise<void> => {
       if (!isTauri()) {
         throw new Error('Not in Tauri context')
       }
@@ -2630,7 +2266,11 @@ export function useOpenWorktreeInFinder() {
       logger.debug(`Opening worktree in ${getFileManagerName()}`, {
         worktreePath,
       })
-      await invoke('open_worktree_in_finder', { worktreePath })
+      await invoke('open_worktree_in_finder', {
+        worktreePath,
+        worktreeId,
+        projectId,
+      })
       logger.info(`Opened worktree in ${getFileManagerName()}`)
     },
     // No query invalidation: OS file manager side effect only
@@ -2653,6 +2293,7 @@ export function useOpenWorktreeInFinder() {
  * Hook to open a project's worktrees folder in Finder
  */
 export function useOpenProjectWorktreesFolder() {
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- opens the OS file manager; no cached data changes
   return useMutation({
     mutationFn: async (projectId: string): Promise<void> => {
       if (!isTauri()) {
@@ -2681,20 +2322,28 @@ export function useOpenProjectWorktreesFolder() {
  * Hook to open a worktree in Terminal
  */
 export function useOpenWorktreeInTerminal() {
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- opens a terminal; no cached data changes
   return useMutation({
     mutationFn: async ({
       worktreePath,
+      worktreeId,
+      projectId,
       terminal,
     }: {
       worktreePath: string
       terminal?: string
-    }): Promise<void> => {
+    } & GitRepoOwner): Promise<void> => {
       if (!isTauri()) {
         throw new Error('Not in Tauri context')
       }
 
       logger.debug('Opening worktree in Terminal', { worktreePath, terminal })
-      await invoke('open_worktree_in_terminal', { worktreePath, terminal })
+      await invoke('open_worktree_in_terminal', {
+        worktreePath,
+        worktreeId,
+        projectId,
+        terminal,
+      })
       logger.info('Opened worktree in Terminal')
     },
     // No query invalidation: OS terminal side effect only
@@ -2715,20 +2364,28 @@ export function useOpenWorktreeInTerminal() {
  * Hook to open a worktree in Editor
  */
 export function useOpenWorktreeInEditor() {
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- opens an editor; no cached data changes
   return useMutation({
     mutationFn: async ({
       worktreePath,
+      worktreeId,
+      projectId,
       editor,
     }: {
       worktreePath: string
       editor?: string
-    }): Promise<void> => {
+    } & GitRepoOwner): Promise<void> => {
       if (!isTauri()) {
         throw new Error('Not in Tauri context')
       }
 
       logger.debug('Opening worktree in Editor', { worktreePath, editor })
-      await invoke('open_worktree_in_editor', { worktreePath, editor })
+      await invoke('open_worktree_in_editor', {
+        worktreePath,
+        worktreeId,
+        projectId,
+        editor,
+      })
       logger.info('Opened worktree in Editor')
     },
     // No query invalidation: OS editor side effect only
@@ -2781,13 +2438,17 @@ export function normalizeRunScripts(
 /**
  * Hook to get full jean.json config for a project
  */
-export function useJeanConfig(projectPath: string | null) {
+export function useJeanConfig(
+  projectPath: string | null,
+  projectId: string | null | undefined
+) {
   return useQuery<JeanConfig | null>({
-    queryKey: ['jean-config', projectPath],
+    queryKey: ['jean-config', projectId ?? null, projectPath],
     queryFn: async () => {
       if (!isTauri() || !projectPath) return null
       const config = await invoke<JeanConfig | null>('get_jean_config', {
         projectPath,
+        projectId,
       })
       return config ?? null
     },
@@ -2805,15 +2466,19 @@ export function useSaveJeanConfig() {
   return useMutation({
     mutationFn: async ({
       projectPath,
+      projectId,
       config,
     }: {
       projectPath: string
+      projectId: string
       config: JeanConfig
     }) => {
-      await invoke('save_jean_config', { projectPath, config })
+      await invoke('save_jean_config', { projectPath, projectId, config })
     },
-    onSuccess: (_, { projectPath }) => {
-      queryClient.invalidateQueries({ queryKey: ['jean-config', projectPath] })
+    onSuccess: (_, { projectPath, projectId }) => {
+      queryClient.invalidateQueries({
+        queryKey: ['jean-config', projectId, projectPath],
+      })
       queryClient.invalidateQueries({ queryKey: ['run-scripts'] })
       queryClient.invalidateQueries({ queryKey: ['ports'] })
       // A saved `provider` block changes git-host resolution; refresh it so
@@ -2832,15 +2497,19 @@ export function useSaveJeanConfig() {
  * Hook to get the run script(s) from jean.json for a worktree.
  * Returns string[] (empty = none configured).
  */
-export function useRunScripts(worktreePath: string | null) {
+export function useRunScripts(
+  worktreePath: string | null,
+  worktreeId: string | null | undefined
+) {
   return useQuery<string[]>({
-    queryKey: ['run-scripts', worktreePath],
+    queryKey: ['run-scripts', worktreeId ?? null, worktreePath],
     queryFn: async () => {
       if (!isTauri() || !worktreePath) return []
 
       logger.debug('Fetching run scripts', { worktreePath })
       const scripts = await invoke<string[]>('get_run_scripts', {
         worktreePath,
+        worktreeId,
       })
       logger.debug('Run scripts result', { scripts })
       return scripts
@@ -2860,12 +2529,25 @@ export interface PackageScript {
 }
 
 /** Get scripts from package.json with the detected package-manager command. */
-export function usePackageScripts(worktreePath: string | null) {
+export function usePackageScripts(
+  worktreePath: string | null,
+  owner: GitRepoOwner | null
+) {
+  const worktreeId = owner?.worktreeId
+  const projectId = owner?.projectId
   return useQuery<PackageScript[]>({
-    queryKey: ['package-scripts', worktreePath],
+    queryKey: [
+      'package-scripts',
+      worktreeId ?? projectId ?? null,
+      worktreePath,
+    ],
     queryFn: () =>
       worktreePath
-        ? invoke<PackageScript[]>('get_package_scripts', { worktreePath })
+        ? invoke<PackageScript[]>('get_package_scripts', {
+            worktreePath,
+            worktreeId,
+            projectId,
+          })
         : Promise.resolve([]),
     enabled: !!worktreePath && hasBackendTransport(),
     staleTime: 0,
@@ -2877,12 +2559,21 @@ export function usePackageScripts(worktreePath: string | null) {
  * Returns PortEntry[] (empty = none configured).
  * Works on native Tauri and web access (via backend transport).
  */
-export function usePorts(worktreePath: string | null) {
+export function usePorts(
+  worktreePath: string | null,
+  owner: GitRepoOwner | null
+) {
+  const worktreeId = owner?.worktreeId
+  const projectId = owner?.projectId
   return useQuery<PortEntry[]>({
-    queryKey: ['ports', worktreePath],
+    queryKey: ['ports', worktreeId ?? projectId ?? null, worktreePath],
     queryFn: async () => {
       if (!worktreePath || !hasBackendTransport()) return []
-      const ports = await invoke<PortEntry[]>('get_ports', { worktreePath })
+      const ports = await invoke<PortEntry[]>('get_ports', {
+        worktreePath,
+        worktreeId,
+        projectId,
+      })
       return ports
     },
     enabled: !!worktreePath && hasBackendTransport(),
@@ -2978,6 +2669,7 @@ export function useCommitChanges() {
 export function useOpenProjectOnGitHub() {
   const queryClient = useQueryClient()
 
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- opens a browser URL; no cached data changes
   return useMutation({
     mutationFn: async (projectId: string): Promise<void> => {
       if (!isTauri()) {
@@ -3005,6 +2697,7 @@ export function useOpenProjectOnGitHub() {
       try {
         const url = await invoke<string>('get_github_repo_url', {
           repoPath: project.path,
+          projectId: project.id,
         })
 
         await openExternal(url, win)
@@ -3033,13 +2726,19 @@ export function useOpenProjectOnGitHub() {
  * Get a dynamically generated PR prompt with git context
  * Includes uncommitted changes count, branch info, and PR template if available
  */
-export async function getPrPrompt(worktreePath: string): Promise<string> {
+export async function getPrPrompt(
+  worktreePath: string,
+  worktreeId: string
+): Promise<string> {
   if (!isTauri()) {
     throw new Error('Not in Tauri context')
   }
 
   logger.debug('Getting PR prompt', { worktreePath })
-  const prompt = await invoke<string>('get_pr_prompt', { worktreePath })
+  const prompt = await invoke<string>('get_pr_prompt', {
+    worktreePath,
+    worktreeId,
+  })
   logger.info('PR prompt generated successfully')
   return prompt
 }
@@ -3055,7 +2754,8 @@ export interface ReviewPromptResponse {
  * Returns the full prompt inline (no file is saved)
  */
 export async function getReviewPrompt(
-  worktreePath: string
+  worktreePath: string,
+  worktreeId: string
 ): Promise<ReviewPromptResponse> {
   if (!isTauri()) {
     throw new Error('Not in Tauri context')
@@ -3064,7 +2764,7 @@ export async function getReviewPrompt(
   logger.debug('Generating review prompt', { worktreePath })
   const response = await invoke<{
     prompt: string
-  }>('get_review_prompt', { worktreePath })
+  }>('get_review_prompt', { worktreePath, worktreeId })
   logger.info('Review prompt generated successfully')
   return {
     prompt: response.prompt,

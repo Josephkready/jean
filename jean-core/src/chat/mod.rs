@@ -1,5 +1,6 @@
 pub(crate) mod acp_permissions;
 pub(crate) mod antigravity;
+pub(crate) mod auth_failure;
 pub(crate) mod claude;
 pub(crate) mod claude_host;
 pub(crate) mod claude_permissions;
@@ -10,6 +11,7 @@ pub(crate) mod commandcode;
 mod commands;
 pub(crate) mod context_instructions;
 pub(crate) mod cursor;
+pub mod delegation;
 pub mod detached;
 pub(crate) mod devin;
 mod devin_permissions;
@@ -24,24 +26,49 @@ pub(crate) mod muse;
 mod naming;
 mod native_history;
 pub(crate) mod opencode;
+pub(crate) mod opencode_v2;
 pub(crate) mod pi;
 pub mod registry;
 pub mod run_log;
 pub mod search;
+pub mod secrets;
 mod session_info;
 pub mod storage;
 pub mod tail;
 pub mod types;
+pub mod usage_summary;
 pub mod wakeup;
 
 pub(crate) use commands::default_model_for_backend;
+pub(crate) use commands::purge_session;
 pub use commands::*;
 pub use mcp_auth::*;
 pub use native_history::*;
 pub use session_info::get_session_info;
-pub use storage::{preserve_base_sessions, restore_base_sessions, with_sessions_mut};
+pub use storage::restore_base_sessions;
+pub use usage_summary::get_usage_summary;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Paths of the embedded Claude and Codex CLIs, as one prompt part.
+pub(crate) fn push_embedded_cli_paths(parts: &mut Vec<String>, app: &tauri::AppHandle) {
+    let lines: Vec<String> = [
+        ("claude", crate::claude_cli::get_cli_binary_path(app)),
+        ("codex", crate::codex_cli::get_cli_binary_path(app)),
+    ]
+    .into_iter()
+    .filter_map(|(name, path)| {
+        let path = path.ok().filter(|path| path.exists())?;
+        Some(format!("- `{name}`: {}", path.display()))
+    })
+    .collect();
+    if !lines.is_empty() {
+        parts.push(format!(
+            "Run these CLIs only with the full path of the embedded binary, never the bare name:\n{}",
+            lines.join("\n")
+        ));
+    }
+}
 
 /// Injected when the parallel-execution magic prompt is cleared. Omitting the
 /// fan-out prompt is not enough: the model still spawns Task sub-agents unless

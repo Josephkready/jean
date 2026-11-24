@@ -508,11 +508,15 @@ export function TerminalView({
         {/* Tab bar - fixed height for consistency */}
         <div
           className={cn(
-            'flex items-stretch border-b border-border',
+            'flex items-stretch border-b border-border/20',
             MODAL_TERMINAL_SECONDARY_ROW_CLASS
           )}
         >
-          <div className="flex min-w-0 items-center overflow-x-auto">
+          <div
+            role="tablist"
+            aria-label="Terminals"
+            className="flex min-w-0 items-center overflow-x-auto"
+          >
             {terminals.map((terminal, index) => {
               const isActive = terminal.id === activeTerminalId
               const isRunning = runningTerminals.has(terminal.id)
@@ -520,8 +524,11 @@ export function TerminalView({
                 index < 9 ? formatShortcutDisplay(`mod+${index + 1}`) : null
 
               return (
+                // Mouse handlers catch events from the tab button and the
+                // empty space around it.
                 <div
                   key={terminal.id}
+                  role="presentation"
                   draggable
                   onDragStart={e => handleTerminalDragStart(e, terminal.id)}
                   onDragOver={handleTerminalDragOver}
@@ -532,7 +539,7 @@ export function TerminalView({
                     e => void handleCloseTerminal(e, terminal.id)
                   )}
                   className={cn(
-                    'group flex shrink-0 items-center gap-1.5 border-r border-border px-3 py-1.5 text-xs transition-colors cursor-pointer',
+                    'group flex shrink-0 items-center gap-1.5 border-r border-border/20 px-3 py-1.5 text-xs transition-colors cursor-pointer',
                     isActive
                       ? 'bg-muted text-foreground'
                       : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
@@ -543,13 +550,19 @@ export function TerminalView({
                   {isRunning && (
                     <span className="h-1.5 w-1.5 rounded-full bg-success" />
                   )}
-                  <span className="max-w-[100px] truncate">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className="max-w-[100px] truncate rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
                     {terminal.label}
-                  </span>
+                  </button>
                   {shortcutLabel && (
                     <Kbd
+                      modHint
                       className={cn(
-                        'h-3.5 px-1 text-[9px]',
+                        'h-3.5 px-1 text-2xs',
                         isActive
                           ? 'bg-background/80 text-foreground'
                           : 'bg-background/60 text-muted-foreground'
@@ -558,13 +571,13 @@ export function TerminalView({
                       {shortcutLabel}
                     </Kbd>
                   )}
-                  {/* Close button - always visible */}
+                  {/* Close button: revealed on hover, dimmed on the active tab */}
                   <button
                     type="button"
                     aria-label="Close terminal"
                     onClick={e => handleCloseTerminal(e, terminal.id)}
                     className={cn(
-                      'rounded p-0.5 opacity-0 transition-opacity hover:bg-muted group-hover:opacity-100',
+                      'rounded p-0.5 opacity-0 transition-opacity hover:bg-muted group-hover:opacity-100 focus-visible:opacity-100',
                       isActive && 'opacity-50'
                     )}
                   >

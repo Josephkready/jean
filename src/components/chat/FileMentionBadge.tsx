@@ -119,7 +119,7 @@ export function FileMentionBadge({
               'flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-border/50 bg-muted/50 transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
               isDirectory
                 ? 'cursor-default'
-                : 'cursor-pointer hover:border-primary/50'
+                : 'cursor-pointer hover:border-foreground/20'
             )}
           >
             {isDirectory ? (
@@ -148,7 +148,7 @@ export function FileMentionBadge({
       </Tooltip>
 
       <Dialog open={isOpen} onOpenChange={setIsOpen}>
-        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-auto sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95">
+        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-fit sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95">
           <DialogTitle className="text-sm font-medium flex items-center gap-2">
             {isDirectory ? (
               <FolderIcon className="h-4 w-4 text-blue-600 dark:text-blue-400" />

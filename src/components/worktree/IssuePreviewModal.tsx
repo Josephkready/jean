@@ -49,6 +49,8 @@ interface IssuePreviewModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   projectPath: string
+  /** Owner of `projectPath`; routes the fetch to the right Jean server */
+  projectId: string | null | undefined
   type: 'issue' | 'pr' | 'security' | 'advisory'
   number: number
   ghsaId?: string
@@ -93,19 +95,26 @@ function Labels({ labels }: { labels: GitHubLabel[] }) {
   )
 }
 
-function CommentItem({ comment }: { comment: GitHubComment }) {
+/** Author header plus markdown body, for issue/PR descriptions and comments */
+function PostCard({
+  author,
+  action,
+  body,
+}: {
+  author: string
+  action: string
+  body: string | null | undefined
+}) {
   return (
     <div className="border border-border rounded-lg overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/50 border-b border-border">
-        <span className="text-sm font-medium">{comment.author.login}</span>
-        <span className="text-xs text-muted-foreground">
-          commented on {formatDate(getCreatedAt(comment))}
-        </span>
+        <span className="text-sm font-medium">{author}</span>
+        <span className="text-xs text-muted-foreground">{action}</span>
       </div>
       <div className="px-4 py-3">
-        {comment.body ? (
+        {body ? (
           <Markdown compact className="text-sm">
-            {comment.body}
+            {body}
           </Markdown>
         ) : (
           <p className="text-sm text-muted-foreground italic">
@@ -114,6 +123,16 @@ function CommentItem({ comment }: { comment: GitHubComment }) {
         )}
       </div>
     </div>
+  )
+}
+
+function CommentItem({ comment }: { comment: GitHubComment }) {
+  return (
+    <PostCard
+      author={comment.author.login}
+      action={`commented on ${formatDate(getCreatedAt(comment))}`}
+      body={comment.body}
+    />
   )
 }
 
@@ -199,25 +218,11 @@ function IssueContent({ detail }: { detail: GitHubIssueDetail }) {
       <Labels labels={detail.labels} />
 
       {/* Body */}
-      <div className="border border-border rounded-lg overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/50 border-b border-border">
-          <span className="text-sm font-medium">{detail.author.login}</span>
-          <span className="text-xs text-muted-foreground">
-            opened this issue on {formatDate(getCreatedAt(detail))}
-          </span>
-        </div>
-        <div className="px-4 py-3">
-          {detail.body ? (
-            <Markdown compact className="text-sm">
-              {detail.body}
-            </Markdown>
-          ) : (
-            <p className="text-sm text-muted-foreground italic">
-              No description provided.
-            </p>
-          )}
-        </div>
-      </div>
+      <PostCard
+        author={detail.author.login}
+        action={`opened this issue on ${formatDate(getCreatedAt(detail))}`}
+        body={detail.body}
+      />
 
       {/* Comments */}
       {detail.comments.length > 0 && (
@@ -292,26 +297,11 @@ function PRContent({
       <Labels labels={detail.labels} />
 
       {/* Body */}
-      <div className="border border-border rounded-lg overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/50 border-b border-border">
-          <span className="text-sm font-medium">{detail.author.login}</span>
-          <span className="text-xs text-muted-foreground">
-            opened this {itemLabel.toLowerCase()} on{' '}
-            {formatDate(getCreatedAt(detail))}
-          </span>
-        </div>
-        <div className="px-4 py-3">
-          {detail.body ? (
-            <Markdown compact className="text-sm">
-              {detail.body}
-            </Markdown>
-          ) : (
-            <p className="text-sm text-muted-foreground italic">
-              No description provided.
-            </p>
-          )}
-        </div>
-      </div>
+      <PostCard
+        author={detail.author.login}
+        action={`opened this ${itemLabel.toLowerCase()} on ${formatDate(getCreatedAt(detail))}`}
+        body={detail.body}
+      />
 
       {/* Reviews */}
       {detail.reviews.length > 0 && (
@@ -367,7 +357,7 @@ const SECURITY_ALERT_STATE_COLORS: Record<string, string> = {
   auto_dismissed: 'text-muted-foreground',
 }
 
-const ADVISORY_STATE_COLORS: Record<string, string> = {
+export const ADVISORY_STATE_COLORS: Record<string, string> = {
   published: 'text-warning',
   closed: 'text-success',
   draft: 'text-muted-foreground',
@@ -594,29 +584,36 @@ export function IssuePreviewModal({
   open,
   onOpenChange,
   projectPath,
+  projectId,
   type,
   number,
   ghsaId,
   repo,
 }: IssuePreviewModalProps) {
-  const { data: gitProviderInfo } = useProjectGitProvider(projectPath)
+  const { data: gitProviderInfo } = useProjectGitProvider(projectPath, {
+    projectId,
+  })
   const forgeLabels = providerLabels(gitProviderInfo?.provider ?? 'github')
   const issueQuery = useGitHubIssue(
     projectPath,
+    projectId,
     type === 'issue' ? number : null,
     repo
   )
   const prQuery = useGitHubPR(
     projectPath,
+    projectId,
     type === 'pr' ? number : null,
     repo
   )
   const securityQuery = useDependabotAlert(
     projectPath,
+    projectId,
     type === 'security' ? number : null
   )
   const advisoryQuery = useRepositoryAdvisory(
     projectPath,
+    projectId,
     type === 'advisory' ? (ghsaId ?? null) : null
   )
 
@@ -655,14 +652,8 @@ export function IssuePreviewModal({
     type === 'advisory' ? ghsaId : repo ? `${repo}#${number}` : `#${number}`
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={open => {
-        console.log('[DIALOG-DEBUG] Preview onOpenChange', { open })
-        onOpenChange(open)
-      }}
-    >
-      <DialogContent className="!fixed !inset-0 !translate-x-0 !translate-y-0 !w-screen !h-[100dvh] !max-w-none !max-h-none !rounded-none !p-4 sm:!p-6 sm:!inset-auto sm:!top-[50%] sm:!left-[50%] sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:!w-[96vw] sm:!max-w-[96vw] sm:!h-[94dvh] sm:!max-h-[94dvh] sm:!rounded-lg flex flex-col overflow-hidden z-[80] [&>[data-slot=dialog-close]]:top-4 sm:[&>[data-slot=dialog-close]]:top-6">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="!fixed !inset-0 !w-screen !h-[100dvh] !max-w-none !max-h-none !rounded-none !p-4 sm:!p-6 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-[85vh] sm:!max-h-[85vh] sm:!rounded-lg flex flex-col overflow-hidden z-[80] [&>[data-slot=dialog-close]]:top-4 sm:[&>[data-slot=dialog-close]]:top-6">
         <DialogHeader className="flex-shrink-0 pr-16 text-left">
           <DialogTitle className="text-lg flex items-center gap-3 min-w-0">
             <span className="truncate">

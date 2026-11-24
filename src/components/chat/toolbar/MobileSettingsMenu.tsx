@@ -1,11 +1,11 @@
 import { useClaudeDefaultAccountLabel } from '@/services/claude-cli'
 import {
   useCallback,
-  useEffect,
   useMemo,
-  useRef,
+  useImperativeHandle,
   useState,
   type ReactNode,
+  type Ref,
 } from 'react'
 import {
   Brain,
@@ -136,6 +136,10 @@ import {
   resolvePortUrl,
 } from '@/components/browser/default-tab-url'
 import { usePreferences } from '@/services/preferences'
+import {
+  MobileContextsSheet,
+  type MobileContextGroup,
+} from './MobileContextsSheet'
 import { LOCAL_SERVER_ID } from '@/types/server-resource'
 
 /** Stable defaults so omit/undefined doesn't allocate a new [] each render. */
@@ -143,6 +147,14 @@ const EMPTY_CODEX_PROVIDERS: CodexProviderProfile[] = []
 const EMPTY_RUN_SCRIPTS: string[] = []
 const EMPTY_PACKAGE_SCRIPTS: PackageScript[] = []
 const EMPTY_FAVORITE_PACKAGE_SCRIPTS: string[] = []
+
+export interface MobileSettingsMenuHandle {
+  /**
+   * Open the effort/thinking sheet without reopening the gear menu
+   * (issue #574). Does nothing when the model has no reasoning control.
+   */
+  openReasoningSheet: () => void
+}
 
 interface MobileSettingsMenuProps {
   isDisabled: boolean
@@ -167,11 +179,8 @@ interface MobileSettingsMenuProps {
   handleProviderChange: (value: string) => void
   handleEffortLevelChange: (value: string) => void
   handleThinkingLevelChange: (value: string) => void
-  /**
-   * Bump this after a mobile model pick so the reasoning (effort/thinking)
-   * sheet opens without reopening the gear menu (issue #574).
-   */
-  openReasoningSheetSignal?: number
+  /** Lets the toolbar open the reasoning sheet after a mobile model pick. */
+  ref?: Ref<MobileSettingsMenuHandle>
 
   loadedIssueContexts: LoadedIssueContext[]
   loadedPRContexts: LoadedPullRequestContext[]
@@ -231,7 +240,7 @@ export function MobileSettingsMenu({
   handleProviderChange,
   handleEffortLevelChange,
   handleThinkingLevelChange,
-  openReasoningSheetSignal = 0,
+  ref,
   loadedIssueContexts,
   loadedPRContexts,
   loadedDiscussionContexts,
@@ -367,10 +376,16 @@ export function MobileSettingsMenu({
   const isMobile = useIsMobile()
   const queryClient = useQueryClient()
   const [menuOpen, setMenuOpen] = useState(false)
-  const [effortSheetOpen, setEffortSheetOpen] = useState(false)
-  const [thinkingSheetOpen, setThinkingSheetOpen] = useState(false)
+  const [reasoningSheetOpen, setReasoningSheetOpen] = useState(false)
+  // One sheet state: the current model decides effort vs thinking at render.
+  const effortSheetOpen =
+    reasoningSheetOpen && !hideReasoningControl && usesEffortControl
+  const thinkingSheetOpen =
+    reasoningSheetOpen && !hideReasoningControl && !usesEffortControl
+  const [providerSheetOpen, setProviderSheetOpen] = useState(false)
   const [mcpSheetOpen, setMcpSheetOpen] = useState(false)
   const [scriptsSheetOpen, setScriptsSheetOpen] = useState(false)
+  const [contextsSheetOpen, setContextsSheetOpen] = useState(false)
   const [resumeCommand, setResumeCommand] = useState<string | null>(null)
   const { hasActiveTerminal } = useWorktreeTerminalStatus(worktreeId ?? '')
   // Keep radio/checkbox selections from dismissing the gear menu so users can
@@ -390,8 +405,17 @@ export function MobileSettingsMenu({
   const showCodexProviders =
     customCodexProviders.length > 0 && selectedBackend === 'codex'
   const showProviderMenu = showClaudeProviders || showCodexProviders
+  const defaultProviderOption = showClaudeProviders
+    ? { value: '__anthropic__', label: defaultAccountLabel }
+    : { value: '__default__', label: 'OpenAI' }
+  const selectedProviderValue = selectedProvider ?? defaultProviderOption.value
+  const customProviderNames = (
+    showClaudeProviders ? customCliProfiles : customCodexProviders
+  ).map(profile => profile.name)
   const { data: worktree } = useWorktree(worktreeId ?? null)
-  const { data: gitProviderInfo } = useProjectGitProvider(worktree?.path)
+  const { data: gitProviderInfo } = useProjectGitProvider(worktree?.path, {
+    worktreeId: worktree?.id,
+  })
   const gitProvider = gitProviderInfo?.provider ?? 'github'
   const forgeLabels = providerLabels(gitProvider)
   const forgeHost =
@@ -401,7 +425,10 @@ export function MobileSettingsMenu({
   const project = worktree
     ? projects?.find(p => p.id === worktree.project_id)
     : null
-  const { data: ports = [] } = usePorts(worktree?.path ?? null)
+  const { data: ports = [] } = usePorts(
+    worktree?.path ?? null,
+    worktree ? { worktreeId: worktree.id } : null
+  )
   const ownerServerId = worktree?.serverId
   const preferenceServerId =
     ownerServerId && ownerServerId !== LOCAL_SERVER_ID
@@ -427,14 +454,14 @@ export function MobileSettingsMenu({
     requestAnimationFrame(() => onOpenBackendModelPicker())
   }
 
-  const openEffortPicker = () => {
+  const openReasoningPicker = () => {
     setMenuOpen(false)
-    requestAnimationFrame(() => setEffortSheetOpen(true))
+    requestAnimationFrame(() => setReasoningSheetOpen(true))
   }
 
-  const openThinkingPicker = () => {
+  const openProviderPicker = () => {
     setMenuOpen(false)
-    requestAnimationFrame(() => setThinkingSheetOpen(true))
+    requestAnimationFrame(() => setProviderSheetOpen(true))
   }
 
   const openMcpPicker = () => {
@@ -447,23 +474,16 @@ export function MobileSettingsMenu({
     requestAnimationFrame(() => setScriptsSheetOpen(true))
   }
 
-  // After mobile model selection, auto-open effort/thinking so users don't
-  // have to reopen the settings cog (issue #574).
-  const lastReasoningSheetSignalRef = useRef(0)
-  useEffect(() => {
-    if (!openReasoningSheetSignal) return
-    if (openReasoningSheetSignal === lastReasoningSheetSignalRef.current) return
-    lastReasoningSheetSignalRef.current = openReasoningSheetSignal
-    if (hideReasoningControl) return
+  const openContextsSheet = () => {
     setMenuOpen(false)
-    if (usesEffortControl) {
-      setThinkingSheetOpen(false)
-      requestAnimationFrame(() => setEffortSheetOpen(true))
-    } else {
-      setEffortSheetOpen(false)
-      requestAnimationFrame(() => setThinkingSheetOpen(true))
-    }
-  }, [openReasoningSheetSignal, hideReasoningControl, usesEffortControl])
+    requestAnimationFrame(() => setContextsSheetOpen(true))
+  }
+
+  useImperativeHandle(ref, () => ({
+    openReasoningSheet: () => {
+      if (!hideReasoningControl) openReasoningPicker()
+    },
+  }))
 
   const getActiveResumeCommand = useCallback(() => {
     if (!worktreeId) return null
@@ -517,13 +537,17 @@ export function MobileSettingsMenu({
   const handleOpenGitHub = useCallback(() => {
     const branch = worktree?.branch
     const targetPath = worktree?.path
+    const worktreeId = worktree?.id
     if (!branch) {
       if (isNativeApp()) {
         const projectId = useProjectsStore.getState().selectedProjectId
         if (projectId) invoke('open_project_on_github', { projectId })
       } else if (targetPath) {
         const win = preOpenWindow()
-        invoke<string>('get_github_repo_url', { repoPath: targetPath })
+        invoke<string>('get_github_repo_url', {
+          repoPath: targetPath,
+          worktreeId,
+        })
           .then(url => openExternal(url, win))
           .catch(() => {
             win?.close()
@@ -534,7 +558,10 @@ export function MobileSettingsMenu({
     }
     if (!targetPath) return
     const win = preOpenWindow()
-    invoke<GitHubRemote[]>('get_github_remotes', { repoPath: targetPath })
+    invoke<GitHubRemote[]>('get_github_remotes', {
+      repoPath: targetPath,
+      worktreeId,
+    })
       .then(remotes => {
         if (!remotes || remotes.length <= 1) {
           const url = remotes?.[0]?.url
@@ -542,25 +569,42 @@ export function MobileSettingsMenu({
           else win?.close()
         } else {
           win?.close()
-          useUIStore.getState().openRemotePicker(targetPath, remoteName => {
-            const remote = remotes.find(r => r.name === remoteName)
-            if (remote)
-              openExternal(branchWebUrl(remote.url, branch, gitProvider))
-          })
+          const ownerId = worktree?.id
+          if (!ownerId) return
+          useUIStore
+            .getState()
+            .openRemotePicker(
+              targetPath,
+              { worktreeId: ownerId },
+              remoteName => {
+                const remote = remotes.find(r => r.name === remoteName)
+                if (remote)
+                  openExternal(branchWebUrl(remote.url, branch, gitProvider))
+              }
+            )
         }
       })
       .catch(() => {
         win?.close()
         toast.error('Failed to fetch remotes')
       })
-  }, [forgeLabels.name, gitProvider, worktree?.branch, worktree?.path])
+  }, [
+    forgeLabels.name,
+    gitProvider,
+    worktree?.branch,
+    worktree?.id,
+    worktree?.path,
+  ])
 
   const openPrByNumber = useCallback(
     (number: number) => {
       const targetPath = worktree?.path
       if (!targetPath) return
       const win = preOpenWindow()
-      invoke<GitHubRemote[]>('get_github_remotes', { repoPath: targetPath })
+      invoke<GitHubRemote[]>('get_github_remotes', {
+        repoPath: targetPath,
+        worktreeId: worktree?.id,
+      })
         .then(remotes => {
           if (!remotes || remotes.length <= 1) {
             const url = remotes?.[0]?.url
@@ -569,11 +613,21 @@ export function MobileSettingsMenu({
             else win?.close()
           } else {
             win?.close()
-            useUIStore.getState().openRemotePicker(targetPath, remoteName => {
-              const remote = remotes.find(r => r.name === remoteName)
-              if (remote)
-                openExternal(pullRequestWebUrl(remote.url, number, gitProvider))
-            })
+            const ownerId = worktree?.id
+            if (!ownerId) return
+            useUIStore
+              .getState()
+              .openRemotePicker(
+                targetPath,
+                { worktreeId: ownerId },
+                remoteName => {
+                  const remote = remotes.find(r => r.name === remoteName)
+                  if (remote)
+                    openExternal(
+                      pullRequestWebUrl(remote.url, number, gitProvider)
+                    )
+                }
+              )
           }
         })
         .catch(() => {
@@ -581,19 +635,107 @@ export function MobileSettingsMenu({
           toast.error('Failed to fetch remotes')
         })
     },
-    [gitProvider, worktree?.path]
+    [gitProvider, worktree?.id, worktree?.path]
   )
 
   const hasLinkedPr = !!(prUrl && prNumber) || !!stackedOnPR
-  const hasContexts =
-    loadedIssueContexts.length > 0 ||
-    loadedPRContexts.length > 0 ||
-    loadedDiscussionContexts.length > 0 ||
-    loadedSecurityContexts.length > 0 ||
-    loadedAdvisoryContexts.length > 0 ||
-    loadedLinearContexts.length > 0 ||
-    loadedSentryContexts.length > 0 ||
-    attachedSavedContexts.length > 0
+  const repoUrl = (owner: string, name: string) =>
+    hostedRepoWebUrl(forgeHost, owner, name)
+  const contextGroups: MobileContextGroup[] = [
+    {
+      title: 'Issues',
+      items: loadedIssueContexts.map(ctx => ({
+        key: String(ctx.number),
+        icon: <CircleDot className="h-4 w-4 shrink-0 text-success" />,
+        label: `#${ctx.number} ${ctx.title}`,
+        onView: () => handleViewIssue(ctx),
+        externalUrl: issueWebUrl(
+          repoUrl(ctx.repoOwner, ctx.repoName),
+          ctx.number,
+          gitProvider
+        ),
+      })),
+    },
+    {
+      title: `${forgeLabels.pullRequest}s`,
+      items: loadedPRContexts.map(ctx => ({
+        key: String(ctx.number),
+        icon: <GitPullRequest className="h-4 w-4 shrink-0 text-success" />,
+        label: `#${ctx.number} ${ctx.title}`,
+        onView: () => handleViewPR(ctx),
+        externalUrl: pullRequestWebUrl(
+          repoUrl(ctx.repoOwner, ctx.repoName),
+          ctx.number,
+          gitProvider
+        ),
+      })),
+    },
+    {
+      title: 'Discussions',
+      items: loadedDiscussionContexts.map(ctx => ({
+        key: String(ctx.number),
+        icon: <MessagesSquare className="h-4 w-4 shrink-0 text-success" />,
+        label: `#${ctx.number} ${ctx.title}`,
+        onView: () => handleViewDiscussion(ctx),
+        externalUrl: `https://github.com/${ctx.repoOwner}/${ctx.repoName}/discussions/${ctx.number}`,
+      })),
+    },
+    {
+      title: 'Security Alerts',
+      items: loadedSecurityContexts.map(ctx => ({
+        key: String(ctx.number),
+        icon: <Shield className="h-4 w-4 shrink-0 text-warning" />,
+        label: `#${ctx.number} ${ctx.packageName} (${ctx.severity})`,
+        onView: () => handleViewSecurityAlert(ctx),
+        externalUrl: `https://github.com/${ctx.repoOwner}/${ctx.repoName}/security/dependabot/${ctx.number}`,
+      })),
+    },
+    {
+      title: 'Advisories',
+      items: loadedAdvisoryContexts.map(ctx => ({
+        key: ctx.ghsaId,
+        icon: <ShieldAlert className="h-4 w-4 shrink-0 text-warning" />,
+        label: `${ctx.ghsaId} — ${ctx.summary}`,
+        onView: () => handleViewAdvisory(ctx),
+        externalUrl: `https://github.com/${ctx.repoOwner}/${ctx.repoName}/security/advisories/${ctx.ghsaId}`,
+      })),
+    },
+    {
+      title: 'Linear Issues',
+      items: loadedLinearContexts.map(ctx => ({
+        key: ctx.identifier,
+        icon: (
+          <LinearIcon className="h-4 w-4 shrink-0 text-violet-600 dark:text-violet-400" />
+        ),
+        label: `${ctx.identifier} ${ctx.title}`,
+        onView: () => handleViewLinear(ctx),
+        externalUrl: ctx.url,
+      })),
+    },
+    {
+      title: 'Sentry Issues',
+      items: loadedSentryContexts.map(ctx => ({
+        key: ctx.id,
+        icon: <Sentry className="h-4 w-4 shrink-0 text-warning" />,
+        label: `${ctx.shortId} ${ctx.title}`,
+        onView: () => handleViewSentry(ctx),
+        externalUrl: ctx.permalink,
+      })),
+    },
+    {
+      title: 'Saved contexts',
+      items: attachedSavedContexts.map(ctx => ({
+        key: ctx.slug,
+        icon: <FolderOpen className="h-4 w-4 shrink-0 text-info" />,
+        label: ctx.name || ctx.slug,
+        onView: () => handleViewSavedContext(ctx),
+      })),
+    },
+  ].filter(group => group.items.length > 0)
+  const contextCount = contextGroups.reduce(
+    (count, group) => count + group.items.length,
+    0
+  )
   const hasToggleableMcpServers = availableMcpServers.some(
     server => !server.disabled
   )
@@ -615,71 +757,57 @@ export function MobileSettingsMenu({
           align={isMobile ? 'end' : 'start'}
           className="w-72"
         >
-          {showProviderMenu && (
+          {showProviderMenu && isMobile ? (
+            <DropdownMenuItem onSelect={openProviderPicker}>
+              <Sparkles className="h-4 w-4 text-muted-foreground" />
+              <span>Provider</span>
+              <span className="ml-auto min-w-0 truncate text-right text-xs text-muted-foreground">
+                {providerDisplayName}
+              </span>
+              <ChevronRight className="ml-2 h-4 w-4 shrink-0 text-foreground" />
+            </DropdownMenuItem>
+          ) : showProviderMenu ? (
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger className="[&>svg:last-child]:!ml-2">
                 <Sparkles className="mr-2 h-4 w-4 text-muted-foreground" />
                 <span>Provider</span>
-                <span className="ml-auto text-xs text-muted-foreground">
+                <span className="ml-auto min-w-0 truncate text-right text-xs text-muted-foreground">
                   {providerDisplayName}
                 </span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
-                {showClaudeProviders ? (
-                  <DropdownMenuRadioGroup
-                    value={selectedProvider ?? '__anthropic__'}
-                    onValueChange={handleProviderChange}
+                <DropdownMenuRadioGroup
+                  value={selectedProviderValue}
+                  onValueChange={handleProviderChange}
+                >
+                  <DropdownMenuRadioItem
+                    value={defaultProviderOption.value}
+                    onSelect={keepMenuOpenOnSelect}
+                    title={
+                      showClaudeProviders
+                        ? (defaultAccountEmail ?? undefined)
+                        : undefined
+                    }
                   >
+                    {defaultProviderOption.label}
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    Custom Providers
+                  </DropdownMenuLabel>
+                  {customProviderNames.map(name => (
                     <DropdownMenuRadioItem
-                      value="__anthropic__"
-                      onSelect={keepMenuOpenOnSelect}
-                      title={defaultAccountEmail ?? undefined}
-                    >
-                      {defaultAccountLabel}
-                    </DropdownMenuRadioItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-xs text-muted-foreground">
-                      Custom Providers
-                    </DropdownMenuLabel>
-                    {customCliProfiles.map(profile => (
-                      <DropdownMenuRadioItem
-                        key={profile.name}
-                        value={profile.name}
-                        onSelect={keepMenuOpenOnSelect}
-                      >
-                        {profile.name}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                ) : (
-                  <DropdownMenuRadioGroup
-                    value={selectedProvider ?? '__default__'}
-                    onValueChange={handleProviderChange}
-                  >
-                    <DropdownMenuRadioItem
-                      value="__default__"
+                      key={name}
+                      value={name}
                       onSelect={keepMenuOpenOnSelect}
                     >
-                      Default (OpenAI)
+                      {name}
                     </DropdownMenuRadioItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-xs text-muted-foreground">
-                      Custom Providers
-                    </DropdownMenuLabel>
-                    {customCodexProviders.map(profile => (
-                      <DropdownMenuRadioItem
-                        key={profile.name}
-                        value={profile.name}
-                        onSelect={keepMenuOpenOnSelect}
-                      >
-                        {profile.name}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                )}
+                  ))}
+                </DropdownMenuRadioGroup>
               </DropdownMenuSubContent>
             </DropdownMenuSub>
-          )}
+          ) : null}
 
           {!hideModelPicker && (
             <DropdownMenuItem onSelect={openBackendModelPicker}>
@@ -698,7 +826,7 @@ export function MobileSettingsMenu({
           )}
 
           {hideReasoningControl ? null : usesEffortControl && isMobile ? (
-            <DropdownMenuItem onSelect={openEffortPicker}>
+            <DropdownMenuItem onSelect={openReasoningPicker}>
               <Brain className="h-4 w-4 text-muted-foreground" />
               <span>Effort</span>
               <span className="ml-auto w-16 text-right text-xs text-muted-foreground">
@@ -736,7 +864,7 @@ export function MobileSettingsMenu({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
           ) : isMobile ? (
-            <DropdownMenuItem onSelect={openThinkingPicker}>
+            <DropdownMenuItem onSelect={openReasoningPicker}>
               <Brain className="h-4 w-4 text-muted-foreground" />
               <span>Thinking</span>
               <span className="ml-auto w-16 text-right text-xs text-muted-foreground">
@@ -817,10 +945,10 @@ export function MobileSettingsMenu({
                       {showHeaders && (
                         <>
                           {idx > 0 && <DropdownMenuSeparator />}
-                          <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium py-1">
+                          <DropdownMenuLabel className="py-1 text-xs font-medium text-muted-foreground">
                             <BackendLabel
                               backend={backend}
-                              badgeClassName="text-[8px] leading-3"
+                              badgeClassName="text-2xs leading-3"
                             />
                           </DropdownMenuLabel>
                         </>
@@ -879,6 +1007,13 @@ export function MobileSettingsMenu({
             >
               <Paperclip className="h-4 w-4" />
               Attachments
+            </DropdownMenuItem>
+          )}
+          {contextCount > 0 && (
+            <DropdownMenuItem onSelect={openContextsSheet}>
+              <FolderOpen className="h-4 w-4" />
+              <span>Contexts ({contextCount})</span>
+              <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-foreground" />
             </DropdownMenuItem>
           )}
           {worktreeId && (
@@ -1031,327 +1166,55 @@ export function MobileSettingsMenu({
               )}
             </>
           )}
-
-          {hasContexts && (
-            <>
-              <DropdownMenuSeparator />
-              {loadedIssueContexts.length > 0 && (
-                <>
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Issues
-                  </DropdownMenuLabel>
-                  {loadedIssueContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.number}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewIssue(ctx)
-                      }}
-                    >
-                      <CircleDot className="h-4 w-4 text-success" />
-                      <span className="truncate">
-                        #{ctx.number} {ctx.title}
-                      </span>
-                      <button
-                        type="button"
-                        aria-label="Open external link"
-                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
-                        onClick={e => {
-                          e.stopPropagation()
-                          openExternal(
-                            issueWebUrl(
-                              hostedRepoWebUrl(
-                                forgeHost,
-                                ctx.repoOwner,
-                                ctx.repoName
-                              ),
-                              ctx.number,
-                              gitProvider
-                            )
-                          )
-                        }}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-                      </button>
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-              {loadedPRContexts.length > 0 && (
-                <>
-                  {loadedIssueContexts.length > 0 && <DropdownMenuSeparator />}
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    {forgeLabels.pullRequest}s
-                  </DropdownMenuLabel>
-                  {loadedPRContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.number}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewPR(ctx)
-                      }}
-                    >
-                      <GitPullRequest className="h-4 w-4 text-success" />
-                      <span className="truncate">
-                        #{ctx.number} {ctx.title}
-                      </span>
-                      <button
-                        type="button"
-                        aria-label="Open external link"
-                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
-                        onClick={e => {
-                          e.stopPropagation()
-                          openExternal(
-                            pullRequestWebUrl(
-                              hostedRepoWebUrl(
-                                forgeHost,
-                                ctx.repoOwner,
-                                ctx.repoName
-                              ),
-                              ctx.number,
-                              gitProvider
-                            )
-                          )
-                        }}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-                      </button>
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-              {loadedDiscussionContexts.length > 0 && (
-                <>
-                  {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0) && <DropdownMenuSeparator />}
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Discussions
-                  </DropdownMenuLabel>
-                  {loadedDiscussionContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.number}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewDiscussion(ctx)
-                      }}
-                    >
-                      <MessagesSquare className="h-4 w-4 text-success" />
-                      <span className="truncate">
-                        #{ctx.number} {ctx.title}
-                      </span>
-                      <button
-                        type="button"
-                        aria-label="Open external link"
-                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
-                        onClick={e => {
-                          e.stopPropagation()
-                          openExternal(
-                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/discussions/${ctx.number}`
-                          )
-                        }}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-                      </button>
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-              {loadedSecurityContexts.length > 0 && (
-                <>
-                  {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0 ||
-                    loadedDiscussionContexts.length > 0) && (
-                    <DropdownMenuSeparator />
-                  )}
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Security Alerts
-                  </DropdownMenuLabel>
-                  {loadedSecurityContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.number}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewSecurityAlert(ctx)
-                      }}
-                    >
-                      <Shield className="h-4 w-4 text-warning" />
-                      <span className="truncate">
-                        #{ctx.number} {ctx.packageName} ({ctx.severity})
-                      </span>
-                      <button
-                        type="button"
-                        aria-label="Open external link"
-                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
-                        onClick={e => {
-                          e.stopPropagation()
-                          openExternal(
-                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/security/dependabot/${ctx.number}`
-                          )
-                        }}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-                      </button>
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-              {loadedAdvisoryContexts.length > 0 && (
-                <>
-                  {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0 ||
-                    loadedDiscussionContexts.length > 0 ||
-                    loadedSecurityContexts.length > 0) && (
-                    <DropdownMenuSeparator />
-                  )}
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Advisories
-                  </DropdownMenuLabel>
-                  {loadedAdvisoryContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.ghsaId}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewAdvisory(ctx)
-                      }}
-                    >
-                      <ShieldAlert className="h-4 w-4 text-warning" />
-                      <span className="truncate">
-                        {ctx.ghsaId} — {ctx.summary}
-                      </span>
-                      <button
-                        type="button"
-                        aria-label="Open external link"
-                        className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
-                        onClick={e => {
-                          e.stopPropagation()
-                          openExternal(
-                            `https://github.com/${ctx.repoOwner}/${ctx.repoName}/security/advisories/${ctx.ghsaId}`
-                          )
-                        }}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-                      </button>
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-              {loadedLinearContexts.length > 0 && (
-                <>
-                  {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0 ||
-                    loadedDiscussionContexts.length > 0 ||
-                    loadedSecurityContexts.length > 0 ||
-                    loadedAdvisoryContexts.length > 0) && (
-                    <DropdownMenuSeparator />
-                  )}
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Linear Issues
-                  </DropdownMenuLabel>
-                  {loadedLinearContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.identifier}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewLinear(ctx)
-                      }}
-                    >
-                      <LinearIcon className="h-4 w-4 text-violet-600 dark:text-violet-400" />
-                      <span className="truncate">
-                        {ctx.identifier} {ctx.title}
-                      </span>
-                      {ctx.url && (
-                        <button
-                          type="button"
-                          aria-label="Open external link"
-                          className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
-                          onClick={e => {
-                            e.stopPropagation()
-                            if (ctx.url) openExternal(ctx.url)
-                          }}
-                        >
-                          <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-                        </button>
-                      )}
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-              {loadedSentryContexts.length > 0 && (
-                <>
-                  {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0 ||
-                    loadedDiscussionContexts.length > 0 ||
-                    loadedSecurityContexts.length > 0 ||
-                    loadedAdvisoryContexts.length > 0 ||
-                    loadedLinearContexts.length > 0) && (
-                    <DropdownMenuSeparator />
-                  )}
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Sentry Issues
-                  </DropdownMenuLabel>
-                  {loadedSentryContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.id}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewSentry(ctx)
-                      }}
-                    >
-                      <Sentry className="h-4 w-4 text-warning" />
-                      <span className="truncate">
-                        {ctx.shortId} {ctx.title}
-                      </span>
-                      {ctx.permalink && (
-                        <button
-                          type="button"
-                          aria-label="Open external link"
-                          className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
-                          onClick={event => {
-                            event.stopPropagation()
-                            openExternal(ctx.permalink)
-                          }}
-                        >
-                          <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-                        </button>
-                      )}
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-              {attachedSavedContexts.length > 0 && (
-                <>
-                  {(loadedIssueContexts.length > 0 ||
-                    loadedPRContexts.length > 0 ||
-                    loadedDiscussionContexts.length > 0 ||
-                    loadedSecurityContexts.length > 0 ||
-                    loadedAdvisoryContexts.length > 0 ||
-                    loadedLinearContexts.length > 0 ||
-                    loadedSentryContexts.length > 0) && (
-                    <DropdownMenuSeparator />
-                  )}
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Contexts
-                  </DropdownMenuLabel>
-                  {attachedSavedContexts.map(ctx => (
-                    <DropdownMenuItem
-                      key={ctx.slug}
-                      onClick={() => {
-                        setMenuOpen(false)
-                        handleViewSavedContext(ctx)
-                      }}
-                    >
-                      <FolderOpen className="h-4 w-4 text-info" />
-                      <span className="truncate">{ctx.name || ctx.slug}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              )}
-            </>
-          )}
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <Sheet open={effortSheetOpen} onOpenChange={setEffortSheetOpen}>
+      <Sheet
+        open={providerSheetOpen && showProviderMenu}
+        onOpenChange={setProviderSheetOpen}
+      >
+        <SheetContent
+          side="bottom"
+          className="max-h-[75svh] overflow-hidden rounded-t-xl p-0"
+          showCloseButton={false}
+        >
+          <SheetHeader className="shrink-0 border-b px-4 py-3 text-left">
+            <SheetTitle>Select provider</SheetTitle>
+            <SheetDescription>
+              Choose which provider runs this session.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="overflow-y-auto px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+            {[defaultProviderOption.value, ...customProviderNames].map(
+              (value, index) => {
+                const selected = value === selectedProviderValue
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    className={cn(
+                      'flex min-h-12 w-full items-center gap-3 rounded-lg px-3 text-left active:bg-accent',
+                      selected && 'bg-accent'
+                    )}
+                    aria-pressed={selected}
+                    onClick={() => {
+                      handleProviderChange(value)
+                      setProviderSheetOpen(false)
+                    }}
+                  >
+                    <span className="flex-1 font-medium">
+                      {index === 0 ? defaultProviderOption.label : value}
+                    </span>
+                    {selected && <Check className="h-4 w-4 shrink-0" />}
+                  </button>
+                )
+              }
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={effortSheetOpen} onOpenChange={setReasoningSheetOpen}>
         <SheetContent
           side="bottom"
           className="max-h-[75svh] overflow-hidden rounded-t-xl p-0"
@@ -1377,7 +1240,7 @@ export function MobileSettingsMenu({
                   aria-pressed={selected}
                   onClick={() => {
                     handleEffortLevelChange(option.value)
-                    setEffortSheetOpen(false)
+                    setReasoningSheetOpen(false)
                   }}
                 >
                   <span className="flex-1">
@@ -1394,7 +1257,7 @@ export function MobileSettingsMenu({
         </SheetContent>
       </Sheet>
 
-      <Sheet open={thinkingSheetOpen} onOpenChange={setThinkingSheetOpen}>
+      <Sheet open={thinkingSheetOpen} onOpenChange={setReasoningSheetOpen}>
         <SheetContent
           side="bottom"
           className="max-h-[75svh] overflow-hidden rounded-t-xl p-0"
@@ -1422,7 +1285,7 @@ export function MobileSettingsMenu({
                   aria-pressed={selected}
                   onClick={() => {
                     handleThinkingLevelChange(option.value)
-                    setThinkingSheetOpen(false)
+                    setReasoningSheetOpen(false)
                   }}
                 >
                   <span className="flex-1">
@@ -1560,6 +1423,12 @@ export function MobileSettingsMenu({
           </div>
         </SheetContent>
       </Sheet>
+
+      <MobileContextsSheet
+        open={contextsSheetOpen}
+        onOpenChange={setContextsSheetOpen}
+        groups={contextGroups}
+      />
     </>
   )
 }

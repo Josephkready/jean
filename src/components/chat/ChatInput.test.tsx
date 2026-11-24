@@ -1,9 +1,13 @@
 import { createRef } from 'react'
 import { QueryClient } from '@tanstack/react-query'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { ChatInput } from './ChatInput'
+import { withUniqueTokens, type MentionCandidate } from './agent-mentions'
 import { invoke } from '@/lib/transport'
+import { queryClient } from '@/lib/query-client'
+import { preferencesQueryKeys } from '@/services/preferences'
+import { chatQueryKeys } from '@/services/chat'
 import type * as EnvironmentModule from '@/lib/environment'
 import type * as PreferencesModule from '@/services/preferences'
 import { useUIStore } from '@/store/ui-store'
@@ -60,7 +64,8 @@ vi.mock('./attachment-processing', () => ({
 }))
 
 vi.mock('./FileMentionPopover', () => ({
-  FileMentionPopover: () => null,
+  FileMentionPopover: ({ open }: { open: boolean }) =>
+    open ? <div>File picker</div> : null,
 }))
 
 vi.mock('./ContextMentionPopover', () => ({
@@ -140,6 +145,23 @@ vi.mock('./ContextMentionPopover', () => ({
           }
         >
           Add selected PR
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            onSelectContext(
+              {
+                id: 'advisory:GHSA-abcd',
+                type: 'advisory',
+                label: 'GHSA-abcd',
+                title: 'RCE in webhook',
+                advisory: { ghsaId: 'GHSA-abcd', severity: 'high' },
+              },
+              true
+            )
+          }
+        >
+          Investigate selected advisory
         </button>
       </>
     ) : null,
@@ -393,6 +415,27 @@ describe('ChatInput attachments', () => {
     })
   })
 
+  it('sends the advisory investigation prompt after the context loads', async () => {
+    invokeMock.mockResolvedValue(undefined)
+    const onSubmit = vi.fn()
+    const textarea = renderInput('session-1', undefined, undefined, onSubmit)
+
+    fireEvent.change(textarea, { target: { value: '#' } })
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Investigate selected advisory' })
+    )
+
+    expect(textarea.value).toContain(
+      'Investigate the loaded security advisory (GHSA-abcd (high))'
+    )
+    await onSubmit.mock.calls[0]?.[1].beforeSend()
+    expect(invokeMock).toHaveBeenCalledWith('load_advisory_context', {
+      sessionId: 'session-1',
+      ghsaId: 'GHSA-abcd',
+      projectPath: '/tmp/worktree',
+    })
+  })
+
   it('removes the typed hash and number after attaching a PR', async () => {
     invokeMock.mockResolvedValue(undefined)
     const textarea = renderInput()
@@ -445,7 +488,7 @@ describe('ChatInput attachments', () => {
     )
   })
 
-  it('does not open the skill picker when typing $ for a non-Codex session', () => {
+  it('opens the skill picker when typing $ for a non-Codex session', () => {
     const formRef = createRef<HTMLFormElement>()
     const inputRef = createRef<HTMLTextAreaElement>()
 
@@ -470,7 +513,11 @@ describe('ChatInput attachments', () => {
     })
 
     expect(slashPopoverMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ open: false }),
+      expect.objectContaining({
+        open: true,
+        searchQuery: '',
+        triggerKind: 'skill',
+      }),
       undefined
     )
   })
@@ -907,6 +954,90 @@ describe('ChatInput attachments', () => {
   })
 })
 
+describe('ChatInput @ mentions', () => {
+  const candidates = withUniqueTokens([
+    { type: 'agent', id: 'jean', name: 'Jean', icon: 'jean' },
+    { type: 'agent', id: 'rev', name: 'Code Reviewer', icon: 'blue' },
+    { type: 'remote_jean', id: 'srv-1', name: 'Home', url: 'https://home' },
+    { type: 'project', id: 'p1', name: 'coolify' },
+  ])
+
+  const renderInput = (mentionCandidates?: MentionCandidate[]) => {
+    render(
+      <ChatInput
+        activeSessionId="session-1"
+        activeWorktreePath="/tmp/worktree"
+        isSending={false}
+        executionMode="build"
+        focusChatShortcut="⌘K"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        formRef={createRef<HTMLFormElement>()}
+        inputRef={createRef<HTMLTextAreaElement>()}
+        mentionCandidates={mentionCandidates}
+      />
+    )
+    return screen.getByRole('textbox') as HTMLTextAreaElement
+  }
+
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn()
+    storeState.setInputDraft.mockReset()
+    storeState.getPendingFiles.mockReturnValue([])
+    storeState.inputDrafts = {}
+  })
+
+  it('keeps the file picker in project chats', () => {
+    const textarea = renderInput()
+    fireEvent.change(textarea, { target: { value: '@' } })
+
+    expect(screen.getByText('File picker')).toBeInTheDocument()
+    expect(screen.queryByText('Agents')).not.toBeInTheDocument()
+  })
+
+  it('shows agents, remote Jeans, and projects in agent chats', () => {
+    const textarea = renderInput(candidates)
+    fireEvent.change(textarea, { target: { value: '@' } })
+
+    expect(screen.queryByText('File picker')).not.toBeInTheDocument()
+    expect(screen.getByText('Agents')).toBeInTheDocument()
+    expect(screen.getByText('Remote Jeans')).toBeInTheDocument()
+    expect(screen.getByText('Projects')).toBeInTheDocument()
+    expect(screen.getByText('Code Reviewer')).toBeInTheDocument()
+  })
+
+  it('filters while typing and inserts the selected token with the keyboard', async () => {
+    const textarea = renderInput(candidates)
+    fireEvent.change(textarea, { target: { value: 'ask @' } })
+    fireEvent.change(textarea, { target: { value: 'ask @co' } })
+
+    expect(screen.queryByText('Jean')).not.toBeInTheDocument()
+    expect(screen.getByText('coolify')).toBeInTheDocument()
+
+    // Best match (Code Reviewer) is selected; ArrowUp moves to coolify
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(textarea.value).toBe('ask @coolify ')
+    expect(storeState.setInputDraft).toHaveBeenLastCalledWith(
+      'session-1',
+      'ask @coolify '
+    )
+    await waitFor(() =>
+      expect(screen.queryByText('Projects')).not.toBeInTheDocument()
+    )
+  })
+
+  it('closes the agent picker on Escape without changing the text', () => {
+    const textarea = renderInput(candidates)
+    fireEvent.change(textarea, { target: { value: '@Je' } })
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+
+    expect(screen.queryByText('Agents')).not.toBeInTheDocument()
+    expect(textarea.value).toBe('@Je')
+  })
+})
+
 describe('ChatInput IME composition (issue #584)', () => {
   beforeEach(() => {
     spellcheckEnabled.value = true
@@ -1027,6 +1158,102 @@ describe('ChatInput IME composition (issue #584)', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(expect.anything(), {
       forceSteer: true,
+    })
+  })
+
+  it('submits as a queue when the primary modifier is held with auto-steer on', () => {
+    queryClient.setQueryData(preferencesQueryKeys.preferences(undefined), {
+      codex_auto_steer_enabled: true,
+    })
+    const onSteerModifierChange = vi.fn()
+    const { textarea, onSubmit } = renderWithSubmit({
+      isSending: true,
+      selectedBackend: 'codex',
+      onSteerModifierChange,
+    })
+    fireEvent.change(textarea, { target: { value: 'queue this' } })
+
+    fireEvent.keyDown(textarea, {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      metaKey: true,
+    })
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.anything(), {
+      forceQueue: true,
+    })
+    expect(onSteerModifierChange).toHaveBeenCalledWith(true)
+    queryClient.removeQueries({
+      queryKey: preferencesQueryKeys.preferences(undefined),
+    })
+  })
+
+  describe('Mod+Enter background send', () => {
+    const pressModEnter = (textarea: HTMLTextAreaElement) =>
+      fireEvent.keyDown(textarea, {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        metaKey: true,
+      })
+    const setMessageCount = (messageCount: number) =>
+      queryClient.setQueryData(chatQueryKeys.session('session-1'), {
+        id: 'session-1',
+        messages: Array.from({ length: messageCount }, () => ({})),
+      })
+    const captureCreatedSessions = () => {
+      const created: unknown[] = []
+      const listener = (event: Event) =>
+        created.push((event as CustomEvent).detail)
+      window.addEventListener('create-new-session', listener)
+      return {
+        created,
+        stop: () => window.removeEventListener('create-new-session', listener),
+      }
+    }
+
+    afterEach(() => {
+      queryClient.removeQueries({
+        queryKey: chatQueryKeys.session('session-1'),
+      })
+    })
+
+    it.each([0, 2])(
+      'sends in the background and opens a new session (%i messages)',
+      async messageCount => {
+        setMessageCount(messageCount)
+        const { created, stop } = captureCreatedSessions()
+        const { textarea, onSubmit } = renderWithSubmit()
+        fireEvent.change(textarea, { target: { value: 'prompt' } })
+
+        pressModEnter(textarea)
+        expect(created).toEqual([])
+        await onSubmit.mock.calls[0]?.[1]?.beforeSend()
+
+        stop()
+        expect(created).toEqual([{ intent: 'default' }])
+      }
+    )
+
+    it('keeps the running-turn behavior on Mod+Enter while sending', () => {
+      setMessageCount(2)
+      const { textarea, onSubmit } = renderWithSubmit({ isSending: true })
+      fireEvent.change(textarea, { target: { value: 'follow-up' } })
+
+      pressModEnter(textarea)
+
+      expect(onSubmit.mock.calls[0]?.[1]?.beforeSend).toBeUndefined()
+    })
+
+    it('sends normally on plain Enter', () => {
+      setMessageCount(0)
+      const { textarea, onSubmit } = renderWithSubmit()
+      fireEvent.change(textarea, { target: { value: 'prompt' } })
+
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', keyCode: 13 })
+
+      expect(onSubmit).toHaveBeenCalledWith(expect.anything(), undefined)
     })
   })
 

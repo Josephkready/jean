@@ -86,6 +86,67 @@ struct DoneEvent {
     waiting_for_plan: bool,
 }
 
+pub(super) fn emit_chat_done(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    waiting_for_plan: bool,
+) {
+    let _ = app.emit_all(
+        "chat:done",
+        &DoneEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            waiting_for_plan,
+        },
+    );
+}
+
+pub(super) fn emit_chat_error(app: &AppHandle, session_id: &str, worktree_id: &str, error: &str) {
+    let _ = app.emit_all(
+        "chat:error",
+        &ErrorEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            error: error.to_string(),
+        },
+    );
+}
+
+pub(super) fn emit_backend_retry(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    attempt: u64,
+    delay_ms: u64,
+    reason: String,
+) {
+    let _ = app.emit_all(
+        "chat:backend_retry",
+        &BackendRetryEvent {
+            session_id: session_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            backend: "opencode",
+            attempt,
+            delay_ms,
+            reason,
+        },
+    );
+}
+
+/// `chat:backend_retry`: the backend waits `delay_ms` before it retries a
+/// failed provider request (rate limit, overload).
+#[derive(serde::Serialize, Clone)]
+struct BackendRetryEvent {
+    session_id: String,
+    worktree_id: String,
+    backend: &'static str,
+    /// 1-based retry number
+    attempt: u64,
+    delay_ms: u64,
+    reason: String,
+}
+
 #[derive(serde::Serialize, Clone)]
 pub struct ErrorEvent {
     pub session_id: String,
@@ -834,7 +895,7 @@ fn has_subscribers_for_working_dir(
         .any(|entry| entry.working_dir == working_dir)
 }
 
-fn emit_chat_chunk(
+pub(super) fn emit_chat_chunk(
     app: &AppHandle,
     session_id: &str,
     worktree_id: &str,
@@ -856,7 +917,12 @@ fn emit_chat_chunk(
     );
 }
 
-fn emit_chat_thinking(app: &AppHandle, session_id: &str, worktree_id: &str, content: &str) {
+pub(super) fn emit_chat_thinking(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    content: &str,
+) {
     if content.is_empty() {
         return;
     }
@@ -871,7 +937,7 @@ fn emit_chat_thinking(app: &AppHandle, session_id: &str, worktree_id: &str, cont
     );
 }
 
-fn emit_chat_tool_use(
+pub(super) fn emit_chat_tool_use(
     app: &AppHandle,
     session_id: &str,
     worktree_id: &str,
@@ -900,7 +966,7 @@ fn emit_chat_tool_use(
     );
 }
 
-fn emit_chat_tool_result(
+pub(super) fn emit_chat_tool_result(
     app: &AppHandle,
     session_id: &str,
     worktree_id: &str,
@@ -932,7 +998,9 @@ fn fetch_opencode_question_input(
     working_dir: &str,
     tool_call_id: &str,
 ) -> Option<serde_json::Value> {
-    let base_url = crate::opencode_server::get_current_url()?;
+    let base_url = crate::opencode_server::current_server()
+        .filter(|server| server.api == crate::opencode_server::OpenCodeApi::V1)?
+        .url;
     let working_dir = working_dir.to_string();
     let tool_call_id = tool_call_id.to_string();
 
@@ -1010,7 +1078,11 @@ fn rename_json_key(value: &mut serde_json::Value, from: &str, to: &str) {
 /// names (`Read`, `Edit`, `Bash`, …) with snake_case parameters (`file_path`,
 /// `old_string`, …). This function translates both in-place so a single set of
 /// frontend rendering logic handles tools from either backend.
-fn normalize_opencode_tool(name: &str, input: &mut serde_json::Value) -> String {
+pub(crate) fn normalize_opencode_tool(name: &str, input: &mut serde_json::Value) -> String {
+    // 2.x names the file parameter `path` and the shell tool `shell`.
+    if matches!(name, "read" | "edit" | "write") {
+        rename_json_key(input, "path", "file_path");
+    }
     match name {
         "read" => {
             rename_json_key(input, "filePath", "file_path");
@@ -1027,7 +1099,7 @@ fn normalize_opencode_tool(name: &str, input: &mut serde_json::Value) -> String 
             rename_json_key(input, "filePath", "file_path");
             "Write".into()
         }
-        "bash" => "Bash".into(),
+        "bash" | "shell" => "Bash".into(),
         "glob" => "Glob".into(),
         "grep" => {
             // OpenCode uses "include" for file filter; Claude uses "glob"
@@ -1104,7 +1176,7 @@ fn choose_model(all_providers: &serde_json::Value) -> Option<(String, String)> {
     None
 }
 
-fn parse_provider_model(model: Option<&str>) -> Option<(String, String)> {
+pub(super) fn parse_provider_model(model: Option<&str>) -> Option<(String, String)> {
     let raw = model?.trim();
     if raw.is_empty() {
         return None;
@@ -1458,7 +1530,7 @@ pub(crate) fn find_provider_for_model(
 
 /// Override provider defaults explicitly so a resumed Full access session cannot
 /// retain permissive rules after the user selects a restricted policy.
-fn permission_rules_for_mode(mode: &str) -> Option<serde_json::Value> {
+pub(super) fn permission_rules_for_mode(mode: &str) -> Option<serde_json::Value> {
     match mode {
         "yolo" => Some(serde_json::json!([
             { "permission": "*", "pattern": "*", "action": "allow" },
@@ -1508,14 +1580,14 @@ fn verify_permission_rules_applied(
     }
 }
 
-fn agent_for_execution_mode(execution_mode: Option<&str>) -> &'static str {
+pub(super) fn agent_for_execution_mode(execution_mode: Option<&str>) -> &'static str {
     match execution_mode.unwrap_or("build") {
         "plan" => "plan",
         _ => "build",
     }
 }
 
-fn variant_for_effort(reasoning_effort: Option<&str>) -> Option<&'static str> {
+pub(super) fn variant_for_effort(reasoning_effort: Option<&str>) -> Option<&'static str> {
     match reasoning_effort {
         Some("xhigh") => Some("max"),
         Some("high") => Some("high"),
@@ -1529,7 +1601,7 @@ fn should_retry_structured_output_as_text(error: &str) -> bool {
     error.contains("Thinking mode does not support this tool_choice")
 }
 
-fn structured_output_text_prompt(prompt: &str, schema: &str) -> String {
+pub(super) fn structured_output_text_prompt(prompt: &str, schema: &str) -> String {
     format!(
         "{prompt}\n\nReturn only the JSON object matching this schema. Do not use markdown fences:\n{schema}"
     )
@@ -1540,7 +1612,7 @@ fn structured_output_text_prompt(prompt: &str, schema: &str) -> String {
 /// - Image annotations → base64-encoded file parts
 /// - Skill annotations → inlined text content
 /// - Pasted text annotations → inlined text content
-fn prepare_opencode_parts(prompt: &str) -> serde_json::Value {
+pub(super) fn prepare_opencode_parts(prompt: &str) -> serde_json::Value {
     let mut cleaned = prompt.to_string();
     let mut image_parts: Vec<serde_json::Value> = Vec::new();
 
@@ -2450,6 +2522,58 @@ fn process_shared_sse_event(
             }
             Some(false)
         }
+        // OpenCode retries rate-limited / overloaded provider calls itself and
+        // reports each wait as `status: {type: "retry", attempt, message, next}`
+        // (`next` = epoch ms). Surface it so a long backoff does not look hung.
+        // Child/subagent retries also stall the parent run, so they fan in.
+        "session.status" => {
+            let Some(status) = properties
+                .get("status")
+                .filter(|s| s.get("type").and_then(|v| v.as_str()) == Some("retry"))
+            else {
+                return Some(false);
+            };
+            let opencode_session_id = properties
+                .get("sessionID")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let resolved = {
+                let subscribers = lock_recover(subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+                let parents =
+                    lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+                resolve_opencode_subscriber(&subscribers, &parents, opencode_session_id)
+            };
+            let Some((_, entry)) = resolved else {
+                return Some(false);
+            };
+            let (session_id, worktree_id) = {
+                let sub = lock_recover(&entry.handle, "OPENCODE_SSE_SUBSCRIBER");
+                (sub.jean_session_id.clone(), sub.worktree_id.clone())
+            };
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            let next_ms = status.get("next").and_then(|v| v.as_u64()).unwrap_or(0);
+            let event = BackendRetryEvent {
+                session_id,
+                worktree_id,
+                backend: "opencode",
+                attempt: status.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0),
+                delay_ms: next_ms.saturating_sub(now_ms),
+                reason: status
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            };
+            log::info!(
+                "OpenCode shared SSE: retry attempt={} delay_ms={} opencode_session={opencode_session_id}",
+                event.attempt,
+                event.delay_ms
+            );
+            let _ = app.emit_all("chat:backend_retry", &event);
+            Some(true)
+        }
         // OpenCode permission prompts (e.g. external_directory access outside the
         // worktree). Without handling these, the in-flight /message POST blocks
         // forever and the Jean session appears frozen (issue #625).
@@ -2483,7 +2607,7 @@ fn process_shared_sse_event(
 /// - session metadata selected_execution_mode is yolo
 ///
 /// Mirrors Codex auto-accept so YOLO mode never freezes on external_directory asks.
-fn should_auto_approve_opencode_permissions(
+pub(super) fn should_auto_approve_opencode_permissions(
     app: &AppHandle,
     jean_session_id: &str,
     turn_execution_mode: Option<&str>,
@@ -2735,6 +2859,22 @@ fn handle_opencode_permission_replied(
         }
     };
 
+    let reply = properties
+        .get("reply")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    emit_permission_replied(app, jean_session_id, worktree_id, request_id, reply);
+}
+
+pub(super) fn emit_permission_replied(
+    app: &AppHandle,
+    session_id: String,
+    worktree_id: String,
+    request_id: &str,
+    reply: String,
+) {
     #[derive(serde::Serialize, Clone)]
     struct OpenCodePermissionRepliedEvent {
         session_id: String,
@@ -2743,16 +2883,10 @@ fn handle_opencode_permission_replied(
         reply: String,
     }
 
-    let reply = properties
-        .get("reply")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
     let _ = app.emit_all(
         "chat:opencode_permission_replied",
         &OpenCodePermissionRepliedEvent {
-            session_id: jean_session_id,
+            session_id,
             worktree_id,
             request_id: request_id.to_string(),
             reply,
@@ -2918,7 +3052,7 @@ pub fn execute_opencode_http(
         });
     }
 
-    let base_url = crate::opencode_server::acquire(app)?;
+    let server = crate::opencode_server::acquire_server(app)?;
 
     // RAII guard: decrements the server usage count when this function exits.
     // The server only shuts down when the last consumer releases.
@@ -2929,6 +3063,27 @@ pub fn execute_opencode_http(
         }
     }
     let _server_guard = ServerReleaseGuard;
+
+    if server.api == crate::opencode_server::OpenCodeApi::V2 {
+        return super::opencode_v2::execute_turn(
+            app,
+            &server,
+            super::opencode_v2::TurnRequest {
+                session_id,
+                worktree_id,
+                run_id,
+                working_dir,
+                existing_opencode_session_id,
+                model,
+                execution_mode,
+                reasoning_effort,
+                prompt,
+                system_prompt,
+            },
+            cancelled,
+        );
+    }
+    let base_url = server.url;
 
     // 30 min timeout — OpenCode agentic tasks can run for extended periods
     let client = reqwest::blocking::Client::builder()
@@ -3148,14 +3303,12 @@ pub fn execute_opencode_http(
             opencode_session_id,
             post_start.elapsed().as_millis()
         );
-        return Ok(OpenCodeResponse {
-            content: String::new(),
-            session_id: opencode_session_id,
-            tool_calls: vec![],
-            content_blocks: vec![],
-            cancelled: true,
-            usage: None,
-        });
+        let (blocks, tool_calls) = _shared_sse_subscription.take_accumulated();
+        return Ok(cancelled_response_from_sse(
+            opencode_session_id,
+            blocks,
+            tool_calls,
+        ));
     };
     log::info!(
         "OpenCode: message POST finished jean_session={} opencode_session={} elapsed_ms={} status={}",
@@ -3426,6 +3579,7 @@ pub fn execute_opencode_http(
                     output_tokens: output,
                     cache_read_input_tokens: cache_read,
                     cache_creation_input_tokens: cache_write,
+                    cost_usd: part.get("cost").and_then(|v| v.as_f64()),
                 });
             }
             _ => {}
@@ -3495,7 +3649,34 @@ pub fn execute_opencode_http(
 /// Merge consecutive `ContentBlock::Thinking` entries into a single block.
 /// OpenCode emits separate reasoning parts (each with its own `part_id`),
 /// which would otherwise render as many individual "Thinking" items in the UI.
-fn merge_consecutive_thinking(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+/// The reply a stop leaves behind: whatever the shared SSE listener already
+/// streamed to clients. Returning it keeps the turn in history as
+/// cancelled-with-content; an empty reply would withdraw the prompt instead.
+fn cancelled_response_from_sse(
+    opencode_session_id: String,
+    blocks: Vec<ContentBlock>,
+    tool_calls: Vec<ToolCall>,
+) -> OpenCodeResponse {
+    let content_blocks = merge_consecutive_thinking(blocks);
+    let content = content_blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    OpenCodeResponse {
+        content,
+        session_id: opencode_session_id,
+        tool_calls,
+        content_blocks,
+        cancelled: true,
+        usage: None,
+    }
+}
+
+pub(crate) fn merge_consecutive_thinking(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
     let mut result: Vec<ContentBlock> = Vec::with_capacity(blocks.len());
     for block in blocks {
         if let ContentBlock::Thinking { thinking } = &block {
@@ -3533,6 +3714,7 @@ pub fn execute_one_shot_opencode(
     let model = model.to_string();
     let prompt = prompt.to_string();
     let reasoning = reasoning_effort.map(|s| s.to_string());
+    let schema_text = json_schema.map(str::to_string);
     // Parse the JSON schema string into a Value for the native `format` field
     let schema_value: Option<serde_json::Value> = json_schema
         .map(|s| serde_json::from_str(s))
@@ -3547,15 +3729,30 @@ pub fn execute_one_shot_opencode(
     // on a dedicated OS thread to avoid panicking reqwest::blocking inside
     // the Tokio async runtime that Tauri async commands use.
     let handle = std::thread::spawn(move || {
-        let base_url = crate::opencode_server::acquire(&app)?;
-        let result = one_shot_opencode_blocking(
-            &base_url,
-            &prompt,
-            &model,
-            schema_value.as_ref(),
-            &dir,
-            reasoning.as_deref(),
-        );
+        let server = crate::opencode_server::acquire_server(&app)?;
+        let result = if server.api == crate::opencode_server::OpenCodeApi::V2 {
+            super::opencode_v2::run_one_shot(
+                &server,
+                &prompt,
+                &model,
+                schema_text.as_deref(),
+                std::path::Path::new(&dir),
+                reasoning.as_deref(),
+            )
+            .map(|text| match schema_text {
+                Some(_) => super::muse::extract_json_object(&text).unwrap_or(text),
+                None => text,
+            })
+        } else {
+            one_shot_opencode_blocking(
+                &server.url,
+                &prompt,
+                &model,
+                schema_value.as_ref(),
+                &dir,
+                reasoning.as_deref(),
+            )
+        };
         crate::opencode_server::release();
         result
     });
@@ -3779,7 +3976,7 @@ pub fn respond_opencode_permission(
         return Err("OpenCode permission request_id is required".to_string());
     }
 
-    let base_url = crate::opencode_server::acquire(app)?;
+    let server = crate::opencode_server::acquire_server(app)?;
 
     struct ServerReleaseGuard;
     impl Drop for ServerReleaseGuard {
@@ -3788,6 +3985,17 @@ pub fn respond_opencode_permission(
         }
     }
     let _server_guard = ServerReleaseGuard;
+
+    if server.api == crate::opencode_server::OpenCodeApi::V2 {
+        let session_id = opencode_session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("OpenCode 2.x permission reply requires opencode_session_id")?;
+        let message = message.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        return super::opencode_v2::V2Client::new(&server, Duration::from_secs(30))?
+            .reply_permission(session_id, request_id, reply, message);
+    }
+    let base_url = server.url;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -3872,7 +4080,7 @@ pub fn answer_opencode_question(
     tool_call_id: &str,
     answers: Vec<Vec<String>>,
 ) -> Result<(), String> {
-    let base_url = crate::opencode_server::acquire(app)?;
+    let server = crate::opencode_server::acquire_server(app)?;
 
     // RAII guard: decrements server usage count on exit
     struct ServerReleaseGuard;
@@ -3882,6 +4090,11 @@ pub fn answer_opencode_question(
         }
     }
     let _server_guard = ServerReleaseGuard;
+
+    if server.api == crate::opencode_server::OpenCodeApi::V2 {
+        return super::opencode_v2::answer_question(&server, working_dir, tool_call_id, &answers);
+    }
+    let base_url = server.url;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -3961,6 +4174,46 @@ mod tests {
     /// Serializes tests that mutate process-global `SHARED_SSE` maps so parallel
     /// test threads cannot clear each other's subscribers/parents mid-assertion.
     static SSE_TEST_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn stop_after_streamed_output_keeps_the_partial_reply() {
+        let response = cancelled_response_from_sse(
+            "oc-1".to_string(),
+            vec![
+                ContentBlock::Thinking {
+                    thinking: "plan".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "Partial ".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    tool_call_id: "call-1".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "reply".to_string(),
+                },
+            ],
+            vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({}),
+                output: None,
+                parent_tool_use_id: None,
+                is_error: None,
+                subagent_usage: None,
+            }],
+        );
+
+        assert!(response.cancelled);
+        assert_eq!(response.content, "Partial reply");
+        assert_eq!(response.content_blocks.len(), 4);
+        assert_eq!(response.tool_calls.len(), 1);
+
+        let stopped_before_output =
+            cancelled_response_from_sse("oc-1".to_string(), Vec::new(), Vec::new());
+        assert!(stopped_before_output.content.is_empty());
+        assert!(stopped_before_output.content_blocks.is_empty());
+    }
 
     #[test]
     fn permission_policy_requires_confirmation_from_the_server() {
@@ -4608,6 +4861,91 @@ mod tests {
         lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
         lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
         lock_recover(&SHARED_SSE.session_directories, "OPENCODE_SSE_SESSION_DIRS").clear();
+    }
+
+    #[test]
+    fn process_shared_sse_emits_backend_retry_for_child_retry_status() {
+        let _guard = lock_recover(&SSE_TEST_GUARD, "SSE_TEST_GUARD");
+        let tmp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(tmp.path().join("data"), tmp.path().join("res")).unwrap();
+        let received = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let sink = received.clone();
+        app.listen("chat:backend_retry", move |event| {
+            sink.lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let handle = Arc::new(Mutex::new(SharedSseSubscriber {
+            jean_session_id: "jean-3".into(),
+            worktree_id: "wt-3".into(),
+            run_id: "run-3".into(),
+            execution_mode: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            streamed_any: Arc::new(AtomicBool::new(false)),
+            turn_started: Arc::new(AtomicBool::new(false)),
+            session_idle: Arc::new(AtomicBool::new(false)),
+            steered: Arc::new(AtomicBool::new(false)),
+            upstream_error: Arc::new(Mutex::new(None)),
+            force_abort: Arc::new(AtomicBool::new(false)),
+            tracked_parts: HashMap::new(),
+            accumulated_blocks: Vec::new(),
+            accumulated_tool_calls: Vec::new(),
+        }));
+        {
+            let mut subscribers = lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS");
+            subscribers.clear();
+            subscribers.insert(
+                "ses_root".to_string(),
+                SharedSseSubscriberEntry {
+                    working_dir: "/tmp/proj".into(),
+                    handle,
+                },
+            );
+        }
+        {
+            let mut parents =
+                lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS");
+            parents.clear();
+            parents.insert("ses_sub".to_string(), "ses_root".to_string());
+        }
+
+        let busy = r#"{"payload":{"type":"session.status","properties":{"sessionID":"ses_root","status":{"type":"busy"}}}}"#;
+        assert_eq!(
+            process_shared_sse_event(&app, busy, &SHARED_SSE.subscribers),
+            Some(false)
+        );
+        let unknown = r#"{"payload":{"type":"session.status","properties":{"sessionID":"ses_other","status":{"type":"retry","attempt":1,"message":"x","next":0}}}}"#;
+        assert_eq!(
+            process_shared_sse_event(&app, unknown, &SHARED_SSE.subscribers),
+            Some(false)
+        );
+        assert!(received.lock().unwrap().is_empty());
+
+        let next = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 30_000;
+        let retry = format!(
+            r#"{{"payload":{{"type":"session.status","properties":{{"sessionID":"ses_sub","status":{{"type":"retry","attempt":2,"message":"Rate limit exceeded","next":{next}}}}}}}}}"#
+        );
+        assert_eq!(
+            process_shared_sse_event(&app, &retry, &SHARED_SSE.subscribers),
+            Some(true)
+        );
+        let events = received.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event["session_id"], "jean-3");
+        assert_eq!(event["worktree_id"], "wt-3");
+        assert_eq!(event["backend"], "opencode");
+        assert_eq!(event["attempt"], 2);
+        assert_eq!(event["reason"], "Rate limit exceeded");
+        let delay = event["delay_ms"].as_u64().unwrap();
+        assert!((25_000..=30_000).contains(&delay), "delay_ms={delay}");
+
+        lock_recover(&SHARED_SSE.subscribers, "OPENCODE_SSE_SUBSCRIBERS").clear();
+        lock_recover(&SHARED_SSE.session_parents, "OPENCODE_SSE_SESSION_PARENTS").clear();
     }
 
     #[test]

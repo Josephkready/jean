@@ -1,4 +1,6 @@
 import { Suspense, lazy, useState } from 'react'
+import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/badge'
 import {
   Dialog,
   DialogContent,
@@ -12,16 +14,16 @@ import {
   type AgentTask,
 } from '@/services/agents'
 import { useChatStore } from '@/store/chat-store'
-import { formatRelative } from './AgentActivity'
+import { formatRelative } from '@/lib/relative-time'
 import { taskKindLabel } from './subagent-types'
 import {
-  AgentBadge,
   AgentEmpty,
   AgentList,
   AgentLoading,
   AgentSection,
   AgentTabBody,
-  statusTone,
+  statusVariant,
+  AGENT_ROW,
 } from './agent-ui'
 
 const ChatWindow = lazy(() =>
@@ -32,7 +34,7 @@ const ChatWindow = lazy(() =>
 
 const STATUS_STYLES: Record<string, string> = {
   running: 'text-primary',
-  waiting: 'text-amber-600 dark:text-amber-400',
+  waiting: 'text-warning',
   failed: 'text-destructive',
   cancelled: 'text-muted-foreground',
   done: 'text-muted-foreground',
@@ -67,24 +69,27 @@ function TaskRow({
     <li>
       <button
         type="button"
-        className="flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:outline-none"
+        className={cn(
+          AGENT_ROW,
+          'flex w-full items-start gap-2 text-left focus-visible:bg-muted/30 focus-visible:outline-none'
+        )}
         onClick={() => onOpen(task)}
       >
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm text-foreground">{task.title}</p>
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+          <p className="truncate text-2xs text-muted-foreground">
             {taskKindLabel(task.kind, task.subagentTypeName)} · updated{' '}
             {formatRelative(task.updatedAt)}
           </p>
           {task.summary ? (
-            <p className="mt-1 line-clamp-1 text-xs text-muted-foreground/80">
+            <p className="line-clamp-1 text-xs text-muted-foreground/80">
               {task.summary}
             </p>
           ) : null}
         </div>
-        <AgentBadge tone={statusTone(task.status)} className="mt-0.5">
+        <Badge variant={statusVariant(task.status)}>
           {taskStatusLabel(task.status)}
-        </AgentBadge>
+        </Badge>
       </button>
     </li>
   )
@@ -113,20 +118,15 @@ export function AgentTasks({
   return (
     <AgentTabBody>
       {isLoading ? (
-        <AgentLoading label="Loading tasks…" />
+        <AgentLoading label="Loading runs…" />
       ) : active.length === 0 && finished.length === 0 ? (
-        <AgentSection
-          title="Tasks"
-          description="Routines, follow-ups, and agent requests run here, apart from your chat. Finished tasks are archived after 3 days."
-        >
-          <AgentEmpty title="No tasks yet." />
-        </AgentSection>
+        <AgentEmpty title="No runs yet." />
       ) : (
         <>
           <AgentSection
             title="Active"
             count={active.length}
-            description="Routines, follow-ups, and agent requests run here, apart from your chat. Open a task to see its session."
+            description="Routines, follow-ups, and agent requests run here, apart from your chat."
           >
             {active.length ? (
               <AgentList>
@@ -157,7 +157,7 @@ export function AgentTasks({
         open={openTask !== null && workdir !== undefined}
         onOpenChange={open => !open && setOpenTask(null)}
       >
-        <DialogContent className="!fixed !inset-0 !translate-x-0 !translate-y-0 !w-screen !h-[100dvh] !max-w-none !max-h-none !rounded-none !p-0 sm:!inset-auto sm:!top-[50%] sm:!left-[50%] sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:!w-[90vw] sm:!max-w-[90vw] sm:!h-[90dvh] sm:!max-h-[90dvh] sm:!rounded-lg flex flex-col gap-0 overflow-hidden">
+        <DialogContent className="!fixed !inset-0 !w-screen !h-[100dvh] !max-w-none !max-h-none !rounded-none !p-0 sm:!w-[90vw] sm:!max-w-[90vw] sm:!h-[90dvh] sm:!max-h-[90dvh] sm:!rounded-lg flex flex-col gap-0 overflow-hidden">
           {openTask && workdir && (
             <>
               <DialogHeader className="shrink-0 space-y-1 border-b px-4 py-3 pr-12 text-left">
@@ -183,7 +183,7 @@ export function AgentTasks({
                 <Suspense
                   fallback={
                     <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                      Loading task…
+                      Loading run…
                     </div>
                   }
                 >

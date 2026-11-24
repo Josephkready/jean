@@ -15,18 +15,18 @@ import {
 import { cn } from '@/lib/utils'
 import { isGhAuthError } from '@/services/github'
 import { GhAuthError } from '@/components/shared/GhAuthError'
+import { LoadedSecurityItem, LoadedAdvisoryItem } from './LoadContextItems'
 import {
-  LoadedSecurityItem,
-  SecurityAlertItem,
-  LoadedAdvisoryItem,
   AdvisoryItem,
-} from './LoadContextItems'
+  SecurityAlertItem,
+} from '@/components/worktree/NewWorktreeItems'
 import type {
   DependabotAlert,
   RepositoryAdvisory,
   LoadedSecurityAlertContext,
   LoadedAdvisoryContext,
 } from '@/types/github'
+import type { ContextLinkLookup } from '@/hooks/useContextLinkUsage'
 
 const ALERT_STATE_LABELS: Record<string, string> = {
   open: 'Open',
@@ -92,6 +92,8 @@ interface SecurityAlertsTabProps {
   onPreviewAdvisory?: (advisory: RepositoryAdvisory) => void
   onRemoveAdvisory?: (ghsaId: string) => void
   onLoadAdvisory?: (ghsaId: string, refresh: boolean) => void
+  /** Marks items that other worktrees/sessions already use */
+  contextLinks?: ContextLinkLookup
 }
 
 export function SecurityAlertsTab({
@@ -133,6 +135,7 @@ export function SecurityAlertsTab({
   onPreviewAdvisory,
   onRemoveAdvisory,
   onLoadAdvisory,
+  contextLinks,
 }: SecurityAlertsTabProps) {
   const advisories = filteredAdvisories ?? []
   const advisoryGhsaLoading = loadingAdvisoryGhsaIds ?? new Set<string>()
@@ -323,7 +326,7 @@ export function SecurityAlertsTab({
                                 'bg-muted-foreground'
                             )}
                           />
-                          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                          <span className="text-2xs font-medium text-muted-foreground uppercase tracking-wider">
                             {ALERT_STATE_LABELS[alert.state] ?? alert.state}
                           </span>
                         </div>
@@ -332,7 +335,12 @@ export function SecurityAlertsTab({
                         alert={alert}
                         index={index}
                         isSelected={index === selectedIndex}
-                        isLoading={loadingNumbers.has(alert.number)}
+                        isCreating={loadingNumbers.has(alert.number)}
+                        contextMatches={contextLinks?.getMatches({
+                          type: 'security',
+                          id: alert.number,
+                        })}
+                        currentWorktreeId={contextLinks?.currentWorktreeId}
                         onMouseEnter={() => setSelectedIndex(index)}
                         onClick={() => onSelectAlert(alert)}
                         onPreview={() => onPreviewAlert(alert)}
@@ -367,7 +375,7 @@ export function SecurityAlertsTab({
                                 'bg-muted-foreground'
                             )}
                           />
-                          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                          <span className="text-2xs font-medium text-muted-foreground uppercase tracking-wider">
                             {ADVISORY_STATE_LABELS[advisory.state] ??
                               advisory.state}
                           </span>
@@ -377,7 +385,12 @@ export function SecurityAlertsTab({
                         advisory={advisory}
                         index={combinedIndex}
                         isSelected={combinedIndex === selectedIndex}
-                        isLoading={advisoryGhsaLoading.has(advisory.ghsaId)}
+                        isCreating={advisoryGhsaLoading.has(advisory.ghsaId)}
+                        contextMatches={contextLinks?.getMatches({
+                          type: 'advisory',
+                          id: advisory.ghsaId,
+                        })}
+                        currentWorktreeId={contextLinks?.currentWorktreeId}
                         onMouseEnter={() => setSelectedIndex(combinedIndex)}
                         onClick={() => onSelectAdvisory?.(advisory)}
                         onPreview={() => onPreviewAdvisory?.(advisory)}

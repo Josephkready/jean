@@ -177,6 +177,11 @@ describe('DesktopBackendModelPicker', () => {
     await user.click(
       within(list as HTMLElement).getByRole('tab', { name: 'Codex' })
     )
+    await user.click(
+      within(list as HTMLElement).getByRole('button', {
+        name: /show \d+ older model/i,
+      })
+    )
     await user.click(within(list as HTMLElement).getByText('GPT 5.4'))
 
     expect(onBackendModelChange).toHaveBeenCalledWith('codex', 'gpt-5.4')
@@ -354,9 +359,8 @@ describe('DesktopBackendModelPicker', () => {
       screen.getByRole('button', { name: /choose backend and model/i })
     )
 
-    expect(
-      await screen.findByText('gpt-5.5 (openai-codex)')
-    ).toBeInTheDocument()
+    const list = await screen.findByRole('listbox')
+    expect(within(list).getByText('gpt-5.5 (openai-codex)')).toBeInTheDocument()
     expect(screen.queryByText('Sonnet (PI)')).toBeNull()
   })
 

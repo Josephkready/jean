@@ -1,9 +1,8 @@
 import { DevinLocationPicker } from '@/components/chat/toolbar/DevinLocationPicker'
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Zap } from '@/components/icons/reicon'
 import { dismissibleToast } from '@/lib/dismissible-toast'
 import { invoke } from '@/lib/transport'
-import { cn } from '@/lib/utils'
 import { useUIStore } from '@/store/ui-store'
 import {
   gitPush,
@@ -27,23 +26,17 @@ import {
 } from '@/types/chat'
 import type { ChatToolbarProps } from '@/components/chat/toolbar/types'
 import { MobileToolbarMenu } from '@/components/chat/toolbar/MobileToolbarMenu'
-import { MobileSettingsMenu } from '@/components/chat/toolbar/MobileSettingsMenu'
+import {
+  MobileSettingsMenu,
+  type MobileSettingsMenuHandle,
+} from '@/components/chat/toolbar/MobileSettingsMenu'
 import { MobileBackendModelPickerSheet } from '@/components/chat/toolbar/MobileBackendModelPickerSheet'
 import { DesktopToolbarControls } from '@/components/chat/toolbar/DesktopToolbarControls'
 import { DockBurgerButton } from '@/components/chat/toolbar/DockBurgerButton'
 import { ExecutionModeDropdown } from '@/components/chat/toolbar/ExecutionModeDropdown'
 import { SendCancelButton } from '@/components/chat/toolbar/SendCancelButton'
 import { ContextViewerDialog } from '@/components/chat/toolbar/ContextViewerDialog'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+import { RevertLastCommitDialog } from '@/components/shared/RevertLastCommitDialog'
 import {
   CODEX_MODEL_OPTIONS,
   EFFORT_LEVEL_OPTIONS,
@@ -91,6 +84,7 @@ export const ChatToolbar = memo(function ChatToolbar({
   hasPendingAttachments,
   hasInputValue,
   executionMode,
+  hidePlanMode = false,
   selectedBackend,
   selectedModel,
   selectedProvider,
@@ -103,11 +97,10 @@ export const ChatToolbar = memo(function ChatToolbar({
   providerLocked,
   baseBranch,
   baseRemote,
+  isModal = false,
   prUrl,
   prNumber,
   displayStatus,
-  checkStatus,
-  mergeableStatus,
   activeWorktreePath,
   worktreeId,
   activeSessionId,
@@ -124,7 +117,6 @@ export const ChatToolbar = memo(function ChatToolbar({
   loadedSentryContexts,
   attachedSavedContexts,
   onOpenMagicModal,
-  onSaveContext,
   onLoadContext,
   onCommit,
   onCommitAndPush,
@@ -132,7 +124,6 @@ export const ChatToolbar = memo(function ChatToolbar({
   onReview,
   onMerge,
   onMergePr,
-  onResolvePrConflicts,
   onResolveConflicts,
   hasOpenPr,
   installedBackends,
@@ -147,9 +138,10 @@ export const ChatToolbar = memo(function ChatToolbar({
   onAttach,
   onCancel,
   willSteer,
-  steerWithModifier,
+  actionWithModifier,
   canSteer,
   onSteer,
+  onQueue,
   queuedMessageCount,
   availableMcpServers,
   enabledMcpServers,
@@ -170,14 +162,15 @@ export const ChatToolbar = memo(function ChatToolbar({
   const [mcpDropdownOpen, setMcpDropdownOpen] = useState(false)
   const [mobileBackendModelPickerOpen, setMobileBackendModelPickerOpen] =
     useState(false)
-  // Bumped after a mobile model pick so MobileSettingsMenu opens effort/thinking
-  // without forcing the user to reopen the gear (issue #574).
-  const [openReasoningSheetSignal, setOpenReasoningSheetSignal] = useState(0)
+  const mobileSettingsMenuRef = useRef<MobileSettingsMenuHandle>(null)
   const isMobile = useIsMobile()
   const zenMode = useUIStore(state => state.zenMode)
   const [revertConfirmOpen, setRevertConfirmOpen] = useState(false)
 
-  const pickRemoteOrRun = useRemotePicker(activeWorktreePath)
+  const pickRemoteOrRun = useRemotePicker(
+    activeWorktreePath,
+    worktreeId ? { worktreeId } : null
+  )
 
   const handleMcpDropdownOpenChange = useCallback(
     (open: boolean) => {
@@ -229,31 +222,9 @@ export const ChatToolbar = memo(function ChatToolbar({
     availableMcpServers,
     enabledMcpServers,
   })
-  useEffect(() => {
-    if (!selectedModelReasoning) return
-    const values = new Set(
-      selectedModelReasoning.levels.map(level => level.value)
-    )
-    // Adaptive/Default is only valid for Antigravity models.
-    if (selectedModel?.toLowerCase().includes('antigravity')) {
-      values.add('adaptive')
-    }
-    if (selectedModelReasoning.type === 'effort') {
-      if (!values.has(selectedEffortLevel)) {
-        onEffortLevelChange(selectedModelReasoning.default as EffortLevel)
-      }
-    } else if (!values.has(selectedThinkingLevel)) {
-      onThinkingLevelChange(selectedModelReasoning.default as ThinkingLevel)
-    }
-  }, [
-    onEffortLevelChange,
-    onThinkingLevelChange,
-    selectedEffortLevel,
-    selectedModel,
-    selectedModelReasoning,
-    selectedThinkingLevel,
-  ])
-  const availableExecutionModes = getSupportedExecutionModes(selectedBackend)
+  const availableExecutionModes = getSupportedExecutionModes(
+    selectedBackend
+  ).filter(mode => !hidePlanMode || mode !== 'plan')
   const hasMultipleBackendModelChoices =
     backendModelSections.reduce(
       (count, section) => count + section.options.length,
@@ -265,7 +236,7 @@ export const ChatToolbar = memo(function ChatToolbar({
       <>
         <BackendLabel
           backend={selectedBackend}
-          badgeClassName="text-[9px] leading-3"
+          badgeClassName="text-2xs leading-3"
         />
         <span className="truncate">· {selectedModelLabel}</span>
         {getModelFastInfo(selectedBackend, selectedModel).isFast && (
@@ -365,10 +336,10 @@ export const ChatToolbar = memo(function ChatToolbar({
   )
 
   const handleAfterMobileModelSelect = useCallback(() => {
-    // Defer so selectedBackend/model props refresh before the reasoning sheet
-    // decides effort vs thinking options.
+    // Defer so the menu re-renders with the new model before it checks the
+    // reasoning control.
     requestAnimationFrame(() => {
-      setOpenReasoningSheetSignal(n => n + 1)
+      mobileSettingsMenuRef.current?.openReasoningSheet()
     })
   }, [])
 
@@ -472,7 +443,7 @@ export const ChatToolbar = memo(function ChatToolbar({
     try {
       const result = await invoke<RevertCommitResponse>(
         'revert_last_local_commit',
-        { worktreePath: activeWorktreePath }
+        { worktreeId, worktreePath: activeWorktreePath }
       )
       triggerImmediateGitPoll()
       if (projectId) fetchWorktreesStatus(projectId)
@@ -480,7 +451,7 @@ export const ChatToolbar = memo(function ChatToolbar({
     } catch (error) {
       revertToast.error(`Failed to revert: ${error}`)
     }
-  }, [activeWorktreePath, projectId])
+  }, [activeWorktreePath, worktreeId, projectId])
 
   const handleRevertLastCommit = useCallback(() => {
     if (!activeWorktreePath) return
@@ -491,32 +462,14 @@ export const ChatToolbar = memo(function ChatToolbar({
 
   return (
     <>
-      <AlertDialog open={revertConfirmOpen} onOpenChange={setRevertConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Revert last commit?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will undo the latest local commit on this worktree. Your
-              working tree changes from that commit will be restored, but this
-              action can be disruptive.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={executeRevertLastCommit}>
-              Revert last commit
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <RevertLastCommitDialog
+        open={revertConfirmOpen}
+        onOpenChange={setRevertConfirmOpen}
+        onConfirm={executeRevertLastCommit}
+      />
 
-      <div
-        className={cn(
-          '@container flex px-4 py-2 md:px-6',
-          zenMode ? 'justify-end' : 'justify-start'
-        )}
-      >
-        <div className="inline-flex max-w-full flex-nowrap items-center overflow-x-auto whitespace-nowrap bg-transparent scrollbar-hide">
+      <div className="@container flex px-4 py-2 md:px-6">
+        <div className="flex w-full min-w-0 flex-nowrap items-center overflow-x-auto whitespace-nowrap bg-transparent scrollbar-hide">
           {selectedBackend === 'devin' && (
             <DevinLocationPicker
               sessionId={activeSessionId ?? null}
@@ -526,7 +479,10 @@ export const ChatToolbar = memo(function ChatToolbar({
             />
           )}
           <div className={zenMode ? 'hidden' : 'contents'}>
-            <DockBurgerButton className="flex @xl:hidden" />
+            <DockBurgerButton
+              activeMcpCount={activeMcpCount}
+              className="flex @xl:hidden"
+            />
 
             {onOpenMagicModal && (
               <MobileToolbarMenu
@@ -536,7 +492,6 @@ export const ChatToolbar = memo(function ChatToolbar({
                 hasSentryContexts={loadedSentryContexts.length > 0}
                 hasPrContexts={loadedPRContexts.length > 0}
                 hasAdvisoryContexts={loadedAdvisoryContexts.length > 0}
-                onSaveContext={onSaveContext}
                 onLoadContext={onLoadContext}
                 onCommit={onCommit}
                 onCommitAndPush={onCommitAndPush}
@@ -575,7 +530,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               handleProviderChange={handleProviderChange}
               handleEffortLevelChange={handleEffortLevelChange}
               handleThinkingLevelChange={handleThinkingLevelChange}
-              openReasoningSheetSignal={openReasoningSheetSignal}
+              ref={mobileSettingsMenuRef}
               loadedIssueContexts={loadedIssueContexts}
               loadedPRContexts={loadedPRContexts}
               loadedDiscussionContexts={loadedDiscussionContexts}
@@ -635,6 +590,7 @@ export const ChatToolbar = memo(function ChatToolbar({
               onSetExecutionMode={onSetExecutionMode}
               className="flex @xl:hidden shrink-0"
               align="end"
+              iconOnly
             />
 
             <DesktopToolbarControls
@@ -655,14 +611,14 @@ export const ChatToolbar = memo(function ChatToolbar({
               customCodexProviders={customCodexProviders}
               isCodex={isCodex}
               modelReasoning={selectedModelReasoning}
-              prUrl={prUrl}
+              prUrl={isModal ? undefined : prUrl}
               prNumber={prNumber}
               displayStatus={displayStatus}
-              checkStatus={checkStatus}
-              mergeableStatus={mergeableStatus}
               activeWorktreePath={activeWorktreePath}
+              worktreeId={worktreeId}
               availableMcpServers={availableMcpServers}
               enabledMcpServers={enabledMcpServers}
+              activeMcpCount={activeMcpCount}
               isHealthChecking={isHealthChecking}
               mcpStatuses={mcpStatuses}
               loadedIssueContexts={loadedIssueContexts}
@@ -681,7 +637,6 @@ export const ChatToolbar = memo(function ChatToolbar({
               onMcpDropdownOpenChange={handleMcpDropdownOpenChange}
               onOpenMagicModal={onOpenMagicModal}
               onOpenProjectSettings={onOpenProjectSettings}
-              onResolvePrConflicts={onResolvePrConflicts}
               onLoadContext={onLoadContext}
               onAttach={onAttach}
               installedBackends={installedBackends}
@@ -705,16 +660,17 @@ export const ChatToolbar = memo(function ChatToolbar({
             />
           </div>
 
-          <div className="shrink-0 py-1">
+          <div className="ml-auto shrink-0 py-1 pl-2">
             <SendCancelButton
               isSending={isSending}
               canSend={canSend}
               willSteer={willSteer}
-              steerWithModifier={steerWithModifier}
+              actionWithModifier={actionWithModifier}
               canSteer={canSteer}
               queuedMessageCount={queuedMessageCount}
               onCancel={onCancel}
               onSteer={onSteer}
+              onQueue={onQueue}
             />
           </div>
         </div>
