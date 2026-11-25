@@ -203,19 +203,27 @@ export function useClaudeCliAuth(options?: { enabled?: boolean }) {
 export function claudeUsageQueryOptions(options?: {
   enabled?: boolean
   account?: string
+  /** Settings-target server; undefined = the local app. */
+  serverId?: string
 }) {
   const account = options?.account
+  const serverId = options?.serverId
   return queryOptions({
-    queryKey: account
-      ? claudeCliQueryKeys.accountUsage(account)
-      : claudeCliQueryKeys.usage(),
+    queryKey: [
+      ...(account
+        ? claudeCliQueryKeys.accountUsage(account)
+        : claudeCliQueryKeys.usage()),
+      serverId ?? 'local',
+    ],
     queryFn: async (): Promise<ClaudeUsageSnapshot> => {
       if (!isTauri()) {
         throw new Error('Claude usage is only available in Tauri context')
       }
-      return account
-        ? invoke<ClaudeUsageSnapshot>('get_claude_usage', { account })
-        : invoke<ClaudeUsageSnapshot>('get_claude_usage')
+      return invokeForOptionalServer<ClaudeUsageSnapshot>(
+        serverId,
+        'get_claude_usage',
+        account ? { account } : undefined
+      )
     },
     enabled: options?.enabled ?? true,
     staleTime: query => getUsageStaleTime(query.state.data),
@@ -229,7 +237,8 @@ export function useClaudeUsage(options?: {
   enabled?: boolean
   account?: string
 }) {
-  return useQuery(claudeUsageQueryOptions(options))
+  const serverId = useOptionalSettingsTargetServerId()
+  return useQuery(claudeUsageQueryOptions({ ...options, serverId }))
 }
 
 /**

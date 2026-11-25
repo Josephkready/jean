@@ -12,7 +12,11 @@ use crate::platform::silent_command;
 const GITHUB_REPO: &str = "anomalyco/opencode";
 
 /// Emergency fallback version when API fails AND no cache exists.
-const FALLBACK_OPENCODE_VERSION: &str = "0.4.1";
+const FALLBACK_OPENCODE_VERSION: &str = "1.19.5";
+/// Newest OpenCode 2.x minor tested with Jean's 2.x backend. OpenCode 2.x
+/// (from 2.2.0) replaced the 1.x HTTP API, and its API still changes between
+/// minors, so newer 2.x releases are not listed or installed until tested.
+const MAX_TESTED_OPENCODE_2_MINOR: u64 = 3;
 const OPENCODE_VERSIONS_CACHE_FILE: &str = "opencode-versions-cache.json";
 
 /// Status of the OpenCode CLI installation
@@ -363,6 +367,26 @@ fn is_model_identifier(value: &str) -> bool {
     parts[..n - 1].iter().all(|s| allowed_segment(s)) && allowed_last_segment(parts[n - 1])
 }
 
+/// Whether `opencode auth list` output (ANSI already stripped) lists any usable
+/// credential. Two formats exist (issue #895):
+/// - v2.x: one row per connection ending in its type, e.g.
+///   `acme-llm  acme-llm  stored` or `OpenAI  OPENAI_API_KEY  environment`;
+///   the empty state is `No authenticated integrations`.
+/// - v1.x: clack sections closed by a count, e.g. `└  2 credentials` or
+///   `└  1 environment variable`.
+fn has_auth_connections(stdout: &str) -> bool {
+    let positive = |count: &str| count.parse::<u32>().is_ok_and(|n| n > 0);
+    stdout.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [.., "stored" | "environment"] => true,
+            [.., count, "credential" | "credentials"] => positive(count),
+            [.., count, "environment", "variable" | "variables"] => positive(count),
+            _ => false,
+        }
+    })
+}
+
 /// Check if OpenCode CLI has any configured credentials.
 pub async fn check_opencode_cli_auth(app: AppHandle) -> Result<OpenCodeAuthStatus, String> {
     log::trace!("Checking OpenCode CLI authentication status");
@@ -410,8 +434,8 @@ pub async fn check_opencode_cli_auth(app: AppHandle) -> Result<OpenCodeAuthStatu
     }
 
     let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let stdout = strip_ansi(&stdout_raw).to_lowercase();
-    let has_credentials = stdout.contains("credential") && !stdout.contains("0 credentials");
+    let stdout = strip_ansi(&stdout_raw);
+    let has_credentials = has_auth_connections(&stdout);
 
     Ok(OpenCodeAuthStatus {
         authenticated: has_credentials,
@@ -502,17 +526,38 @@ fn save_opencode_versions_cache(app: &AppHandle, versions: &[OpenCodeReleaseInfo
     }
 }
 
+/// True for an OpenCode release version (`1.19.5`, `v2.3.0`) that Jean
+/// supports: any 0.x/1.x, and tested 2.x minors. Other tags in the repo
+/// (`process-daemon-v0.5.2`) are rejected.
+fn is_supported_opencode_version(version: &str) -> bool {
+    let mut parts = version
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse::<u64>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(0 | 1), Some(_)) => true,
+        (Some(2), Some(minor)) => minor <= MAX_TESTED_OPENCODE_2_MINOR,
+        _ => false,
+    }
+}
+
 fn load_opencode_versions_cache(app: &AppHandle) -> Option<Vec<OpenCodeReleaseInfo>> {
     let cache_path = super::config::get_cli_dir(app)
         .ok()?
         .join(OPENCODE_VERSIONS_CACHE_FILE);
     let contents = std::fs::read_to_string(&cache_path).ok()?;
     let cached: CachedOpenCodeVersions = serde_json::from_str(&contents).ok()?;
-    if cached.versions.is_empty() {
+    // Older caches can hold unsupported releases.
+    let versions: Vec<OpenCodeReleaseInfo> = cached
+        .versions
+        .into_iter()
+        .filter(|v| is_supported_opencode_version(&v.version))
+        .collect();
+    if versions.is_empty() {
         return None;
     }
-    log::trace!("Loaded {} cached OpenCode versions", cached.versions.len());
-    Some(cached.versions)
+    log::trace!("Loaded {} cached OpenCode versions", versions.len());
+    Some(versions)
 }
 
 fn fallback_opencode_versions() -> Vec<OpenCodeReleaseInfo> {
@@ -594,7 +639,9 @@ async fn fetch_opencode_versions_from_api() -> Result<Vec<OpenCodeReleaseInfo>, 
     let response = client
         .get(&url)
         .header("User-Agent", "jean-desktop")
-        .query(&[("per_page", "20")])
+        // Untested 2.x and non-CLI releases push supported releases off a
+        // short first page.
+        .query(&[("per_page", "100")])
         .send()
         .await
         .map_err(|e| {
@@ -626,6 +673,7 @@ async fn fetch_opencode_versions_from_api() -> Result<Vec<OpenCodeReleaseInfo>, 
 
     let result: Vec<OpenCodeReleaseInfo> = releases
         .into_iter()
+        .filter(|r| is_supported_opencode_version(&r.tag_name))
         .map(|r| {
             let version = r.tag_name.trim_start_matches('v').to_string();
             OpenCodeReleaseInfo {
@@ -676,6 +724,12 @@ pub async fn install_opencode_cli(app: AppHandle, version: Option<String>) -> Re
         Some(v) => v.trim_start_matches('v').to_string(),
         None => fetch_latest_version(&app).await?,
     };
+    if !is_supported_opencode_version(&version) {
+        return Err(format!(
+            "OpenCode {version} is not supported yet. Install OpenCode 1.x or \
+             2.{MAX_TESTED_OPENCODE_2_MINOR} or older."
+        ));
+    }
 
     let tag = format!("v{version}");
     let download_url = format!(
@@ -873,39 +927,62 @@ fn extract_binary_from_zip(archive_bytes: &[u8], binary_name: &str) -> Result<Ve
     ))
 }
 
-/// Fetch the latest release version from GitHub.
+/// Latest supported stable release. Not GitHub's `releases/latest`, which
+/// can be an untested 2.x release.
 ///
 /// Falls back to disk cache or hardcoded version if the API is unreachable.
 async fn fetch_latest_version(app: &AppHandle) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!(
-            "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-        ))
-        .header("User-Agent", "jean-desktop")
-        .send()
-        .await;
-
-    if let Ok(resp) = response {
-        if resp.status().is_success() {
-            if let Ok(release) = resp.json::<GitHubRelease>().await {
-                return Ok(release.tag_name.trim_start_matches('v').to_string());
-            }
-        }
-    }
-
-    log::warn!("Failed to fetch latest OpenCode version from API, using fallback");
-    if let Some(cached) = load_opencode_versions_cache(app) {
-        if let Some(first) = cached.into_iter().find(|v| !v.prerelease) {
-            return Ok(first.version);
-        }
-    }
-    Ok(FALLBACK_OPENCODE_VERSION.to_string())
+    let versions = get_available_opencode_versions(app.clone()).await?;
+    Ok(versions
+        .into_iter()
+        .find(|v| !v.prerelease)
+        .map(|v| v.version)
+        .unwrap_or_else(|| FALLBACK_OPENCODE_VERSION.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_model_identifier, opencode_models_args, parse_opencode_models_output};
+    use super::{
+        has_auth_connections, is_model_identifier, is_supported_opencode_version,
+        opencode_models_args, parse_opencode_models_output,
+    };
+
+    #[test]
+    fn supports_1x_and_tested_2x_releases() {
+        assert!(is_supported_opencode_version("1.19.5"));
+        assert!(is_supported_opencode_version("v1.19.5"));
+        assert!(is_supported_opencode_version("0.4.1"));
+        // OpenCode 2.x has its own backend (issue #896); untested minors wait.
+        assert!(is_supported_opencode_version("2.2.6"));
+        assert!(is_supported_opencode_version("v2.3.0"));
+        assert!(!is_supported_opencode_version("2.4.0"));
+        assert!(!is_supported_opencode_version("3.0.0"));
+        assert!(!is_supported_opencode_version("process-daemon-v0.5.2"));
+        assert!(!is_supported_opencode_version(""));
+    }
+
+    #[test]
+    fn detects_opencode_v2_auth_connections() {
+        assert!(has_auth_connections(
+            "acme-llm  acme-llm                      stored\n"
+        ));
+        assert!(has_auth_connections("acme-llm  acme-llm  STORED"));
+        assert!(has_auth_connections(
+            "OpenAI  OPENAI_API_KEY              environment\n"
+        ));
+        assert!(!has_auth_connections("No authenticated integrations\n"));
+        assert!(!has_auth_connections(""));
+    }
+
+    #[test]
+    fn detects_opencode_v1_auth_connections() {
+        let stored = "┌  Credentials ~/.local/share/opencode/auth.json\n│\n●  Anthropic api\n│\n└  1 credentials\n";
+        assert!(has_auth_connections(stored));
+        let env_only = "┌  Credentials ~/.local/share/opencode/auth.json\n│\n└  0 credentials\n\n┌  Environment\n│\n●  OpenAI OPENAI_API_KEY\n│\n└  1 environment variable\n";
+        assert!(has_auth_connections(env_only));
+        let empty = "┌  Credentials ~/.local/share/opencode/auth.json\n│\n└  0 credentials\n";
+        assert!(!has_auth_connections(empty));
+    }
 
     #[test]
     fn accepts_valid_model_identifiers() {

@@ -32,7 +32,7 @@ export function getProviderDisplayName(
     selectedProvider === '__anthropic__' ||
     selectedProvider === '__default__'
   ) {
-    if (selectedBackend === 'codex') return 'Default'
+    if (selectedBackend === 'codex') return 'OpenAI'
     return defaultAccountLabel || 'Anthropic'
   }
   return selectedProvider

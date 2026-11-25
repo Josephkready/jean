@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { render, screen, within } from '@/test/test-utils'
 import { useUIStore } from '@/store/ui-store'
+import { useProjectsStore } from '@/store/projects-store'
 import { NewWorktreeModal } from './NewWorktreeModal'
 import type * as EnvironmentModule from '@/lib/environment'
 import type * as PreferencesModule from '@/services/preferences'
+import type * as ProjectsModule from '@/services/projects'
 
 const mocks = vi.hoisted(() => ({
+  projects: [] as { id: string; server?: { host: string } }[],
   isMobile: false,
   isNativeApp: false,
   preferences: {
@@ -30,6 +33,10 @@ vi.mock('@/lib/environment', async importOriginal => ({
 vi.mock('@/services/preferences', async importOriginal => ({
   ...(await importOriginal<typeof PreferencesModule>()),
   usePreferences: () => ({ data: mocks.preferences }),
+}))
+vi.mock('@/services/projects', async importOriginal => ({
+  ...(await importOriginal<typeof ProjectsModule>()),
+  useProjects: () => ({ data: mocks.projects }),
 }))
 vi.mock('@/hooks/useGhLogin', () => ({ useGhLogin: () => ({}) }))
 vi.mock('@/hooks/useInstalledBackends', () => ({
@@ -56,6 +63,7 @@ vi.mock('./GitHubPRsTab', () => ({ GitHubPRsTab: () => null }))
 vi.mock('./QuickActionsTab', () => ({ QuickActionsTab: () => null }))
 
 beforeEach(() => {
+  mocks.projects = []
   mocks.isMobile = false
   mocks.isNativeApp = false
   HTMLCanvasElement.prototype.getContext = vi.fn(() => null)
@@ -84,21 +92,6 @@ beforeEach(() => {
 })
 
 describe('NewWorktreeModal investigation selector', () => {
-  it('shows a styled desktop modifier hint in web access', () => {
-    render(<NewWorktreeModal />)
-
-    const hint = screen.getByText(/to open in background/i).parentElement
-    expect(hint).toHaveTextContent('Hold Ctrl to open in background')
-    expect(hint?.querySelector('[data-slot="kbd"]')).toHaveTextContent('Ctrl')
-  })
-
-  it('hides the keyboard-only background hint on mobile', () => {
-    mocks.isMobile = true
-    render(<NewWorktreeModal />)
-
-    expect(screen.queryByText(/to open in background/i)).toBeNull()
-  })
-
   it.each([
     { mode: 'native desktop', native: true, mobile: false },
     { mode: 'web', native: false, mobile: false },
@@ -125,7 +118,7 @@ describe('NewWorktreeModal investigation selector', () => {
       expect(within(list).queryByText(/Sonnet/)).toBeNull()
       await user.click(screen.getByRole('tab', { name: 'Claude' }))
       expect(within(list).queryByText(/GPT/)).toBeNull()
-      await user.click(within(list).getByText('Sonnet 4.6'))
+      await user.click(within(list).getByText('Sonnet 5.5'))
       await user.click(
         screen.getByRole('button', { name: 'Choose backend and model' })
       )
@@ -151,7 +144,7 @@ describe('NewWorktreeModal investigation selector', () => {
     )
     await user.click(screen.getByRole('tab', { name: 'Claude' }))
     await user.click(
-      within(screen.getByRole('listbox')).getByText('Sonnet 4.6')
+      within(screen.getByRole('listbox')).getByText('Sonnet 5.5')
     )
     mocks.preferences = { ...mocks.preferences }
     rerender(<NewWorktreeModal />)
@@ -159,8 +152,10 @@ describe('NewWorktreeModal investigation selector', () => {
       screen.queryByRole('combobox', { name: 'Investigation provider' })
     ).toBeNull()
     expect(
-      screen.getByRole('button', { name: 'Choose backend and model' })
-    ).toHaveTextContent('Claude')
+      within(
+        screen.getByRole('button', { name: 'Choose backend and model' })
+      ).getByRole('img', { name: 'Claude' })
+    ).toBeInTheDocument()
   })
 
   it('loads the PR investigation defaults when switching tabs', async () => {
@@ -177,5 +172,33 @@ describe('NewWorktreeModal investigation selector', () => {
       'aria-selected',
       'true'
     )
+  })
+})
+
+describe('NewWorktreeModal background hint', () => {
+  it('shows the modifier hint on desktop', () => {
+    render(<NewWorktreeModal />)
+
+    const hint = screen.getByText(/to open in background/i)
+    expect(hint).toHaveTextContent('Hold Ctrl to open in background')
+    expect(hint.querySelector('[data-slot="kbd"]')).toHaveTextContent('Ctrl')
+  })
+
+  it('hides the hint on mobile', () => {
+    mocks.isMobile = true
+    render(<NewWorktreeModal />)
+
+    expect(screen.queryByText(/to open in background/i)).toBeNull()
+  })
+})
+
+describe('NewWorktreeModal for servers', () => {
+  it('closes without rendering when the selected project is a server', () => {
+    mocks.projects = [{ id: 'srv', server: { host: 'example.com' } }]
+    useProjectsStore.setState({ selectedProjectId: 'srv' })
+    render(<NewWorktreeModal />)
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(useUIStore.getState().newWorktreeModalOpen).toBe(false)
   })
 })

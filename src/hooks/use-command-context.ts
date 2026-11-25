@@ -15,10 +15,7 @@ import {
 } from '@/lib/session-debug'
 import type { CommandContext } from '@/lib/commands/types'
 import type { AppPreferences, ClaudeModel } from '@/types/preferences'
-import {
-  resolveMagicPromptBackend,
-  resolveMagicPromptProvider,
-} from '@/types/preferences'
+import { resolveMagicPromptProvider } from '@/types/preferences'
 import type {
   ThinkingLevel,
   ExecutionMode,
@@ -26,17 +23,13 @@ import type {
   Backend,
   Session,
 } from '@/types/chat'
-import type { Project, StartReviewJobResponse } from '@/types/projects'
+import type { Project } from '@/types/projects'
 import { useQueryClient } from '@tanstack/react-query'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
 import { chatQueryKeys } from '@/services/chat'
 import { projectsQueryKeys } from '@/services/projects'
 import { triggerImmediateGitPoll, performGitPull } from '@/services/git-status'
-import {
-  resolveCodeReviewConfigs,
-  startCodeReviewsSequentially,
-} from '@/lib/code-review-configs'
-import { generateId } from '@/lib/uuid'
+import { startJeanReviewSession } from '@/lib/jean-review'
 
 /**
  * Command context hook - provides essential actions for commands
@@ -280,15 +273,20 @@ export function useCommandContext(
     )
   }, [])
 
-  // Helper to get target path (worktree or project)
-  const getTargetPath = useCallback(() => {
+  // Helper to get target path (worktree or project) with the id of its owner,
+  // so routing picks the owner's Jean server when two servers share the path
+  const getTarget = useCallback((): {
+    path: string
+    worktreeId?: string
+    projectId?: string
+  } | null => {
     const { selectedWorktreeId, selectedProjectId } =
       useProjectsStore.getState()
 
     // Try worktree path first
     if (selectedWorktreeId) {
       const path = useChatStore.getState().getWorktreePath(selectedWorktreeId)
-      if (path) return path
+      if (path) return { path, worktreeId: selectedWorktreeId }
     }
 
     // Fall back to project path
@@ -297,7 +295,7 @@ export function useCommandContext(
         projectsQueryKeys.list()
       )
       const project = projects?.find(p => p.id === selectedProjectId)
-      if (project) return project.path
+      if (project) return { path: project.path, projectId: project.id }
     }
 
     return null
@@ -305,59 +303,67 @@ export function useCommandContext(
 
   // Open In - Finder
   const openInFinder = useCallback(async () => {
-    const worktreePath = getTargetPath()
-    if (!worktreePath) {
+    const target = getTarget()
+    if (!target) {
       notify('No project or worktree selected', undefined, { type: 'error' })
       return
     }
 
     try {
-      await invoke('open_worktree_in_finder', { worktreePath })
+      await invoke('open_worktree_in_finder', {
+        worktreePath: target.path,
+        worktreeId: target.worktreeId,
+        projectId: target.projectId,
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       notify(message, undefined, { type: 'error' })
     }
-  }, [getTargetPath])
+  }, [getTarget])
 
   // Open In - Terminal
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const openInTerminal = useCallback(async () => {
-    const worktreePath = getTargetPath()
-    if (!worktreePath) {
+    const target = getTarget()
+    if (!target) {
       notify('No project or worktree selected', undefined, { type: 'error' })
       return
     }
 
     try {
       await invoke('open_worktree_in_terminal', {
-        worktreePath,
+        worktreePath: target.path,
+        worktreeId: target.worktreeId,
+        projectId: target.projectId,
         terminal: preferences?.terminal,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       notify(message, undefined, { type: 'error' })
     }
-  }, [getTargetPath, preferences?.terminal])
+  }, [getTarget, preferences?.terminal])
 
   // Open In - Editor
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const openInEditor = useCallback(async () => {
-    const worktreePath = getTargetPath()
-    if (!worktreePath) {
+    const target = getTarget()
+    if (!target) {
       notify('No project or worktree selected', undefined, { type: 'error' })
       return
     }
 
     try {
       await invoke('open_worktree_in_editor', {
-        worktreePath,
+        worktreePath: target.path,
+        worktreeId: target.worktreeId,
+        projectId: target.projectId,
         editor: preferences?.editor,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       notify(message, undefined, { type: 'error' })
     }
-  }, [getTargetPath, preferences?.editor])
+  }, [getTarget, preferences?.editor])
 
   // Open In - GitHub
   const openOnGitHub = useCallback(async () => {
@@ -554,7 +560,7 @@ export function useCommandContext(
 
   // Git - Pull changes from remote
   const doGitPull = useCallback(async () => {
-    const worktreePath = getTargetPath()
+    const worktreePath = getTarget()?.path
     if (!worktreePath) {
       notify('No project or worktree selected', undefined, { type: 'error' })
       return
@@ -602,7 +608,7 @@ export function useCommandContext(
       baseBranch,
       remote: baseRemote,
     })
-  }, [getTargetPath, queryClient])
+  }, [getTarget, queryClient])
 
   // Git - Refresh git status immediately
   const refreshGitStatus = useCallback(() => {
@@ -619,66 +625,29 @@ export function useCommandContext(
       return
     }
 
-    const toastId = toast.loading('Starting AI code review...')
+    const worktree = queryClient.getQueryData<{
+      project_id: string
+      base_branch?: string
+      base_remote?: string
+    }>([...projectsQueryKeys.all, 'worktree', activeWorktreeId])
+    const project = queryClient
+      .getQueryData<Project[]>(projectsQueryKeys.list())
+      ?.find(p => p.id === worktree?.project_id)
+    const baseBranch =
+      worktree?.base_branch || project?.default_branch || 'main'
+    const baseRemote = worktree?.base_remote || 'origin'
     try {
-      const configs = resolveCodeReviewConfigs({
-        configured: preferences?.magic_code_review_configs,
-        fallbackBackend:
-          resolveMagicPromptBackend(
-            preferences?.magic_prompt_backends,
-            'code_review_backend',
-            preferences?.default_backend
-          ) ?? 'claude',
-        fallbackModel:
-          preferences?.magic_prompt_models?.code_review_model ?? 'sonnet',
-      })
-      let reviewSessionId: string | undefined
-      await startCodeReviewsSequentially(configs, async config => {
-        const { job } = await invoke<StartReviewJobResponse>(
-          'start_review_job',
-          {
-            worktreeId: activeWorktreeId,
-            worktreePath: activeWorktreePath,
-            source: 'ai',
-            backend: config.backend,
-            customPrompt: preferences?.magic_prompts?.code_review,
-            model: config.model,
-            customProfileName: resolveMagicPromptProvider(
-              preferences?.magic_prompt_providers,
-              'code_review_provider',
-              preferences?.default_provider
-            ),
-            reasoningEffort:
-              config.reasoning_effort ??
-              preferences?.magic_prompt_efforts?.code_review_effort ??
-              null,
-            reviewRunId: generateId(),
-            reviewType: null,
-            sessionId: reviewSessionId,
-          }
-        )
-        reviewSessionId ??= job.sessionId
-      })
-      queryClient.invalidateQueries({
-        queryKey: chatQueryKeys.sessions(activeWorktreeId),
-      })
-      toast.success(`Started ${configs.length} code review session(s)`, {
-        id: toastId,
+      await startJeanReviewSession({
+        worktreeId: activeWorktreeId,
+        worktreePath: activeWorktreePath,
+        baseRef: `${baseRemote}/${baseBranch}`,
+        preferences,
+        queryClient,
       })
     } catch (error) {
-      toast.error(`Failed to review: ${error}`, { id: toastId })
+      toast.error(`Failed to start review: ${error}`)
     }
-  }, [
-    preferences?.magic_prompts?.code_review,
-    preferences?.magic_prompt_models?.code_review_model,
-    preferences?.magic_code_review_configs,
-    preferences?.magic_prompt_backends,
-    preferences?.default_backend,
-    preferences?.magic_prompt_providers,
-    preferences?.default_provider,
-    preferences?.magic_prompt_efforts?.code_review_effort,
-    queryClient,
-  ])
+  }, [preferences, queryClient])
 
   // Terminal - Open terminal panel
   const openTerminalPanel = useCallback(() => {
@@ -710,24 +679,9 @@ export function useCommandContext(
     window.dispatchEvent(new CustomEvent('command:run-script'))
   }, [])
 
-  // Context - Save current session context
-  const saveContext = useCallback(() => {
-    window.dispatchEvent(new CustomEvent('command:save-context'))
-  }, [])
-
   // Context - Load context (opens modal)
   const loadContext = useCallback(() => {
     window.dispatchEvent(new CustomEvent('command:load-context'))
-  }, [])
-
-  // Archive - Open archived modal
-  const openArchivedModal = useCallback(() => {
-    window.dispatchEvent(new CustomEvent('command:open-archived-modal'))
-  }, [])
-
-  // Archive - Restore last archived
-  const restoreLastArchived = useCallback(() => {
-    window.dispatchEvent(new CustomEvent('restore-last-archived'))
   }, [])
 
   // Unread sessions
@@ -985,12 +939,7 @@ export function useCommandContext(
       runScript,
 
       // Context
-      saveContext,
       loadContext,
-
-      // Archive
-      openArchivedModal,
-      restoreLastArchived,
 
       // Unread
       openUnreadSessions,
@@ -1053,10 +1002,7 @@ export function useCommandContext(
       runAIReview,
       openTerminalPanel,
       runScript,
-      saveContext,
       loadContext,
-      openArchivedModal,
-      restoreLastArchived,
       openUnreadSessions,
       toggleDebugMode,
       copySessionDebugDetails,

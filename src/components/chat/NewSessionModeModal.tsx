@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Kbd } from '@/components/ui/kbd'
+import { ChoiceButton } from './ChoiceButton'
 import {
   Tooltip,
   TooltipContent,
@@ -101,8 +102,13 @@ export function NewSessionModeModal() {
   const target = useUIStore(state => state.newSessionModeTarget)
   const close = useUIStore(state => state.closeNewSessionModeModal)
   const createSession = useCreateSession()
-  const targetServerId = target
-    ? (parseServerResourceKey(target.worktreeId)?.serverId ?? 'local')
+  // Keep the last server while the dialog animates out; falling back to
+  // 'local' on close would swap in another server's backend list.
+  const [lastTarget, setLastTarget] = useState(target)
+  if (target && target !== lastTarget) setLastTarget(target)
+  const serverTarget = target ?? lastTarget
+  const targetServerId = serverTarget
+    ? (parseServerResourceKey(serverTarget.worktreeId)?.serverId ?? 'local')
     : 'local'
   const statusOptions = { enabled: target !== null, serverId: targetServerId }
   const claudeStatus = useClaudeCliStatus(statusOptions)
@@ -429,7 +435,7 @@ export function NewSessionModeModal() {
               </DialogHeader>
 
               <div className="grid min-w-0 gap-2">
-                <NewSessionChoice
+                <ChoiceButton
                   icon={
                     createSession.isPending ? (
                       <Loader2 className="size-4 animate-spin" />
@@ -440,18 +446,16 @@ export function NewSessionModeModal() {
                   title="Jean Chat"
                   subtitle="Normal ChatWindow session with Jean features"
                   badge="Default"
-                  shortcut="↵"
-                  showShortcut={!isMobile}
+                  shortcut={isMobile ? undefined : '↵'}
                   disabled={createSession.isPending}
                   onClick={chooseChat}
                 />
 
-                <NewSessionChoice
+                <ChoiceButton
                   icon={<Terminal className="size-4" />}
                   title="Terminal"
                   subtitle="Open a plain terminal on this worktree"
-                  shortcut="1"
-                  showShortcut={!isMobile}
+                  shortcut={isMobile ? undefined : '1'}
                   disabled={createSession.isPending}
                   onClick={choosePlainTerminal}
                 />
@@ -724,59 +728,8 @@ function NativeBackendChoice({
             </TooltipContent>
           </Tooltip>
         )}
-        <Kbd className="h-7 min-w-7 shrink-0 text-[10px]">{shortcut}</Kbd>
+        <Kbd className="h-7 min-w-7 shrink-0 text-2xs">{shortcut}</Kbd>
       </span>
     </div>
-  )
-}
-
-function NewSessionChoice({
-  icon,
-  title,
-  subtitle,
-  badge,
-  shortcut,
-  showShortcut = true,
-  disabled,
-  onClick,
-}: {
-  icon: React.ReactNode
-  title: string
-  subtitle: string
-  badge?: string
-  shortcut: string
-  showShortcut?: boolean
-  disabled?: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        'flex w-full min-w-0 max-w-full items-center gap-3 rounded-lg border border-border/70 bg-muted/25 px-3 py-2.5 text-left transition-colors',
-        'hover:border-border hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-        disabled && 'cursor-not-allowed opacity-50 hover:bg-muted/25'
-      )}
-    >
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-background text-muted-foreground">
-        {icon}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2 text-sm font-medium leading-none">
-          {title}
-          {badge && (
-            <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-              {badge}
-            </span>
-          )}
-        </span>
-        <span className="mt-1 block text-xs leading-snug text-muted-foreground">
-          {subtitle}
-        </span>
-      </span>
-      {showShortcut && <Kbd className="shrink-0 text-[10px]">{shortcut}</Kbd>}
-    </button>
   )
 }

@@ -1,5 +1,6 @@
-import { Loader2, Wand2 } from '@/components/icons/reicon'
+import { Loader2 } from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
 
 export interface BulkInvestigateBarProps {
@@ -8,11 +9,15 @@ export interface BulkInvestigateBarProps {
   noun?: string
   /** Replaces the default "Investigate N items in background" label */
   actionLabel?: string
-  /** Optional second action shown before the main button */
+  /** Optional second action shown after the main button; it becomes the primary (highlighted) button */
   secondaryActionLabel?: string
   onSecondaryAction?: () => void
+  /** Keyboard shortcut hints shown inside the action buttons */
+  actionKbd?: string
+  secondaryActionKbd?: string
   onClear: () => void
   onInvestigate: () => void
+  className?: string
 }
 
 /** Sticky footer action bar for multi-select bulk investigate in New Session tabs. */
@@ -23,11 +28,21 @@ export function BulkInvestigateBar({
   actionLabel,
   secondaryActionLabel,
   onSecondaryAction,
+  actionKbd,
+  secondaryActionKbd,
   onClear,
   onInvestigate,
+  className,
 }: BulkInvestigateBarProps) {
+  const hasSecondary = Boolean(secondaryActionLabel && onSecondaryAction)
   return (
-    <div className="shrink-0 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 px-3 py-2.5 sm:py-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
+    <div
+      className={cn(
+        // Mobile: keep the action above the home indicator / screen edge
+        'shrink-0 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 px-3 pt-2.5 pb-[calc(env(safe-area-inset-bottom)+1rem)] sm:py-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3',
+        className
+      )}
+    >
       <div className="flex items-center justify-between sm:justify-start gap-2 min-w-0">
         <span className="text-sm font-medium tabular-nums">
           {count} selected
@@ -41,35 +56,42 @@ export function BulkInvestigateBar({
           Clear
         </button>
       </div>
-      {secondaryActionLabel && onSecondaryAction && (
+      <Button
+        size="sm"
+        variant={hasSecondary ? 'outline' : 'default'}
+        className="w-full h-10 sm:h-8 sm:w-auto sm:ml-auto"
+        disabled={isLoading}
+        onClick={onInvestigate}
+      >
+        {isLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+        {isLoading
+          ? 'Starting…'
+          : (actionLabel ?? `Investigate ${count} ${noun} in background`)}
+        {actionKbd && !isLoading && (
+          <Kbd
+            className={cn(
+              !hasSecondary && 'bg-primary-foreground/15 text-current'
+            )}
+          >
+            {actionKbd}
+          </Kbd>
+        )}
+      </Button>
+      {hasSecondary && (
         <Button
           size="sm"
-          variant="outline"
-          className="w-full sm:w-auto sm:ml-auto"
+          className="w-full h-10 sm:h-8 sm:w-auto"
           disabled={isLoading}
           onClick={onSecondaryAction}
         >
           {secondaryActionLabel}
+          {secondaryActionKbd && (
+            <Kbd className="bg-primary-foreground/15 text-current">
+              {secondaryActionKbd}
+            </Kbd>
+          )}
         </Button>
       )}
-      <Button
-        size="sm"
-        className={cn(
-          'w-full sm:w-auto',
-          !(secondaryActionLabel && onSecondaryAction) && 'sm:ml-auto'
-        )}
-        disabled={isLoading}
-        onClick={onInvestigate}
-      >
-        {isLoading ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Wand2 className="h-4 w-4 text-current" />
-        )}
-        {isLoading
-          ? 'Starting…'
-          : (actionLabel ?? `Investigate ${count} ${noun} in background`)}
-      </Button>
     </div>
   )
 }

@@ -5,6 +5,7 @@ import {
   decorateServerResult,
   resolveServerCommand,
   registerServerResourcePath,
+  routeServerCommand,
   stripServerScope,
 } from './server-command-routing'
 
@@ -359,7 +360,7 @@ describe('server command routing', () => {
       decorateServerResult('r1', 'bootstrap_project', {
         worktrees: [{ id: 'w1', project_id: 'p1', name: 'Worktree' }],
         sessionsByWorktree: { w1: { sessions: [{ id: 's1' }] } },
-        runningSessions: ['s1'],
+        runStates: [{ sessionId: 's1', worktreeId: 'w1', status: 'running' }],
       })
     ).toEqual({
       worktrees: [
@@ -376,8 +377,25 @@ describe('server command routing', () => {
           sessions: [{ id: 'r1:s1', serverId: 'r1', resourceId: 's1' }],
         },
       },
-      runningSessions: ['r1:s1'],
+      runStates: [
+        { sessionId: 'r1:s1', worktreeId: 'r1:w1', status: 'running' },
+      ],
     })
+  })
+
+  it('scopes run-state snapshot identities', () => {
+    expect(
+      decorateServerResult('r1', 'get_run_states', [
+        { sessionId: 's1', worktreeId: 'w1', status: 'idle', statusVersion: 2 },
+      ])
+    ).toEqual([
+      {
+        sessionId: 'r1:s1',
+        worktreeId: 'r1:w1',
+        status: 'idle',
+        statusVersion: 2,
+      },
+    ])
   })
 
   it('decorates session mutation responses and their owner references', () => {
@@ -396,10 +414,65 @@ describe('server command routing', () => {
     })
   })
 
-  it('scopes the next active session id returned by close and archive', () => {
+  it('scopes the delegating session of a loaded session', () => {
+    expect(
+      decorateServerResult('r1', 'get_session', {
+        id: 's1',
+        delegated_by: {
+          origin_session_id: 's0',
+          origin_worktree_id: 'w0',
+          origin_name: 'Planner',
+        },
+      })
+    ).toEqual({
+      id: 'r1:s1',
+      delegated_by: {
+        origin_session_id: 'r1:s0',
+        origin_worktree_id: 'r1:w0',
+        origin_name: 'Planner',
+      },
+      serverId: 'r1',
+      resourceId: 's1',
+    })
+  })
+
+  it('scopes every created worktree like its lifecycle events', () => {
+    const event = decorateServerEvent(
+      'r1',
+      { id: 'w1', project_id: 'p1', path: '/repo/next' },
+      'worktree:creating'
+    ) as { id: string }
+    for (const command of [
+      'create_worktree',
+      'create_worktree_from_existing_branch',
+      'checkout_pr',
+      'import_worktree',
+    ]) {
+      expect(
+        decorateServerResult('r1', command, {
+          id: 'w1',
+          project_id: 'p1',
+          path: '/repo/next',
+        })
+      ).toMatchObject({ id: event.id, project_id: 'r1:p1' })
+    }
+  })
+
+  it('decorates the worktree and session of a forked session', () => {
+    expect(
+      decorateServerResult('r1', 'fork_session_to_worktree', {
+        worktree: { id: 'w1', project_id: 'p1' },
+        session: { id: 's1', worktree_id: 'w1' },
+      })
+    ).toMatchObject({
+      worktree: { id: 'r1:w1', project_id: 'r1:p1' },
+      session: { id: 'r1:s1', worktree_id: 'r1:w1' },
+    })
+  })
+
+  it('scopes the next active session id returned by close', () => {
     expect(decorateServerResult('r1', 'close_session', 's2')).toBe('r1:s2')
-    expect(decorateServerResult('r1', 'archive_session', 's2')).toBe('r1:s2')
-    expect(decorateServerResult('r1', 'archive_session', null)).toBeNull()
+    expect(decorateServerResult('r1', 'close_session', null)).toBeNull()
   })
 
   it('decorates background investigation session and worktree identities', () => {
@@ -436,5 +509,115 @@ describe('server command routing', () => {
       parentId: 'folder-7',
     })
     expect(stripServerScope('remote-1')).toBeUndefined()
+  })
+
+  it('splits a mixed-server polling batch into one call per owning server', () => {
+    clearServerResourcePaths()
+
+    expect(
+      routeServerCommand('set_all_worktrees_for_polling', {
+        worktrees: [
+          { worktreeId: 'w-local', worktreePath: '/home/me/w' },
+          { worktreeId: 'remote-1:w-remote', worktreePath: '/srv/w' },
+          { worktreeId: 'w-local-2', worktreePath: '/home/me/w2' },
+        ],
+      })
+    ).toEqual([
+      {
+        serverId: 'local',
+        args: {
+          worktrees: [
+            { worktreeId: 'w-local', worktreePath: '/home/me/w' },
+            { worktreeId: 'w-local-2', worktreePath: '/home/me/w2' },
+          ],
+        },
+      },
+      {
+        serverId: 'remote-1',
+        args: {
+          worktrees: [{ worktreeId: 'w-remote', worktreePath: '/srv/w' }],
+        },
+      },
+    ])
+  })
+
+  it('splits a project reorder across servers and keeps raw ids on the active transport', () => {
+    expect(
+      routeServerCommand('reorder_projects', {
+        projectIds: ['remote-1:p2', 'p1', 'remote-1:p3'],
+      })
+    ).toEqual([
+      { serverId: 'remote-1', args: { projectIds: ['p2', 'p3'] } },
+      { serverId: null, args: { projectIds: ['p1'] } },
+    ])
+    expect(
+      routeServerCommand('reorder_projects', {
+        projectIds: ['remote-1:p2', 'remote-1:p3'],
+      })
+    ).toEqual([{ serverId: 'remote-1', args: { projectIds: ['p2', 'p3'] } }])
+  })
+
+  it('routes a session reference to the server that owns both sessions', () => {
+    expect(
+      routeServerCommand('attach_session_reference', {
+        targetSessionId: 'remote-1:target',
+        sourceSessionId: 'remote-1:source',
+      })
+    ).toEqual([
+      {
+        serverId: 'remote-1',
+        args: { targetSessionId: 'target', sourceSessionId: 'source' },
+      },
+    ])
+  })
+
+  it('routes a session reference by its local target, not its remote source', () => {
+    expect(
+      routeServerCommand('attach_session_reference', {
+        targetSessionId: 'target',
+        sourceSessionId: 'remote-1:source',
+      })
+    ).toEqual([
+      {
+        serverId: null,
+        args: { targetSessionId: 'target', sourceSessionId: 'remote-1:source' },
+      },
+    ])
+  })
+
+  it('routes a session reference to its remote target with a local source', () => {
+    expect(
+      routeServerCommand('attach_session_reference', {
+        targetSessionId: 'remote-1:target',
+        sourceSessionId: 'source',
+      })
+    ).toEqual([
+      {
+        serverId: 'remote-1',
+        args: { targetSessionId: 'target', sourceSessionId: 'source' },
+      },
+    ])
+    expect(
+      routeServerCommand('attach_session_reference', {
+        targetSessionId: 'remote-1:target',
+        sourceSessionId: 'remote-2:source',
+      })
+    ).toEqual([
+      {
+        serverId: 'remote-1',
+        args: { targetSessionId: 'target', sourceSessionId: 'remote-2:source' },
+      },
+    ])
+  })
+
+  it('names the fix when a path command has no owner', () => {
+    expect(() =>
+      routeServerCommand('read_file_content', { path: '/srv/a.ts' })
+    ).toThrow(
+      'read_file_content cannot tell which Jean server owns its arguments. Send sessionId or worktreeId or projectId with it, or call invokeForServer.'
+    )
+    expect(
+      routeServerCommand('read_file_content', { path: '/srv/a.ts' }, true)
+    ).toEqual([{ serverId: null, args: { path: '/srv/a.ts' } }])
   })
 })

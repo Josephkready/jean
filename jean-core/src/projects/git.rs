@@ -1,11 +1,9 @@
 use crate::platform::silent_command;
 use crate::platform::wsl_aware_command;
 use once_cell::sync::Lazy;
-use std::io::Read;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -864,7 +862,9 @@ fn find_unique_branch_name(repo_path: &str, base_name: &str) -> Result<String, S
 /// Get list of local branches for a repository
 pub fn get_branches(repo_path: &str) -> Result<Vec<String>, String> {
     let output = wsl_aware_command("git", Some(Path::new(repo_path)))
-        .args(["branch", "--format=%(refname:short)"])
+        // lstrip=2, not :short — :short renames a branch to `heads/x` when a
+        // remote-tracking ref has the same short name.
+        .args(["branch", "--format=%(refname:lstrip=2)"])
         .output()
         .map_err(|e| format!("Failed to run git command: {e}"))?;
 
@@ -1025,6 +1025,25 @@ fn git_push_needs_upstream_retry(stderr: &str) -> bool {
         || stderr.contains("push.default is set to simple")
 }
 
+/// The remote branch has commits that HEAD does not have, so a plain push
+/// cannot fast-forward it.
+fn git_push_rejected_as_behind(stderr: &str) -> bool {
+    stderr.contains("(non-fast-forward)") || stderr.contains("(fetch first)")
+}
+
+fn git_push_plain(repo_path: &str, remote: &str) -> Result<String, String> {
+    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
+        .args(["push", remote])
+        .output()
+        .map_err(|e| format!("Failed to run git push: {e}"))?;
+
+    if output.status.success() {
+        Ok(push_output_text(&output))
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
 fn current_upstream(repo_path: &str) -> Option<(String, String)> {
     let output = wsl_aware_command("git", Some(Path::new(repo_path)))
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
@@ -1068,6 +1087,10 @@ fn git_push_set_upstream(repo_path: &str, remote: &str) -> Result<String, String
 /// `push.default=simple` because the upstream branch name differs. Publish with
 /// `-u <remote> HEAD` whenever upstream is missing or not the same-named branch
 /// on the selected remote.
+///
+/// When the remote branch has commits that HEAD does not have (for example a
+/// PR merged into it on GitHub), merge them and push again, as `git pull`
+/// would. Merge conflicts are returned as an error and nothing is pushed.
 pub fn git_push(repo_path: &str, remote: Option<&str>) -> Result<String, String> {
     let remote = remote.unwrap_or("origin");
     log::trace!("Pushing to {remote} in {repo_path}");
@@ -1084,26 +1107,27 @@ pub fn git_push(repo_path: &str, remote: Option<&str>) -> Result<String, String>
         return git_push_set_upstream(repo_path, remote);
     }
 
-    let output = wsl_aware_command("git", Some(Path::new(repo_path)))
-        .args(["push", remote])
-        .output()
-        .map_err(|e| format!("Failed to run git push: {e}"))?;
-
-    if output.status.success() {
-        let result = push_output_text(&output);
-        log::trace!("Successfully pushed to {remote}");
-        Ok(result)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if git_push_needs_upstream_retry(&stderr) {
-            log::trace!("Push failed due to upstream config, retrying with -u {remote} HEAD");
-            return git_push_set_upstream(repo_path, remote);
+    let stderr = match git_push_plain(repo_path, remote) {
+        Ok(result) => {
+            log::trace!("Successfully pushed to {remote}");
+            return Ok(result);
         }
+        Err(stderr) => stderr,
+    };
 
-        log::error!("Failed to push to {remote}: {stderr}");
-        Err(stderr)
+    if git_push_needs_upstream_retry(&stderr) {
+        log::trace!("Push failed due to upstream config, retrying with -u {remote} HEAD");
+        return git_push_set_upstream(repo_path, remote);
     }
+
+    if git_push_rejected_as_behind(&stderr) {
+        log::trace!("{remote}/{current_branch} has new commits; merging them before push");
+        git_pull(repo_path, &current_branch, Some(remote))?;
+        return git_push_plain(repo_path, remote);
+    }
+
+    log::error!("Failed to push to {remote}: {stderr}");
+    Err(stderr)
 }
 
 /// Result of a PR-aware push operation
@@ -1462,7 +1486,7 @@ pub struct RemoteBranch {
     pub qualified: String,
 }
 
-/// Parse one `git branch -r --format=%(refname:short)` line.
+/// Parse one `git branch -r --format=%(refname:lstrip=2)` line.
 ///
 /// Skips symbolic HEAD refs (`origin/HEAD`). Branch names may contain slashes.
 pub fn parse_remote_tracking_ref(raw: &str) -> Option<RemoteBranch> {
@@ -1508,7 +1532,9 @@ pub fn distinct_remote_branches<'a>(lines: impl IntoIterator<Item = &'a str>) ->
 /// Remote-tracking branches for every configured remote.
 pub fn list_remote_branches(repo_path: &str) -> Result<Vec<RemoteBranch>, String> {
     let output = wsl_aware_command("git", Some(Path::new(repo_path)))
-        .args(["branch", "-r", "--format=%(refname:short)"])
+        // lstrip=2, not :short — :short prints `remotes/origin/next` when a
+        // local branch named `origin/next` exists, and the branch disappears.
+        .args(["branch", "-r", "--format=%(refname:lstrip=2)"])
         .output()
         .map_err(|e| format!("Failed to run git command: {e}"))?;
 
@@ -1543,21 +1569,57 @@ pub enum ExistingBranchCheckout {
     /// `git worktree add --track -b <local_branch> <path> <start_point>`
     TrackRemote {
         local_branch: String,
-        start_point: String,
+        remote: String,
+        /// Branch name on `remote`, without the remote prefix.
+        remote_branch: String,
     },
+}
+
+impl ExistingBranchCheckout {
+    /// Local branch the worktree has checked out.
+    pub fn local_branch(&self) -> &str {
+        match self {
+            Self::Local { branch } => branch,
+            Self::TrackRemote { local_branch, .. } => local_branch,
+        }
+    }
+
+    /// `(base_branch, base_remote)` to store on the worktree, so pull and
+    /// status read `<remote>/<branch>` and not `origin/<remote>/<branch>`.
+    pub fn base(&self) -> (String, Option<String>) {
+        match self {
+            Self::Local { branch } => (branch.clone(), None),
+            Self::TrackRemote {
+                remote,
+                remote_branch,
+                ..
+            } => (remote_branch.clone(), Some(remote.clone())),
+        }
+    }
 }
 
 /// Choose a checkout that follows the requested remote when the ref is qualified.
 ///
 /// Plain names (`main`, `feature/login`) keep the historical local/origin path.
+/// `origin/next` checks out a local `next`; a local branch named `origin/next`
+/// would push to a new `origin/next` branch on the remote.
 /// `fork/feature` creates a local branch of that same name tracking `fork/feature`,
 /// so it stays distinct from a local `feature` that tracks a different remote.
 pub fn plan_existing_branch_checkout(repo_path: &str, requested: &str) -> ExistingBranchCheckout {
     if let Some((remote, name)) = split_remote_qualified_base(repo_path, requested) {
         if remote_tracking_branch_exists(repo_path, &remote, &name) {
+            if remote == "origin" && branch_exists(repo_path, &name) {
+                return ExistingBranchCheckout::Local { branch: name };
+            }
+            let local_branch = if remote == "origin" {
+                name.clone()
+            } else {
+                requested.to_string()
+            };
             return ExistingBranchCheckout::TrackRemote {
-                local_branch: requested.to_string(),
-                start_point: format!("{remote}/{name}"),
+                local_branch,
+                remote,
+                remote_branch: name,
             };
         }
     }
@@ -1611,12 +1673,13 @@ pub fn create_worktree(
 /// # Arguments
 /// * `repo_path` - Path to the main repository
 /// * `worktree_path` - Path where the worktree will be created
-/// * `existing_branch` - Name of the existing branch to checkout
+/// * `checkout` - Plan from `plan_existing_branch_checkout`
 pub fn create_worktree_from_existing_branch(
     repo_path: &str,
     worktree_path: &str,
-    existing_branch: &str,
+    checkout: &ExistingBranchCheckout,
 ) -> Result<(), String> {
+    let existing_branch = checkout.local_branch();
     log::trace!("Creating worktree at {worktree_path} using existing branch {existing_branch}");
 
     // Ensure parent directory exists
@@ -1626,10 +1689,11 @@ pub fn create_worktree_from_existing_branch(
             .map_err(|e| format!("Failed to create parent directory: {e}"))?;
     }
 
-    match plan_existing_branch_checkout(repo_path, existing_branch) {
+    match checkout {
         ExistingBranchCheckout::TrackRemote {
             local_branch,
-            start_point,
+            remote,
+            remote_branch,
         } => {
             run_git_worktree_add_with_retry(
                 repo_path,
@@ -1638,16 +1702,16 @@ pub fn create_worktree_from_existing_branch(
                     "add",
                     "--track",
                     "-b",
-                    &local_branch,
+                    local_branch,
                     worktree_path,
-                    &start_point,
+                    &format!("{remote}/{remote_branch}"),
                 ],
             )?;
         }
         ExistingBranchCheckout::Local { branch } => {
             run_git_worktree_add_with_retry(
                 repo_path,
-                &["worktree", "add", worktree_path, &branch],
+                &["worktree", "add", worktree_path, branch],
             )?;
         }
     }
@@ -2613,73 +2677,13 @@ fn run_jean_script_with_timeout(
     cmd.current_dir(worktree_path)
         .env("JEAN_WORKSPACE_PATH", worktree_path)
         .env("JEAN_ROOT_PATH", root_path)
-        .env("JEAN_BRANCH", branch)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("JEAN_BRANCH", branch);
 
-    // Give the shell its own process group so timing out also stops package
-    // managers and other descendants that inherited the output pipes.
-    #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-
-    let mut child = cmd
-        .spawn()
+    let (output, timed_out) = crate::platform::output_with_timeout(&mut cmd, timeout)
         .map_err(|e| format!("Failed to run {kind} script: {e}"))?;
-    let mut stdout = child.stdout.take().expect("stdout was configured as piped");
-    let mut stderr = child.stderr.take().expect("stderr was configured as piped");
-    let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout.read_to_end(&mut bytes);
-        bytes
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
-        bytes
-    });
-    let deadline = Instant::now() + timeout;
-    let timed_out = loop {
-        if child
-            .try_wait()
-            .map_err(|e| format!("Failed while waiting for {kind} script: {e}"))?
-            .is_some()
-        {
-            break false;
-        }
-        if Instant::now() >= deadline {
-            break true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-
-    if timed_out {
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-        #[cfg(windows)]
-        {
-            let _ = silent_command("taskkill")
-                .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                .output();
-        }
-        let _ = child.kill();
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to collect {kind} script status: {e}"))?;
-    let stdout = String::from_utf8_lossy(&stdout_reader.join().unwrap_or_default()).to_string();
-    let stderr = String::from_utf8_lossy(&stderr_reader.join().unwrap_or_default()).to_string();
+    let status = output.status;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let combined = strip_non_tty_shell_noise(&format!("{stdout}{stderr}"));
 
     if timed_out {
@@ -3338,7 +3342,7 @@ mod tests {
     fn jean_script_timeout_stops_script_and_descendants() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
-        let started = Instant::now();
+        let started = std::time::Instant::now();
 
         let error = run_jean_script_with_timeout(
             "setup",
@@ -3375,6 +3379,66 @@ mod tests {
                       To choose either option permanently, see push.default in git-config.\n\
                       fatal: push.default is set to simple";
         assert!(git_push_needs_upstream_retry(stderr));
+    }
+
+    #[test]
+    fn test_git_push_rejected_as_behind_detects_non_fast_forward() {
+        assert!(git_push_rejected_as_behind(
+            " ! [rejected]        fixes -> fixes (non-fast-forward)"
+        ));
+        assert!(git_push_rejected_as_behind(
+            " ! [rejected]        fixes -> fixes (fetch first)"
+        ));
+        assert!(!git_push_rejected_as_behind(
+            "remote: Permission to owner/repo.git denied to user."
+        ));
+    }
+
+    #[test]
+    fn test_git_push_merges_new_remote_commits_then_pushes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let remote = root.join("remote.git");
+        let mine = root.join("mine");
+        let theirs = root.join("theirs");
+        run_git(
+            root,
+            &["init", "--bare", "--initial-branch", "main", "remote.git"],
+        );
+        for clone in [&mine, &theirs] {
+            run_git(
+                root,
+                &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+            );
+            run_git(clone, &["config", "user.email", "test@example.com"]);
+            run_git(clone, &["config", "user.name", "Test"]);
+        }
+        std::fs::write(mine.join("base.txt"), "base\n").unwrap();
+        run_git(&mine, &["add", "."]);
+        run_git(&mine, &["commit", "-m", "base"]);
+        run_git(&mine, &["push", "-u", "origin", "main"]);
+        run_git(&theirs, &["pull", "origin", "main"]);
+        run_git(&theirs, &["branch", "--set-upstream-to", "origin/main"]);
+
+        std::fs::write(theirs.join("theirs.txt"), "theirs\n").unwrap();
+        run_git(&theirs, &["add", "."]);
+        run_git(&theirs, &["commit", "-m", "theirs"]);
+        run_git(&theirs, &["push"]);
+        std::fs::write(mine.join("mine.txt"), "mine\n").unwrap();
+        run_git(&mine, &["add", "."]);
+        run_git(&mine, &["commit", "-m", "mine"]);
+
+        git_push(mine.to_str().unwrap(), None).expect("push after merge");
+
+        let files = std::process::Command::new("git")
+            .args(["ls-tree", "--name-only", "main"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&files.stdout),
+            "base.txt\nmine.txt\ntheirs.txt\n"
+        );
     }
 
     #[test]
@@ -3616,6 +3680,24 @@ mod tests {
     }
 
     #[test]
+    fn test_branch_lists_survive_local_branch_named_like_remote_ref() {
+        let dir = repo_with_fork_remote();
+        let path = dir.path().to_str().unwrap();
+        run_git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/next", "HEAD"],
+        );
+        run_git(dir.path(), &["branch", "origin/next"]);
+
+        assert!(get_remote_branches(path)
+            .unwrap()
+            .contains(&"next".to_string()));
+        assert!(get_branches(path)
+            .unwrap()
+            .contains(&"origin/next".to_string()));
+    }
+
+    #[test]
     fn test_distinct_remote_branches_keeps_same_name_on_each_remote() {
         let branches = distinct_remote_branches([
             "origin/HEAD",
@@ -3664,7 +3746,8 @@ mod tests {
             plan_existing_branch_checkout(path, "fork/feature-x"),
             ExistingBranchCheckout::TrackRemote {
                 local_branch: "fork/feature-x".to_string(),
-                start_point: "fork/feature-x".to_string(),
+                remote: "fork".to_string(),
+                remote_branch: "feature-x".to_string(),
             }
         );
 
@@ -3673,6 +3756,43 @@ mod tests {
             plan_existing_branch_checkout(path, "fork/feature-x"),
             ExistingBranchCheckout::Local {
                 branch: "fork/feature-x".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_existing_origin_branch_checks_out_plain_local_name() {
+        let dir = repo_with_fork_remote();
+        let path = dir.path().to_str().unwrap();
+        run_git(
+            dir.path(),
+            &["remote", "add", "origin", "https://example.com/origin.git"],
+        );
+        run_git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/next", "HEAD"],
+        );
+
+        let plan = plan_existing_branch_checkout(path, "origin/next");
+        assert_eq!(plan.local_branch(), "next");
+        assert_eq!(
+            plan.base(),
+            ("next".to_string(), Some("origin".to_string()))
+        );
+
+        let worktree = dir.path().join("wt-next");
+        create_worktree_from_existing_branch(path, worktree.to_str().unwrap(), &plan).unwrap();
+        assert_eq!(
+            get_current_branch(worktree.to_str().unwrap()).unwrap(),
+            "next"
+        );
+        assert!(!branch_exists(path, "origin/next"));
+
+        // A local `next` already exists now, so it is reused.
+        assert_eq!(
+            plan_existing_branch_checkout(path, "origin/next"),
+            ExistingBranchCheckout::Local {
+                branch: "next".to_string(),
             }
         );
     }

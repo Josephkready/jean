@@ -3,31 +3,35 @@ import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TitleBar } from './TitleBar'
 
-const { mockIsIPadOSStandalone } = vi.hoisted(() => ({
+const { mockIsIPadOSStandalone, mockIsMobile } = vi.hoisted(() => ({
+  mockIsMobile: vi.fn(() => false),
   mockIsIPadOSStandalone: vi.fn(() => false),
 }))
 
-vi.mock('@/lib/platform', () => ({
+vi.mock('@/lib/platform', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   isClientLinux: false,
   isClientMacOS: false,
   isIPadOSStandalone: mockIsIPadOSStandalone,
   openExternal: vi.fn(),
 }))
 
-vi.mock('@/lib/environment', () => ({
+vi.mock('@/lib/environment', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   isNativeApp: () => false,
   updateTargetLabel: () => 'server',
 }))
 
 vi.mock('@/hooks/use-mobile', () => ({
-  useIsMobile: () => false,
+  useIsMobile: mockIsMobile,
 }))
 
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({ data: undefined }),
 }))
 
-vi.mock('@/lib/remote-connections', () => ({
+vi.mock('@/lib/remote-connections', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   useRemoteConnections: () => [],
 }))
 
@@ -95,5 +99,27 @@ describe('TitleBar iPadOS standalone PWA insets (issue #58)', () => {
     const leftBtn = screen.getByRole('button', { name: /left sidebar/i })
     expect(leftBtn.parentElement?.className).toContain('pl-9')
     expect(leftBtn.parentElement?.className).not.toContain('pl-[76px]')
+  })
+
+  it('renders no GitHub or Sponsor control in the title bar (issue #38)', () => {
+    render(<TitleBar />)
+
+    expect(screen.queryByTestId('open-github-web')).toBeNull()
+    expect(screen.queryByRole('button', { name: /github/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /sponsor/i })).toBeNull()
+    expect(screen.getByTestId('report-bug')).toBeInTheDocument()
+  })
+
+  it('keeps the centre content in flow on mobile so it cannot cover the actions', () => {
+    mockIsMobile.mockReturnValue(true)
+    const { unmount } = render(<TitleBar />)
+    expect(screen.getByTestId('unread-bell').closest('.absolute')).toBeNull()
+    unmount()
+
+    mockIsMobile.mockReturnValue(false)
+    render(<TitleBar />)
+    expect(
+      screen.getByTestId('unread-bell').closest('.absolute')
+    ).not.toBeNull()
   })
 })

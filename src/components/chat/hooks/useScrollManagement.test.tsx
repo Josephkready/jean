@@ -112,12 +112,12 @@ function setupHook({
       stopFollowingTail,
       scrollToBottom,
     } = useScrollManagement({
-        messages: msgs,
-        virtualizedListRef,
-        activeSessionId: sessionId,
-        contentReady: ready,
-        isSending: sending,
-      })
+      messages: msgs,
+      virtualizedListRef,
+      activeSessionId: sessionId,
+      contentReady: ready,
+      isSending: sending,
+    })
 
     return (
       <div
@@ -265,6 +265,22 @@ describe('useScrollManagement streaming auto-scroll', () => {
     const { viewport } = setupHook()
 
     await triggerResize()
+
+    expect(viewport.scrollTop).toBe(2000)
+  })
+
+  it('pins the streaming tail in the resize callback, before the next frame', () => {
+    isMobile = true
+    const { viewport } = setupHook()
+    viewport.scrollTop = 1600
+    // Frames never run: a pin deferred to rAF would paint the old position.
+    vi.mocked(window.requestAnimationFrame).mockImplementation(() => 1)
+
+    act(() => {
+      for (const callback of resizeObserverCallbacks) {
+        callback([], {} as ResizeObserver)
+      }
+    })
 
     expect(viewport.scrollTop).toBe(2000)
   })
@@ -442,6 +458,145 @@ describe('useScrollManagement streaming auto-scroll', () => {
     expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
   })
 
+  it('keeps following the tail when a run end shrinks and regrows the content', async () => {
+    const { getByTestId, viewport, setScrollHeight } = setupHook({
+      isSending: false,
+    })
+    viewport.scrollTop = 1600
+    fireEvent.scroll(viewport)
+
+    // Content shrank (browser clamped scrollTop down), then grew again before
+    // the scroll event fired. No user input happened.
+    viewport.scrollTop = 1400
+    setScrollHeight(2100)
+    fireEvent.scroll(viewport)
+    await triggerResize()
+
+    expect(viewport.scrollTop).toBe(2100)
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+  })
+
+  it('re-pins the tail when a stale scroll position arrives after a run ends', () => {
+    isMobile = true
+    const { getByTestId, viewport, rerenderSession } = setupHook()
+    viewport.scrollTop = 1600
+    fireEvent.scroll(viewport)
+    rerenderSession({ sending: false })
+
+    // WebKit reports a clamped position after the tail was pinned. No input.
+    viewport.scrollTop = 1513
+    fireEvent.scroll(viewport)
+
+    expect(viewport.scrollTop).toBe(2000)
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+  })
+
+  it('lets the user scroll up right after a run ends', () => {
+    isMobile = true
+    const { getByTestId, viewport, rerenderSession } = setupHook()
+    viewport.scrollTop = 1600
+    fireEvent.scroll(viewport)
+    rerenderSession({ sending: false })
+
+    act(() => {
+      viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
+    })
+    viewport.scrollTop = 1500
+    fireEvent.scroll(viewport)
+
+    expect(viewport.scrollTop).toBe(1500)
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('false')
+  })
+
+  it('stops following the tail when a scrollbar drag moves the viewport up', async () => {
+    const { viewport, setScrollHeight } = setupHook({ isSending: false })
+    viewport.scrollTop = 1600
+    fireEvent.scroll(viewport)
+
+    fireEvent.pointerDown(viewport)
+    viewport.scrollTop = 1200
+    fireEvent.scroll(viewport)
+    setScrollHeight(2100)
+    await triggerResize()
+
+    expect(viewport.scrollTop).toBe(1200)
+  })
+
+  it('keeps following the stream when a scroll-up arrives without user input', async () => {
+    isMobile = true
+    const { viewport, setScrollHeight } = setupHook()
+    await triggerResize()
+    expect(viewport.scrollTop).toBe(2000)
+
+    // WebKit reports a stale position after the tail was pinned. No input.
+    viewport.scrollTop = 1500
+    fireEvent.scroll(viewport)
+    setScrollHeight(2200)
+    await triggerResize()
+
+    expect(viewport.scrollTop).toBe(2200)
+  })
+
+  it('re-pins the stream at once when a stale scroll arrives while a tool runs', () => {
+    isMobile = true
+    const { getByTestId, viewport } = setupHook()
+    viewport.scrollTop = 2000
+    fireEvent.scroll(viewport)
+
+    // Tool calls collapse; WebKit reports a stale position. No input, and no
+    // resize follows while the tool runs.
+    viewport.scrollTop = 1500
+    fireEvent.scroll(viewport)
+
+    expect(viewport.scrollTop).toBe(2000)
+    expect(getByTestId('is-at-bottom')).toHaveTextContent('true')
+  })
+
+  it('lets a scrollbar drag move away from the stream', () => {
+    isMobile = true
+    const { viewport } = setupHook()
+    viewport.scrollTop = 2000
+    fireEvent.scroll(viewport)
+
+    fireEvent.pointerDown(viewport)
+    viewport.scrollTop = 1500
+    fireEvent.scroll(viewport)
+
+    expect(viewport.scrollTop).toBe(1500)
+  })
+
+  it('stops following the stream on an upward scroll key', async () => {
+    isMobile = true
+    const { viewport, setScrollHeight } = setupHook()
+    await triggerResize()
+
+    fireEvent.keyDown(viewport, { key: 'PageUp' })
+    viewport.scrollTop = 1300
+    fireEvent.scroll(viewport)
+    setScrollHeight(2200)
+    await triggerResize()
+
+    expect(viewport.scrollTop).toBe(1300)
+  })
+
+  it('pins the idle tail in the resize callback, before the next frame', () => {
+    const { viewport, setScrollHeight } = setupHook({ isSending: false })
+    viewport.scrollTop = 1600
+    fireEvent.scroll(viewport)
+    // Frames never run: a pin deferred to rAF paints the old position on each
+    // frame of a collapsible expand animation, so the chat wiggles.
+    vi.mocked(window.requestAnimationFrame).mockImplementation(() => 1)
+
+    setScrollHeight(2100)
+    act(() => {
+      for (const callback of resizeObserverCallbacks) {
+        callback([], {} as ResizeObserver)
+      }
+    })
+
+    expect(viewport.scrollTop).toBe(2100)
+  })
+
   it('hides the bottom action after a smooth scroll that overlapped a resize', async () => {
     const { getByTestId, viewport, setScrollHeight } = setupHook({
       isSending: false,
@@ -513,11 +668,65 @@ describe('useScrollManagement session scroll retention (issue #594)', () => {
     // Start from the post-mount tail position, then scroll up so follow mode
     // clears the same way a real wheel-up gesture would.
     expect(viewport.scrollTop).toBe(2000)
+    fireEvent.pointerDown(viewport)
     viewport.scrollTop = 1234
     fireEvent.scroll(viewport)
 
     expect(getSessionScrollState('session-a')?.scrollTop).toBe(1234)
     expect(getSessionScrollState('session-a')?.isFollowingTail).toBe(false)
+  })
+
+  it('keeps the visible messages in place when older history is prepended', () => {
+    const all = makeMessages(10)
+    const { viewport, setScrollHeight, rerenderSession } = setupHook({
+      isSending: false,
+      activeSessionId: 'session-a',
+      messages: all.slice(8),
+      scrollHeight: 2000,
+    })
+
+    // User scrolls up right after the cold open (latest run only).
+    fireEvent.wheel(viewport, { deltaY: -100 })
+    viewport.scrollTop = 1500
+    fireEvent.scroll(viewport)
+
+    // Background load prepends older runs: content grows by 3000px above.
+    setScrollHeight(5000)
+    act(() => {
+      rerenderSession({ msgs: all })
+    })
+
+    expect(viewport.scrollTop).toBe(4500)
+  })
+
+  it('follows the tail when a prompt is appended outside the composer', () => {
+    const all = makeMessages(4)
+    const { viewport, getByTestId, setScrollHeight, rerenderSession } =
+      setupHook({
+        isSending: false,
+        activeSessionId: 'session-a',
+        messages: all,
+        scrollHeight: 2000,
+      })
+
+    fireEvent.wheel(viewport, { deltaY: -100 })
+    viewport.scrollTop = 500
+    fireEvent.scroll(viewport)
+    expect(getByTestId('is-at-bottom').textContent).toBe('false')
+
+    // Magic menu prompt: a user message appended without markAtBottom().
+    setScrollHeight(2600)
+    const magic = makeMessages(1).map(m => ({
+      ...m,
+      id: 'magic',
+      content: 'Commit',
+    }))
+    act(() => {
+      rerenderSession({ msgs: [...all, ...magic] })
+    })
+
+    expect(viewport.scrollTop).toBe(2600)
+    expect(getByTestId('is-at-bottom').textContent).toBe('true')
   })
 
   it('does not overwrite a snapshot while content is not ready', () => {
@@ -626,6 +835,7 @@ describe('useScrollManagement session scroll retention (issue #594)', () => {
     expect(viewport.scrollTop).toBe(2000)
 
     // Scroll session-a away from the tail the same way a real gesture would.
+    fireEvent.pointerDown(viewport)
     viewport.scrollTop = 1234
     fireEvent.scroll(viewport)
 

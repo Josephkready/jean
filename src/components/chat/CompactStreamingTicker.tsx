@@ -11,12 +11,12 @@ import {
 import {
   TOOL_CALL_ROW_CLASS,
   TOOL_CALL_DETAIL_PILL_CLASS,
+  TOOL_CALL_LABEL_CLASS,
   summarizeToolCall,
 } from './ToolCallInline'
-import { EditedFilesDisplay } from './EditedFilesDisplay'
-import { parseServerResourceKey } from '@/lib/server-resource'
 import { StreamingMessage } from './StreamingMessage'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import {
   coalesceContentBlocks,
   isDuplicatePlanTextBlock,
@@ -27,6 +27,8 @@ import type { ComponentProps } from 'react'
 type StreamingMessageProps = ComponentProps<typeof StreamingMessage>
 type CompactStreamingTickerProps = StreamingMessageProps & {
   showLoadingIndicator?: boolean
+  /** Agent chat: steered prompts use the pill bubble style */
+  bubble?: boolean
 }
 
 /**
@@ -212,12 +214,12 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
     contentBlocks,
     toolCalls,
     streamingContent,
-    onCopySteeredText,
     worktreePath,
     sessionId,
     showLoadingIndicator = true,
+    bubble = false,
   } = props
-  const ownerServerId = parseServerResourceKey(sessionId)?.serverId
+  const serverId = parseServerResourceKey(sessionId)?.serverId
   const [isOpen, setIsOpen] = useState(false)
 
   // Keyed on toolCalls only so these keep a stable identity across
@@ -356,8 +358,10 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
               <SteeredPromptGroup
                 key={key}
                 texts={segment.texts}
+                bubble={bubble}
+                settings={props.turnPrompt}
                 worktreePath={worktreePath}
-                onCopyText={onCopySteeredText}
+                serverId={serverId}
               />
             ) : (
               <CompactStreamingTicker
@@ -392,8 +396,10 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
       <div className="space-y-3">
         <SteeredPromptGroup
           texts={steeredTexts}
+          bubble={bubble}
+          settings={props.turnPrompt}
           worktreePath={worktreePath}
-          onCopyText={onCopySteeredText}
+          serverId={serverId}
         />
         <StreamingMessage
           {...props}
@@ -416,23 +422,20 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
     <div className="space-y-3">
       <SteeredPromptGroup
         texts={steeredTexts}
+        bubble={bubble}
+        settings={props.turnPrompt}
         worktreePath={worktreePath}
-        onCopyText={onCopySteeredText}
+        serverId={serverId}
       />
       <Collapsible open={isOpen} onOpenChange={setIsOpen} className="min-w-0">
-        <div
-          className={
-            'rounded-md border border-border/50 bg-muted/30 min-w-0' +
-            (isOpen ? ' bg-muted/50' : '')
-          }
-        >
+        <div className="min-w-0">
           <CollapsibleTrigger className={TOOL_CALL_ROW_CLASS}>
             {label === 'Thinking…' ? (
               <Brain className="h-3.5 w-3.5 shrink-0 opacity-70" />
             ) : (
               <Activity className="h-3.5 w-3.5 shrink-0 opacity-70" />
             )}
-            <span className="font-medium shrink-0 flex-none whitespace-nowrap">
+            <span className={TOOL_CALL_LABEL_CLASS} title={label}>
               {label}
             </span>
             {detail && (
@@ -454,23 +457,17 @@ export const CompactStreamingTicker = memo(function CompactStreamingTicker(
             </span>
           </CollapsibleTrigger>
           <CollapsibleContent>
-            <div className="border-t border-border/50 p-3">
+            <div className="p-3">
               <StreamingMessage
                 {...props}
                 contentBlocks={activityBlocks}
                 toolCalls={activityToolCalls}
                 streamingContent={hasPlan ? '' : streamingContent}
-                hideEditedFiles
               />
             </div>
           </CollapsibleContent>
         </div>
       </Collapsible>
-      <EditedFilesDisplay
-        toolCalls={activityToolCalls}
-        worktreePath={worktreePath}
-        serverId={ownerServerId === 'local' ? undefined : ownerServerId}
-      />
       {hasPlan && (
         <StreamingMessage
           {...props}

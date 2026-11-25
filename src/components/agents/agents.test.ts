@@ -19,7 +19,8 @@ import {
   visibleAgentTabs,
   withRunningAgents,
 } from './agents'
-import { describeApproval, formatRelative } from './AgentActivity'
+import { describeApproval } from './AgentActivity'
+import { formatRelative } from '@/lib/relative-time'
 import { groupTasks, taskStatusLabel } from './AgentTasks'
 import { formatInterval } from './AgentSchedules'
 import { notificationPreview, splitNotifications } from './AgentInbox'
@@ -59,17 +60,11 @@ function agent(overrides: Partial<AgentSummary>): AgentSummary {
 }
 
 describe('agentStatusLabel', () => {
-  it('puts approvals before other states', () => {
-    expect(
-      agentStatusLabel(agent({ status: 'working', pendingApprovals: 2 }))
-    ).toBe('Needs approval (2)')
-  })
-
-  it('shows work, waiting, budget and followed sessions', () => {
+  it('shows work, waiting and budget', () => {
     expect(agentStatusLabel(agent({ status: 'working' }))).toBe('Working')
     expect(
       agentStatusLabel(agent({ status: 'working', runningTasks: 2 }))
-    ).toBe('Working (2 tasks)')
+    ).toBe('Working (2 runs)')
     expect(agentStatusLabel(agent({ unreadNotifications: 1 }))).toBe(
       '1 new notification'
     )
@@ -79,13 +74,9 @@ describe('agentStatusLabel', () => {
     expect(agentStatusLabel(agent({ budgetReached: true }))).toBe(
       'Hourly limit reached'
     )
-    expect(agentStatusLabel(agent({ activeDelegations: 1 }))).toBe(
-      'Following 1 session'
-    )
-    expect(agentStatusLabel(agent({ activeDelegations: 3 }))).toBe(
-      'Following 3 sessions'
-    )
-    expect(agentStatusLabel(agent({}))).toBeNull()
+    expect(
+      agentStatusLabel(agent({ pendingApprovals: 2, activeDelegations: 3 }))
+    ).toBeNull()
   })
 })
 
@@ -138,7 +129,7 @@ describe('describeApproval', () => {
     const approval: AgentApproval = {
       id: 1,
       agentId: 'jean',
-      tool: 'permanently_delete_worktree',
+      tool: 'delete_worktree',
       args: { worktreeId: 'wt-1' },
       status: 'pending',
       result: null,
@@ -146,9 +137,9 @@ describe('describeApproval', () => {
     }
     // Names, never IDs
     expect(describeApproval(approval, 'feature-x')).toBe(
-      'Permanently delete worktree feature-x'
+      'Delete worktree feature-x'
     )
-    expect(describeApproval(approval)).toBe('Permanently delete a worktree')
+    expect(describeApproval(approval)).toBe('Delete a worktree')
     expect(
       describeApproval({
         ...approval,
@@ -328,6 +319,10 @@ describe('agent rows', () => {
     expect(
       agentRowDot(agent({ unreadNotifications: 2, pendingApprovals: 1 }))
     ).toBe('attention')
+    expect(agentRowDot(agent({ status: 'working' }))).toBe('working')
+    expect(
+      agentRowDot(agent({ status: 'working', unreadNotifications: 1 }))
+    ).toBe('unread')
     expect(agentRowDot(agent({}))).toBe(null)
   })
 })

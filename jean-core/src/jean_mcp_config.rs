@@ -132,6 +132,15 @@ impl JeanMcpEntry {
         })
     }
 
+    /// OpenCode 2.x entry: same as 1.x minus `enabled` (2.x uses `disabled`).
+    pub fn opencode_v2_server_json(&self) -> serde_json::Value {
+        let mut value = self.opencode_server_json();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("enabled");
+        }
+        value
+    }
+
     pub fn opencode_snippet(&self) -> String {
         let v = json!({
             "mcp": {
@@ -344,8 +353,8 @@ pub async fn install_jean_mcp_config_impl(
     mode: Option<String>,
 ) -> Result<Vec<JeanMcpInstallResult>, String> {
     let mode = JeanMcpInstallMode::from_option(mode)?;
-    let entry = build_current_entry(app, mode).await?;
-    let backends = backends.unwrap_or_else(|| {
+    let entry = build_current_entry(app.clone(), mode).await?;
+    let backends: Vec<String> = backends.unwrap_or_else(|| {
         vec![
             "claude".to_string(),
             "codex".to_string(),
@@ -359,12 +368,15 @@ pub async fn install_jean_mcp_config_impl(
         ]
     });
 
+    let opencode_v2 =
+        backends.iter().any(|b| b == "opencode") && crate::opencode_cli::is_opencode_v2(&app).await;
+
     let mut results = Vec::with_capacity(backends.len());
     for backend in backends {
         let result = match backend.as_str() {
             "claude" => install_claude(&entry),
             "codex" => install_codex(&entry),
-            "opencode" => install_opencode(&entry),
+            "opencode" => install_opencode(&entry, opencode_v2),
             "cursor" => install_cursor(&entry),
             "grok" => install_grok(&entry),
             "kimi" => install_kimi(&entry),
@@ -408,11 +420,41 @@ fn install_claude(entry: &JeanMcpEntry) -> Result<(PathBuf, Option<PathBuf>), St
     )
 }
 
-fn install_opencode(entry: &JeanMcpEntry) -> Result<(PathBuf, Option<PathBuf>), String> {
+/// Container key for OpenCode 1.x MCP servers: `mcp.<name>`.
+pub(crate) const OPENCODE_V1_MCP_KEY: &str = "mcp";
+/// Container key path for OpenCode 2.x MCP servers: `mcp.servers.<name>`.
+pub(crate) const OPENCODE_V2_MCP_KEY: &str = "mcp.servers";
+
+fn install_opencode(
+    entry: &JeanMcpEntry,
+    opencode_v2: bool,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
     let home = dirs::home_dir().ok_or_else(|| "Home directory unavailable".to_string())?;
     let path = find_opencode_config_path(&home)
         .unwrap_or_else(|| home.join(".config").join("opencode").join("opencode.json"));
-    install_jsonc_server(path, "mcp", entry, JeanMcpEntry::opencode_server_json)
+    install_opencode_at(path, entry, opencode_v2)
+}
+
+fn install_opencode_at(
+    path: PathBuf,
+    entry: &JeanMcpEntry,
+    opencode_v2: bool,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    if opencode_v2 {
+        install_jsonc_server(
+            path,
+            OPENCODE_V2_MCP_KEY,
+            entry,
+            JeanMcpEntry::opencode_v2_server_json,
+        )
+    } else {
+        install_jsonc_server(
+            path,
+            OPENCODE_V1_MCP_KEY,
+            entry,
+            JeanMcpEntry::opencode_server_json,
+        )
+    }
 }
 
 fn install_cursor(entry: &JeanMcpEntry) -> Result<(PathBuf, Option<PathBuf>), String> {
@@ -489,6 +531,7 @@ pub(crate) fn ensure_muse_settings_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `container_key` may be a dot path (`"mcp.servers"`) for nested containers.
 fn install_jsonc_server(
     path: PathBuf,
     container_key: &str,
@@ -500,11 +543,10 @@ fn install_jsonc_server(
         let content = read_optional(&target)?;
         let value = server_json(entry);
         let updated = if content.trim().is_empty() {
-            serde_json::to_string_pretty(&json!({
-                container_key: {
-                    entry.server_name.clone(): value
-                }
-            }))
+            serde_json::to_string_pretty(&nest_under_path(
+                container_key,
+                json!({ entry.server_name.clone(): value }),
+            ))
             .unwrap_or_default()
         } else {
             patch_jsonc_object_property(&content, container_key, &entry.server_name, &value)?
@@ -743,6 +785,15 @@ fn validate_jsonc(content: &str, path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Invalid JSONC for {}: {e}", path.display()))
 }
 
+/// Wraps `value` in one object per segment of the dot path `container_key`.
+fn nest_under_path(container_key: &str, value: serde_json::Value) -> serde_json::Value {
+    container_key
+        .rsplit('.')
+        .fold(value, |inner, key| json!({ key: inner }))
+}
+
+/// Sets `container_key.server_key` by source span so comments survive.
+/// `container_key` may be a dot path (`"mcp.servers"`); missing containers are created.
 fn patch_jsonc_object_property(
     input: &str,
     container_key: &str,
@@ -750,27 +801,36 @@ fn patch_jsonc_object_property(
     value: &serde_json::Value,
 ) -> Result<String, String> {
     validate_jsonc(input, Path::new("input config"))?;
-    let root =
+    let mut object =
         find_root_object(input).ok_or_else(|| "Config root must be an object".to_string())?;
     let value_pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string());
 
-    if let Some(container) = find_property(input, root.open + 1, root.close, container_key) {
+    let mut segments = container_key.split('.');
+    while let Some(segment) = segments.next() {
+        let Some(container) = find_property(input, object.open + 1, object.close, segment) else {
+            let rest = segments.collect::<Vec<_>>().join(".");
+            let inner = json!({ server_key: value });
+            let nested = if rest.is_empty() {
+                inner
+            } else {
+                nest_under_path(&rest, inner)
+            };
+            let container_value =
+                serde_json::to_string_pretty(&nested).unwrap_or_else(|_| "{}".to_string());
+            let property = format!("\"{segment}\": {container_value}");
+            return insert_property_inside_object(input, object, &property);
+        };
         let container_value = find_value_span(input, container.value_start)
-            .ok_or_else(|| format!("Could not locate {container_key} value"))?;
+            .ok_or_else(|| format!("Could not locate {segment} value"))?;
         if !matches!(byte_at(input, container_value.start), Some(b'{')) {
-            return Err(format!("{container_key} must be an object"));
+            return Err(format!("{segment} must be an object"));
         }
-        let container_object = ObjectSpan {
+        object = ObjectSpan {
             open: container_value.start,
             close: container_value.end - 1,
         };
-        return patch_property_inside_object(input, container_object, server_key, &value_pretty);
     }
-
-    let container_value = serde_json::to_string_pretty(&json!({ server_key: value }))
-        .unwrap_or_else(|_| "{}".to_string());
-    let property = format!("\"{container_key}\": {container_value}");
-    insert_property_inside_object(input, root, &property)
+    patch_property_inside_object(input, object, server_key, &value_pretty)
 }
 
 fn patch_property_inside_object(
@@ -1222,6 +1282,76 @@ mod tests {
         }
     }
 
+    fn parse_jsonc(content: &str) -> serde_json::Value {
+        serde_json::from_str(&strip_trailing_commas(&strip_jsonc_comments(content))).unwrap()
+    }
+
+    #[test]
+    fn opencode_v2_install_into_empty_file_writes_servers_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let prod = test_entry(JeanMcpInstallMode::Prod);
+        install_opencode_at(path.clone(), &prod, true).unwrap();
+
+        let parsed = parse_jsonc(&std::fs::read_to_string(&path).unwrap());
+        let server = &parsed["mcp"]["servers"]["jean"];
+        assert_eq!(server["type"], "local");
+        assert_eq!(
+            server["command"],
+            json!([prod.command.clone(), JEAN_MCP_STDIO_ARG])
+        );
+        assert_eq!(server["environment"], json!(prod.env()));
+        assert!(server.get("enabled").is_none());
+        assert!(parsed["mcp"].get("jean").is_none());
+    }
+
+    #[test]
+    fn opencode_v2_install_preserves_v1_entries_and_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        let input = r#"{
+  // keep this
+  "theme": "dark",
+  "mcp": {
+    "legacy": { "type": "local", "command": ["x"], "enabled": true } // legacy comment
+  }
+}"#;
+        std::fs::write(&path, input).unwrap();
+        let dev = test_entry(JeanMcpInstallMode::Dev);
+        install_opencode_at(path.clone(), &dev, true).unwrap();
+        // Second install patches the now-existing `servers` object in place.
+        let prod = test_entry(JeanMcpInstallMode::Prod);
+        install_opencode_at(path.clone(), &prod, true).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("// keep this"));
+        assert!(content.contains("// legacy comment"));
+        let parsed = parse_jsonc(&content);
+        assert_eq!(parsed["theme"], "dark");
+        assert_eq!(parsed["mcp"]["legacy"]["command"], json!(["x"]));
+        for (name, entry) in [("jean-dev", &dev), ("jean", &prod)] {
+            let server = &parsed["mcp"]["servers"][name];
+            assert_eq!(
+                server["command"],
+                json!([entry.command.clone(), JEAN_MCP_STDIO_ARG])
+            );
+            assert_eq!(server["environment"], json!(entry.env()));
+            assert!(server.get("enabled").is_none());
+        }
+    }
+
+    #[test]
+    fn opencode_v1_install_keeps_flat_mcp_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let prod = test_entry(JeanMcpInstallMode::Prod);
+        install_opencode_at(path.clone(), &prod, false).unwrap();
+
+        let parsed = parse_jsonc(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(parsed["mcp"]["jean"]["enabled"], true);
+        assert!(parsed["mcp"].get("servers").is_none());
+    }
+
     #[test]
     fn codex_session_override_targets_existing_jean_entry_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -1460,5 +1590,519 @@ installer = "npm"
         let arr = doc["disabled_mcp_servers"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr.get(0).and_then(|v| v.as_str()), Some("other"));
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpRequest {
+    pub url: String,
+    pub name: Option<String>,
+    pub backends: Vec<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+pub struct RemoteMcpResult {
+    backend: String,
+    name: String,
+    success: bool,
+    message: String,
+}
+
+pub async fn add_remote_mcp_server(
+    app: AppHandle,
+    request: RemoteMcpRequest,
+) -> Result<Vec<RemoteMcpResult>, String> {
+    let url = reqwest::Url::parse(request.url.trim()).map_err(|_| "Enter a valid HTTP endpoint")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("Use an HTTP or HTTPS endpoint without credentials or a fragment".into());
+    }
+    let default_name = url
+        .host_str()
+        .unwrap_or("server")
+        .split('.')
+        .next()
+        .unwrap_or("server")
+        .to_string();
+    let name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&default_name)
+        .to_string();
+    if name.len() > 100
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(
+            "Server name must contain only letters, numbers, hyphens, or underscores".into(),
+        );
+    }
+    if request.backends.is_empty() {
+        return Err("Select at least one harness".into());
+    }
+    let opencode_v2 = request.backends.iter().any(|b| b == "opencode")
+        && crate::opencode_cli::is_opencode_v2(&app).await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or("Home directory unavailable")?;
+        let mut results = Vec::new();
+        for backend in &request.backends {
+            let result =
+                remote_config_target(&home, backend, opencode_v2).and_then(|(path, key)| {
+                    install_remote_at(&path, key, backend, &name, url.as_str(), &request.headers)
+                });
+            results.push(RemoteMcpResult {
+                backend: backend.clone(),
+                name: name.clone(),
+                success: result.is_ok(),
+                message: result
+                    .err()
+                    .unwrap_or_else(|| "Added. Start a new session to use this server.".into()),
+            });
+        }
+        Ok(results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn remote_config_target(
+    home: &Path,
+    backend: &str,
+    opencode_v2: bool,
+) -> Result<(PathBuf, &'static str), String> {
+    let (path, key) = match backend {
+        "claude" => (home.join(".claude.json"), "mcpServers"),
+        "codex" => (home.join(".codex/config.toml"), "mcp_servers"),
+        "grok" => (home.join(".grok/config.toml"), "mcp_servers"),
+        "cursor" => (home.join(".cursor/mcp.json"), "mcpServers"),
+        "kimi" => (home.join(".kimi-code/mcp.json"), "mcpServers"),
+        "antigravity" => (home.join(".gemini/config/mcp_config.json"), "mcpServers"),
+        "devin" => (
+            crate::devin_cli::mcp::user_config_dir()
+                .ok_or("Devin config directory unavailable")?
+                .join("mcp_config.json"),
+            "mcpServers",
+        ),
+        "muse" => (
+            crate::muse_cli::settings_path().ok_or("Muse config directory unavailable")?,
+            "mcp_servers",
+        ),
+        "opencode" => (
+            find_opencode_config_path(home)
+                .unwrap_or_else(|| home.join(".config/opencode/opencode.json")),
+            if opencode_v2 {
+                OPENCODE_V2_MCP_KEY
+            } else {
+                OPENCODE_V1_MCP_KEY
+            },
+        ),
+        _ => return Err(format!("{backend} does not support endpoint setup")),
+    };
+    Ok((path, key))
+}
+
+fn install_remote_at(
+    path: &Path,
+    key: &str,
+    backend: &str,
+    name: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> Result<(), String> {
+    let target = crate::platform::resolve_write_target(path)?;
+    with_config_lock(&target, || {
+        let content = read_optional(&target)?;
+        let updated = if matches!(backend, "codex" | "grok") {
+            let mut doc = content
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| e.to_string())?;
+            if doc.get(key).and_then(|v| v.get(name)).is_some() {
+                return Err(format!(
+                    "Server {name} already exists. Choose another name."
+                ));
+            }
+            let mut table = toml_edit::Table::new();
+            table["url"] = toml_edit::value(url);
+            if !headers.is_empty() {
+                let mut values = toml_edit::Table::new();
+                for (k, v) in headers {
+                    values[k] = toml_edit::value(v);
+                }
+                table[if backend == "grok" {
+                    "headers"
+                } else {
+                    "http_headers"
+                }] = toml_edit::Item::Table(values);
+            }
+            if doc.get(key).is_none() {
+                doc[key] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            if !doc[key].is_table_like() {
+                return Err(format!("{key} must be a table"));
+            }
+            doc[key][name] = toml_edit::Item::Table(table);
+            doc.to_string()
+        } else {
+            let source = if content.trim().is_empty() {
+                "{}"
+            } else {
+                &content
+            };
+            let parsed: serde_json::Value =
+                serde_json::from_str(&strip_trailing_commas(&strip_jsonc_comments(source)))
+                    .map_err(|e| e.to_string())?;
+            let container = key
+                .split('.')
+                .try_fold(&parsed, |value, segment| value.get(segment));
+            if container.and_then(|v| v.get(name)).is_some() {
+                return Err(format!(
+                    "Server {name} already exists. Choose another name."
+                ));
+            }
+            let mut value = match backend {
+                "opencode" if key == OPENCODE_V2_MCP_KEY => json!({"type":"remote", "url":url}),
+                "opencode" => json!({"type":"remote", "url":url, "enabled":true}),
+                "antigravity" => json!({"serverUrl":url}),
+                "muse" => json!({"transport":"streamable_http", "url":url}),
+                "cursor" | "kimi" => json!({"url":url}),
+                _ => json!({"type":"http", "url":url}),
+            };
+            if !headers.is_empty() {
+                value["headers"] = json!(headers);
+            }
+            let source = if backend == "muse" && content.trim().is_empty() {
+                "{\"schema_version\":1}"
+            } else {
+                source
+            };
+            patch_jsonc_object_property(source, key, name, &value)?
+        };
+        crate::platform::write_file_atomically_with_backup(&target, updated.as_bytes())?;
+        Ok(())
+    })
+}
+
+pub async fn remove_mcp_server(backend: String, name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or("Home directory unavailable")?;
+        // OpenCode removal clears both the 1.x and 2.x shapes, so the key is unused there.
+        let (path, key) = remote_config_target(&home, &backend, false)?;
+        remove_server_at(&path, key, &backend, &name)?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn remove_server_at(path: &Path, key: &str, backend: &str, name: &str) -> Result<(), String> {
+    let target = crate::platform::resolve_write_target(path)?;
+    let not_found = || {
+        format!(
+            "Server {name} is not in {}. Remove it with the {backend} CLI.",
+            target.display()
+        )
+    };
+    with_config_lock(&target, || {
+        let content = read_optional(&target)?;
+        let updated = if matches!(backend, "codex" | "grok") {
+            let mut doc = content
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| e.to_string())?;
+            let removed = doc
+                .get_mut(key)
+                .and_then(|item| item.as_table_like_mut())
+                .and_then(|servers| servers.remove(name));
+            if removed.is_none() {
+                return Err(not_found());
+            }
+            remove_name_from_disabled_mcp_servers(&mut doc, name);
+            doc.to_string()
+        } else if backend == "opencode" {
+            remove_opencode_server(&content, name)?.ok_or_else(not_found)?
+        } else {
+            remove_jsonc_object_property(&content, key, name)?.ok_or_else(not_found)?
+        };
+        crate::platform::write_file_atomically_with_backup(&target, updated.as_bytes())?;
+        Ok(())
+    })
+}
+
+/// Removes `name` from both OpenCode shapes: 2.x `mcp.servers.<name>` and
+/// 1.x `mcp.<name>`. The 2.x reserved keys under `mcp` are never removed as
+/// 1.x servers. Returns `Ok(None)` when neither shape holds the server.
+fn remove_opencode_server(input: &str, name: &str) -> Result<Option<String>, String> {
+    let v2 = remove_jsonc_object_property(input, OPENCODE_V2_MCP_KEY, name)?;
+    let current = v2.as_deref().unwrap_or(input);
+    let v1 = if matches!(name, "servers" | "timeout") {
+        None
+    } else {
+        remove_jsonc_object_property(current, OPENCODE_V1_MCP_KEY, name)?
+    };
+    Ok(v1.or(v2))
+}
+
+/// Removes `container_key.server_key` by source span so comments elsewhere survive.
+/// `container_key` may be a dot path (`"mcp.servers"`).
+/// Returns `Ok(None)` when the property does not exist.
+fn remove_jsonc_object_property(
+    input: &str,
+    container_key: &str,
+    server_key: &str,
+) -> Result<Option<String>, String> {
+    if input.trim().is_empty() {
+        return Ok(None);
+    }
+    validate_jsonc(input, Path::new("input config"))?;
+    let mut object =
+        find_root_object(input).ok_or_else(|| "Config root must be an object".to_string())?;
+    for segment in container_key.split('.') {
+        let Some(container) = find_property(input, object.open + 1, object.close, segment) else {
+            return Ok(None);
+        };
+        let container_value = find_value_span(input, container.value_start)
+            .ok_or_else(|| format!("Could not locate {segment} value"))?;
+        if byte_at(input, container_value.start) != Some(b'{') {
+            return Ok(None);
+        }
+        object = ObjectSpan {
+            open: container_value.start,
+            close: container_value.end - 1,
+        };
+    }
+    let Some(property) = find_property(input, object.open + 1, object.close, server_key) else {
+        return Ok(None);
+    };
+
+    let bytes = input.as_bytes();
+    let mut start = property.key_start;
+    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+        start -= 1;
+    }
+    let after = skip_ws_comments(input, property.value_end);
+    let (start, end) = if byte_at(input, after) == Some(b',') {
+        (start, after + 1)
+    } else if start > 0 && bytes[start - 1] == b',' {
+        (start - 1, property.value_end)
+    } else {
+        (start, property.value_end)
+    };
+    let out = format!("{}{}", &input[..start], &input[end..]);
+    validate_jsonc(&out, Path::new("updated config"))?;
+    Ok(Some(out))
+}
+
+#[cfg(test)]
+mod remove_tests {
+    use super::*;
+
+    #[test]
+    fn jsonc_remove_keeps_neighbours_and_comments() {
+        let input = "{\n  // keep\n  \"mcpServers\": {\n    \"a\": {\"url\": \"x\"},\n    \"b\": {\"url\": \"y\"}\n  }\n}\n";
+        let first = remove_jsonc_object_property(input, "mcpServers", "a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first,
+            "{\n  // keep\n  \"mcpServers\": {\n    \"b\": {\"url\": \"y\"}\n  }\n}\n"
+        );
+        let last = remove_jsonc_object_property(input, "mcpServers", "b")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            last,
+            "{\n  // keep\n  \"mcpServers\": {\n    \"a\": {\"url\": \"x\"}\n  }\n}\n"
+        );
+        let only = remove_jsonc_object_property(&last, "mcpServers", "a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(only, "{\n  // keep\n  \"mcpServers\": {\n  }\n}\n");
+        serde_json::from_str::<serde_json::Value>(&strip_jsonc_comments(&only)).unwrap();
+        assert!(remove_jsonc_object_property(input, "mcpServers", "missing")
+            .unwrap()
+            .is_none());
+        assert!(remove_jsonc_object_property("", "mcpServers", "a")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn remove_round_trips_remote_install_for_every_backend() {
+        for backend in [
+            "claude",
+            "codex",
+            "opencode",
+            "cursor",
+            "grok",
+            "kimi",
+            "antigravity",
+            "muse",
+            "devin",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config");
+            let key = if matches!(backend, "codex" | "grok" | "muse") {
+                "mcp_servers"
+            } else if backend == "opencode" {
+                "mcp"
+            } else {
+                "mcpServers"
+            };
+            let initial = if matches!(backend, "codex" | "grok") {
+                "# Keep me\nother = true\n"
+            } else {
+                "{\n// Keep me\n\"other\":true\n}"
+            };
+            std::fs::write(&path, initial).unwrap();
+            for server in ["orbit", "second"] {
+                install_remote_at(
+                    &path,
+                    key,
+                    backend,
+                    server,
+                    "https://orbit.coollabs.io/mcp",
+                    &HashMap::new(),
+                )
+                .unwrap();
+            }
+            remove_server_at(&path, key, backend, "orbit").unwrap();
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(content.contains("Keep me"), "{backend}: {content}");
+            assert!(!content.contains("orbit\""), "{backend}: {content}");
+            assert!(
+                !content.contains("mcp_servers.orbit]"),
+                "{backend}: {content}"
+            );
+            assert!(content.contains("second"), "{backend}: {content}");
+            assert!(
+                remove_server_at(&path, key, backend, "orbit")
+                    .unwrap_err()
+                    .contains("is not in"),
+                "{backend}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_v2_remote_add_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        std::fs::write(
+            &path,
+            "{\n// Keep me\n\"mcp\": {\"legacy\": {\"type\":\"remote\",\"url\":\"https://l.test\",\"enabled\":true}}\n}",
+        )
+        .unwrap();
+        let headers = HashMap::from([("Authorization".to_string(), "Bearer t".to_string())]);
+        install_remote_at(
+            &path,
+            OPENCODE_V2_MCP_KEY,
+            "opencode",
+            "orbit",
+            "https://orbit.test/mcp",
+            &headers,
+        )
+        .unwrap();
+        assert!(install_remote_at(
+            &path,
+            OPENCODE_V2_MCP_KEY,
+            "opencode",
+            "orbit",
+            "https://other.test/mcp",
+            &HashMap::new(),
+        )
+        .unwrap_err()
+        .contains("already exists"));
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Keep me"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&strip_trailing_commas(&strip_jsonc_comments(&content))).unwrap();
+        assert_eq!(
+            parsed["mcp"]["servers"]["orbit"],
+            json!({"type":"remote","url":"https://orbit.test/mcp","headers":{"Authorization":"Bearer t"}})
+        );
+        assert!(parsed["mcp"]["legacy"].is_object());
+
+        // Removal reaches both shapes regardless of the installed version.
+        remove_server_at(&path, OPENCODE_V1_MCP_KEY, "opencode", "orbit").unwrap();
+        remove_server_at(&path, OPENCODE_V1_MCP_KEY, "opencode", "legacy").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Keep me"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&strip_trailing_commas(&strip_jsonc_comments(&content))).unwrap();
+        assert_eq!(parsed["mcp"], json!({"servers": {}}));
+        assert!(
+            remove_server_at(&path, OPENCODE_V1_MCP_KEY, "opencode", "orbit")
+                .unwrap_err()
+                .contains("is not in")
+        );
+        // Reserved 2.x keys are never removed as 1.x server names.
+        assert!(remove_server_at(&path, OPENCODE_V1_MCP_KEY, "opencode", "servers").is_err());
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    #[test]
+    fn remote_install_preserves_config_and_rejects_duplicates() {
+        for backend in [
+            "claude",
+            "codex",
+            "opencode",
+            "cursor",
+            "grok",
+            "kimi",
+            "antigravity",
+            "muse",
+            "devin",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config");
+            let key = if matches!(backend, "codex" | "grok" | "muse") {
+                "mcp_servers"
+            } else if backend == "opencode" {
+                "mcp"
+            } else {
+                "mcpServers"
+            };
+            let initial = if matches!(backend, "codex" | "grok") {
+                "# Keep me\nother = true\n"
+            } else {
+                "{\n// Keep me\n\"other\":true\n}"
+            };
+            std::fs::write(&path, initial).unwrap();
+            install_remote_at(
+                &path,
+                key,
+                backend,
+                "orbit",
+                "https://orbit.coollabs.io/mcp",
+                &HashMap::new(),
+            )
+            .unwrap();
+            let installed = std::fs::read_to_string(&path).unwrap();
+            assert!(installed.contains("Keep me"));
+            assert!(installed.contains("https://orbit.coollabs.io/mcp"));
+            assert!(install_remote_at(
+                &path,
+                key,
+                backend,
+                "orbit",
+                "https://other.test/mcp",
+                &HashMap::new()
+            )
+            .is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), installed);
+        }
     }
 }

@@ -1,6 +1,5 @@
 import {
   Activity,
-  Archive,
   AlertCircle,
   CircleDot,
   Code,
@@ -23,16 +22,6 @@ import {
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -43,11 +32,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
 import type { Project, Worktree } from '@/types/projects'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { ghCliQueryKeys, useGhCliAuth } from '@/services/gh-cli'
@@ -80,6 +64,7 @@ import { countUnreadFailedWorkflowRuns } from '@/components/shared/workflow-run-
 import type { GhAuthStatus } from '@/types/gh-cli'
 import type { PackageScript } from '@/services/projects'
 import { useWorktreeMenuActions } from './useWorktreeMenuActions'
+import { DeleteWorktreeDialog } from './DeleteWorktreeDialog'
 
 interface WorktreeDropdownMenuProps {
   worktree: Worktree
@@ -98,6 +83,8 @@ interface WorktreeDropdownMenuProps {
   onRunPackageScript?: (script: PackageScript) => void
   /** Server project (Servers tab): no git, GitHub, browser or project settings */
   serverProject?: Project | null
+  /** Closes the open chat session (not the worktree) */
+  onCloseSession?: () => void
 }
 
 const BADGE_STALE_TIME = 5 * 60 * 1000
@@ -118,6 +105,7 @@ export function WorktreeDropdownMenu({
   packageScripts = [],
   onRunPackageScript,
   serverProject,
+  onCloseSession,
 }: WorktreeDropdownMenuProps) {
   const server = serverProject?.server
   const isServer = !!server
@@ -133,7 +121,6 @@ export function WorktreeDropdownMenu({
     handleOpenInFinder,
     handleOpenInTerminal,
     handleOpenInEditor,
-    handleArchiveOrClose,
     handleDelete,
   } = useWorktreeMenuActions({ worktree, projectId })
   const [menuOpen, setMenuOpen] = useState(false)
@@ -172,7 +159,8 @@ export function WorktreeDropdownMenu({
   ])
   const isGitHubAuthenticated = authData?.authenticated ?? false
   const { data: gitProviderInfo } = useProjectGitProvider(
-    isServer ? null : projectPath
+    isServer ? null : projectPath,
+    { projectId }
   )
   const gitProvider = gitProviderInfo?.provider ?? 'github'
   const isGitlab = gitProvider === 'gitlab'
@@ -194,18 +182,28 @@ export function WorktreeDropdownMenu({
     staleTime: BADGE_STALE_TIME,
     ownerId: projectId,
   })
-  const { data: alerts } = useDependabotAlerts(projectPath, 'open', {
+  const { data: alerts } = useDependabotAlerts(projectPath, projectId, 'open', {
     enabled: !isServer && isGitHubAuthenticated && !isGitlab,
     staleTime: BADGE_STALE_TIME,
   })
-  const { data: advisories } = useRepositoryAdvisories(projectPath, undefined, {
-    enabled: !isServer && isGitHubAuthenticated && !isGitlab,
-    staleTime: BADGE_STALE_TIME,
-  })
-  const { data: workflowRuns } = useWorkflowRuns(projectPath, undefined, {
-    enabled: !isServer && isGitHubAuthenticated && !isGitlab,
-    staleTime: BADGE_STALE_TIME,
-  })
+  const { data: advisories } = useRepositoryAdvisories(
+    projectPath,
+    projectId,
+    undefined,
+    {
+      enabled: !isServer && isGitHubAuthenticated && !isGitlab,
+      staleTime: BADGE_STALE_TIME,
+    }
+  )
+  const { data: workflowRuns } = useWorkflowRuns(
+    projectPath,
+    projectId,
+    undefined,
+    {
+      enabled: !isServer && isGitHubAuthenticated && !isGitlab,
+      staleTime: BADGE_STALE_TIME,
+    }
+  )
   const seenFailedWorkflowRunIds = useUIStore(
     state => state.seenFailedWorkflowRunIds
   )
@@ -272,8 +270,10 @@ export function WorktreeDropdownMenu({
   }, [projectId])
 
   const handleOpenWorkflowRuns = useCallback(() => {
-    useUIStore.getState().setWorkflowRunsModalOpen(true, projectPath)
-  }, [projectPath])
+    useUIStore
+      .getState()
+      .setWorkflowRunsModalOpen(true, { projectId, projectPath })
+  }, [projectId, projectPath])
 
   return (
     <>
@@ -290,8 +290,8 @@ export function WorktreeDropdownMenu({
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
-            size="icon"
-            className="h-6 w-6 text-muted-foreground hover:text-foreground"
+            size="icon-sm"
+            className="text-muted-foreground hover:text-foreground"
             onClick={e => e.stopPropagation()}
             aria-label="Actions"
           >
@@ -330,10 +330,12 @@ export function WorktreeDropdownMenu({
               </DropdownMenuItem>
             )}
 
-            <DropdownMenuItem onClick={handleNewWorktree}>
-              <GitBranch className="mr-2 h-4 w-4" />
-              New Worktree
-            </DropdownMenuItem>
+            {!isServer && (
+              <DropdownMenuItem onClick={handleNewWorktree}>
+                <GitBranch className="mr-2 h-4 w-4" />
+                New Worktree
+              </DropdownMenuItem>
+            )}
 
             {isMobile && (
               <DropdownMenuItem
@@ -348,14 +350,20 @@ export function WorktreeDropdownMenu({
             {!isMobile && runScripts.length === 1 && (
               <DropdownMenuItem onClick={handleRun}>
                 <Play className="mr-2 h-4 w-4" />
-                Run
+                <span className="flex-1">Run</span>
+                <span className="ml-3 text-2xs text-muted-foreground">
+                  jean.json
+                </span>
               </DropdownMenuItem>
             )}
             {!isMobile && runScripts.length > 1 && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>
-                  <Play className="mr-4 h-4 w-4" />
-                  Run
+                  <Play className="mr-2 h-4 w-4" />
+                  <span className="flex-1">Run</span>
+                  <span className="ml-3 text-2xs text-muted-foreground">
+                    jean.json
+                  </span>
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent>
                   {runScripts.map(cmd => (
@@ -371,14 +379,15 @@ export function WorktreeDropdownMenu({
               </DropdownMenuSub>
             )}
 
-            {!isMobile && onToggleTerminal && (
+            {/* Desktop non-server headers show Terminal/Browser buttons. */}
+            {!isMobile && isServer && onToggleTerminal && (
               <DropdownMenuItem onClick={onToggleTerminal}>
                 <Terminal className="mr-2 h-4 w-4" />
                 Terminal
               </DropdownMenuItem>
             )}
 
-            {!isServer && onToggleBrowser && (
+            {isMobile && !isServer && onToggleBrowser && (
               <DropdownMenuItem onClick={onToggleBrowser}>
                 <Globe className="mr-2 h-4 w-4" />
                 Browser
@@ -391,8 +400,11 @@ export function WorktreeDropdownMenu({
               onRunPackageScript && (
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger>
-                    <Play className="mr-4 h-4 w-4" />
-                    Scripts
+                    <Play className="mr-2 h-4 w-4" />
+                    <span className="flex-1">Scripts</span>
+                    <span className="ml-3 text-2xs text-muted-foreground">
+                      package.json
+                    </span>
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent className="max-h-72 min-w-48 overflow-y-auto">
                     {sortedPackageScripts.map(script => (
@@ -479,7 +491,7 @@ export function WorktreeDropdownMenu({
                   </DropdownMenuItem>
                 )}
 
-                {isMobile && hasBranchDiff && (
+                {hasBranchDiff && (
                   <DropdownMenuItem onClick={onBranchDiffClick}>
                     <GitBranch className="mr-2 h-4 w-4" />
                     <span>Branch diff</span>
@@ -573,21 +585,14 @@ export function WorktreeDropdownMenu({
               </DropdownMenuItem>
             )}
 
-            <DropdownMenuSeparator />
+            {(onCloseSession || !isBase) && <DropdownMenuSeparator />}
 
-            <DropdownMenuItem onClick={handleArchiveOrClose}>
-              {isBase ? (
-                <>
-                  <X className="mr-2 h-4 w-4" />
-                  Close Session
-                </>
-              ) : (
-                <>
-                  <Archive className="mr-2 h-4 w-4" />
-                  Archive Worktree
-                </>
-              )}
-            </DropdownMenuItem>
+            {onCloseSession && (
+              <DropdownMenuItem onClick={onCloseSession}>
+                <X className="mr-2 h-4 w-4" />
+                Close Session
+              </DropdownMenuItem>
+            )}
 
             {!isBase && (
               <DropdownMenuItem onClick={() => setShowDeleteConfirm(true)}>
@@ -599,51 +604,12 @@ export function WorktreeDropdownMenu({
         )}
       </DropdownMenu>
 
-      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
-        <AlertDialogContent
-          onKeyDown={e => {
-            if (e.key === 'Enter') {
-              e.preventDefault()
-              e.stopPropagation()
-              handleDelete()
-              setShowDeleteConfirm(false)
-            }
-          }}
-        >
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Worktree</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently delete the worktree, its branch, and all
-              associated sessions. This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <AlertDialogAction
-                  onClick={() => handleDelete(true)}
-                  variant="outline"
-                >
-                  Delete Without Teardown
-                </AlertDialogAction>
-              </TooltipTrigger>
-              <TooltipContent className="max-w-72">
-                Delete without running the teardown script. Resources it manages
-                may need manual cleanup.
-              </TooltipContent>
-            </Tooltip>
-            <AlertDialogAction
-              autoFocus
-              onClick={() => handleDelete()}
-              variant="destructive"
-            >
-              Delete
-              <kbd className="ml-1.5 text-xs opacity-70">↵</kbd>
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <DeleteWorktreeDialog
+        open={showDeleteConfirm}
+        onOpenChange={setShowDeleteConfirm}
+        worktree={worktree}
+        onDelete={handleDelete}
+      />
     </>
   )
 }

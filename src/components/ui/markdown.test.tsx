@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import { Markdown, headingBefore } from './markdown'
+import { PreviewDialogHost } from './preview-dialog-host'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 
@@ -277,6 +278,31 @@ describe('Markdown', () => {
     )
   })
 
+  it('links inline code that holds only a web URL', () => {
+    const { container } = render(
+      <Markdown>
+        {'Open `https://dev.example.ts.net:20420/app/x` and `npm test`.'}
+      </Markdown>
+    )
+    const link = screen.getByRole('link', {
+      name: 'https://dev.example.ts.net:20420/app/x',
+    })
+    expect(link.getAttribute('href')).toBe(
+      'https://dev.example.ts.net:20420/app/x'
+    )
+    expect(link.querySelector('code')).not.toBeNull()
+    expect(container.querySelectorAll('a')).toHaveLength(1)
+  })
+
+  it('does not nest a link for inline code already inside a link', () => {
+    const { container } = render(
+      <Markdown>{'[`https://a.example/x`](https://b.example/y)'}</Markdown>
+    )
+    const links = container.querySelectorAll('a')
+    expect(links).toHaveLength(1)
+    expect(links[0]?.getAttribute('href')).toBe('https://b.example/y')
+  })
+
   it('opens relative file links in the active worktree viewer', () => {
     useChatStore.setState({ activeWorktreePath: '/repo/worktree' })
     useUIStore.getState().setViewingFilePath(null)
@@ -287,6 +313,21 @@ describe('Markdown', () => {
     expect(useUIStore.getState().viewingFilePath).toBe(
       '/repo/worktree/coolify-sponsors.png'
     )
+  })
+
+  it.each([
+    ['/repo/app/Job.php:20', '/repo/app/Job.php'],
+    ['/repo/app/Job.php:20:5', '/repo/app/Job.php'],
+    ['app/Job.php#L20', '/repo/worktree/app/Job.php'],
+    ['app/Job.php#L20-L30', '/repo/worktree/app/Job.php'],
+  ])('strips the line reference from file link %s', (href, expected) => {
+    useChatStore.setState({ activeWorktreePath: '/repo/worktree' })
+    useUIStore.getState().setViewingFilePath(null)
+
+    render(<Markdown>{`[Job](${href})`}</Markdown>)
+    fireEvent.click(screen.getByRole('link', { name: 'Job' }))
+
+    expect(useUIStore.getState().viewingFilePath).toBe(expected)
   })
 
   it('opens inline-code file paths in the viewer on click', () => {
@@ -531,7 +572,12 @@ describe('Markdown', () => {
     // Streaming keeps the raw block until the message completes
     expect(screen.getByRole('button', { name: 'Copy code' })).toBeTruthy()
 
-    rerender(<Markdown sessionId="remote-1:session-1">{content}</Markdown>)
+    rerender(
+      <>
+        <Markdown sessionId="remote-1:session-1">{content}</Markdown>
+        <PreviewDialogHost />
+      </>
+    )
     expect(screen.getByRole('button', { name: 'Open a.png' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Open b.png' })).toBeTruthy()
     const more = screen.getByRole('button', {

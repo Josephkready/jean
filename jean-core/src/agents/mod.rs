@@ -309,14 +309,16 @@ fn render_system_prompt(
 - Use only the `{mcp}` MCP server tools for project work. Never use another Jean MCP server.
 - When you give work to a session with `send_chat_message`, do not pass `executionMode`: the session then uses its selected mode or the user's default. Pass a mode only when the user asks for one. Jean tracks the session. When that session finishes, fails, or waits for input, you get an automatic update message. Do not poll or wait in a loop: end your turn and continue when the update arrives.
 - Messages that start with \"[Jean agent update]\" or \"[Jean chat continued]\" come from Jean, not from the user.
+- User messages can end with mention lines from `@` mentions: `[Mentioned agent: …]`, `[Mentioned project: …]`, or `[Mentioned remote Jean: …]`, each with its ID. A mention only adds context; it does not start an action. An agent mention means the user wants that agent involved: use `message_agent` with its agentId when that helps. A project mention means the work is about that project: use its projectId with the project tools. A remote Jean mention means the work targets that Jean instance (serverId, url); if your tools cannot reach it, tell the user. `on remote Jean: X` means the item is on another Jean instance, not on yours.
 - The user does not see update messages, only your reply. Reply to an update with a short status: one to three sentences, plus links to the PRs, issues, or sessions involved. Do not add headings, tables, diffs, a recap, or test steps, even if other instructions ask for them.
 - Delete, permanent delete, push, merge, and pull request creation need the user's approval. The tool then returns `approvalRequired`. Tell the user what you asked for and end your turn. The result arrives as an update.
-- Use `schedule_create` for later checks (`delayMinutes`), one run at an exact date-time (`runAt` plus `timezone`), repeating intervals (`everyMinutes`, at least 5), cron (`cron` plus `timezone`), or an event (`event`: session_finished, session_failed, worktree_archived, pr_merged, approval_resolved). Use `schedule_update`, `schedule_list`, and `schedule_cancel` to manage them. Each run is a separate background task.
+- Use `schedule_create` for later checks (`delayMinutes`), one run at an exact date-time (`runAt` plus `timezone`), repeating intervals (`everyMinutes`, at least 5), cron (`cron` plus `timezone`), or an event (`event`: session_finished, session_failed, pr_merged, approval_resolved). Use `schedule_update`, `schedule_list`, and `schedule_cancel` to manage them. Each run is a separate background task.
 - Use `spawn_subagent` to hand one task to a subagent type from `subagent_type_list`. Pass the type name and the task. The result arrives as an update. Use `subagent_type_save` and `subagent_type_delete` to define types. A subagent cannot define types or spawn further subagents.
 - Use `agent_list` to see agents. Use `agent_update` with no `agentId` to change your name, description, instructions, color, backend, model, effort, or skills. Use `agent_create` to make an agent; it cannot receive more backend, model, effort, thinking, skills, or wake budget than you have. Use `agent_revert` to undo the latest change.
 - Use `notify_user` only for what the user must know: results of goals, questions, failures, needed decisions. Not for routine progress. In a task session, ask questions with `notify_user` (level `action`), not `ask_user`.
 - Use `task_list` to see your background tasks and their results.
 - Use `list_connectors` to see the MCP connectors saved for you and whether this backend applies that limit. It is read-only.
+- Use `set_connector` to turn a discovered MCP server on or off: globally, for a project (`projectId`), or for an agent's connector limit (`agentId`). It needs the user's approval.
 - Use `memory_save` for lasting rules, facts the code does not show, and open work. Do not save live state (project lists, PR status) or secrets. scope `user` is only for facts about the user (name, timezone, preferences) and every agent sees them. scope `shared` is working memory for all agents, not who the user is. Omit scope for a private memory.
 - Use `memory_search` to pull more than the prompt shows. Filter with kind, scope, projectId, pinned, and from/to (unix seconds on updated_at). Use `memory_update` to edit a rule, `memory_supersede` to correct a fact (the old text is kept in the change record), and `memory_forget` to delete one.
 - Use `journal_add` for what happened, a decision, or an outcome. Use `journal_search` to recall by text or date, including chats that were archived. Journal is history, not a lasting fact.
@@ -329,7 +331,7 @@ fn render_system_prompt(
     }
     match role {
         SessionRole::Chat { carry_over } => {
-            out.push_str("\n## This session: chat with the user\n- The user talks with you here. Background work (schedules, follow-ups of tasks, requests from other agents) runs in separate task sessions. Use `task_list` when the user asks about it.\n- The user sees only your text, not your tool calls. Before each group of tool calls, write one short sentence that tells what you do now (for example: \"I check the open PRs.\"). When a step gives a result, write one short line about it.\n- When the user must decide between fixed choices, call `ask_user` instead of writing the question as text. Give the question and two to eight short options. Set `multiple` to true only when the user can pick more than one. Do not add a \"something else\" option: the user can always type an answer. Then end your turn. The answer arrives as the next user message.\n- End each reply to the user, including replies to updates, with one short question that suggests the most useful next action (for example: \"Do you want me to open a PR for this?\"). When there is more than one good path, ask it with `ask_user` and one to three concrete options. Do not ask when the user only said thanks or ended the conversation.\n");
+            out.push_str("\n## This session: chat with the user\n- The user talks with you here. Background work (schedules, follow-ups of tasks, requests from other agents) runs in separate task sessions. Use `task_list` when the user asks about it.\n- The user sees only your text, not your tool calls. When a step gives a result, write one short line about it.\n- While you work, the user sees a status line. When a turn uses tools, call `set_status` in your first group of tool calls with 2 to 5 plain words about the goal (for example: \"Checking firewall logs\"). Call it again only when the work moves to a new phase, not for each tool call. Do not name tools, commands, or file paths in it.\n- When the user must decide between fixed choices, call `ask_user` instead of writing the question as text. Give the question and two to eight short options. Set `multiple` to true only when the user can pick more than one. Do not add a \"something else\" option: the user can always type an answer. Then end your turn. The answer arrives as the next user message.\n- End each reply to the user, including replies to updates, with one short question that suggests the most useful next action (for example: \"Do you want me to open a PR for this?\"). When there is more than one good path, ask it with `ask_user` and one to three concrete options. Do not ask when the user only said thanks or ended the conversation.\n");
             out.push_str(AGENT_RECAP_INSTRUCTION);
             if let Some(text) = carry_over.as_deref().filter(|t| !t.trim().is_empty()) {
                 out.push_str("\n## End of your previous chat\nThe previous chat was archived because it was long. Its end:\n");
@@ -462,7 +464,8 @@ mod tests {
         );
         assert!(prompt.contains("chat with the user"));
         assert!(prompt.contains("suggests the most useful next action"));
-        assert!(prompt.contains("Before each group of tool calls"));
+        assert!(prompt.contains("call `set_status`"));
+        assert!(!prompt.contains("Before each group of tool calls"));
         assert!(prompt.contains("| # | Action | Status | Link |"));
         assert!(prompt.contains("Do not add a `Recap` heading"));
         assert!(prompt.contains("## End of your previous chat"));
@@ -553,7 +556,9 @@ mod tests {
         assert!(prompt.contains("background task"));
         assert!(!prompt.contains("previous chat"));
         assert!(prompt.contains("more memories exist"));
-        assert!(prompt.len() < PROMPT_MEMORY_CHARS + 4000);
+        let without_memories =
+            render_system_prompt(&me, &[], &[], false, "jean-dev", &SessionRole::Task);
+        assert!(prompt.len() <= without_memories.len() + PROMPT_MEMORY_CHARS + 100);
         assert!(!prompt.contains("(empty)"));
     }
 }

@@ -80,6 +80,18 @@ session gets its own agent-browser session:
 | `AGENT_BROWSER_SESSION` | Jean, per run | `jean-<jean session id>` |
 | `AGENT_BROWSER_RESTORE` | MCP entry | `jean` (shared restore key) |
 | `AGENT_BROWSER_IDLE_TIMEOUT_MS` | MCP entry | `900000` (close idle browsers after 15 min) |
+| `AGENT_BROWSER_SCREENSHOT_DIR` | MCP entry | `$JEAN_APP_DATA/browser-screenshots` |
+
+## Screenshots
+
+- A screenshot taken without a path goes to `$JEAN_APP_DATA/browser-screenshots/`.
+  The system prompt (when Agent Browser is on) tells agents not to give a path.
+- The folder is under app data, so the chat `screenshots` gallery loads the
+  files through the asset protocol.
+- On startup Jean deletes files in this folder older than 30 days
+  (`prune_old_screenshots`). Old chat galleries then show missing images.
+- The MCP `agent_browser_screenshot` tool always returns the path and the image
+  inline. Jean cannot make the inline image opt-in.
 
 - Each session starts its own Chrome with a temporary profile (deleted on close).
   Cost: about 0.5 GB of memory per active session.
@@ -124,7 +136,8 @@ MCP entry shape (Claude):
       "args": ["mcp"],
       "env": {
         "AGENT_BROWSER_RESTORE": "jean",
-        "AGENT_BROWSER_IDLE_TIMEOUT_MS": "900000"
+        "AGENT_BROWSER_IDLE_TIMEOUT_MS": "900000",
+        "AGENT_BROWSER_SCREENSHOT_DIR": "<app data>/browser-screenshots"
       }
     }
   }
@@ -133,11 +146,11 @@ MCP entry shape (Claude):
 
 ## UI
 
-Settings → **MCP Servers** → **Agent Browser** (`AgentBrowserSection.tsx`):
+Settings → **MCP Servers** → **Recommended MCP Servers** → **Agent Browser** row (`AgentBrowserRow.tsx`, plugin-style row from `ExtensionRow.tsx`):
 
-- Status (installed / missing binary; Jean-managed vs PATH)
-- **Install agent-browser** (npm into app data + Chromium download + MCP setup for installed backends)
-- Copy Claude / Codex snippets
+- Status badge (not installed / installed with version / setup incomplete)
+- **Install** (npm into app data + Chromium download + MCP setup for installed backends)
+- **Update / repair** and **Turn off** (removes the MCP server from the CLIs)
 - Operator fallback: `npm install -g agent-browser && agent-browser install`
 
 ## Manual-login flows

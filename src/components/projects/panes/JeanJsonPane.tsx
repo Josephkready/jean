@@ -1,63 +1,82 @@
 import { SettingsSection } from '@/components/preferences/SettingsSection'
-import { useState, useCallback, useEffect } from 'react'
-import { Loader2, Plus, X } from '@/components/icons/reicon'
+import { InlineField } from '@/components/preferences/InlineField'
+import { useState, useCallback } from 'react'
+import { ChevronRight, Loader2, Plus, X } from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { generateId } from '@/lib/uuid'
 import {
   useJeanConfig,
   useSaveJeanConfig,
   normalizeRunScripts,
+  type JeanConfig,
 } from '@/services/projects'
 
 export function JeanJsonPane({
+  projectId,
   projectPath,
 }: {
   projectId: string
   projectPath: string
 }) {
-  const { data: jeanConfig, isLoading: isConfigLoading } =
-    useJeanConfig(projectPath)
+  const { data: jeanConfig, isLoading: isConfigLoading } = useJeanConfig(
+    projectPath,
+    projectId
+  )
+  // A new config from disk starts a fresh form with its values.
+  return (
+    <JeanJsonForm
+      key={JSON.stringify(jeanConfig ?? null)}
+      projectId={projectId}
+      projectPath={projectPath}
+      jeanConfig={jeanConfig ?? null}
+      isConfigLoading={isConfigLoading}
+    />
+  )
+}
+
+function JeanJsonForm({
+  projectId,
+  projectPath,
+  jeanConfig,
+  isConfigLoading,
+}: {
+  projectId: string
+  projectPath: string
+  jeanConfig: JeanConfig | null
+  isConfigLoading: boolean
+}) {
   const saveJeanConfig = useSaveJeanConfig()
 
-  const [localSetup, setLocalSetup] = useState('')
-  const [localTeardown, setLocalTeardown] = useState('')
+  const [localSetup, setLocalSetup] = useState(jeanConfig?.scripts.setup ?? '')
+  const [localTeardown, setLocalTeardown] = useState(
+    jeanConfig?.scripts.teardown ?? ''
+  )
   const [localRun, setLocalRun] = useState<{ id: string; value: string }[]>(
-    () => [{ id: generateId(), value: '' }]
+    () => {
+      const scripts = normalizeRunScripts(jeanConfig?.scripts.run)
+      return (scripts.length > 0 ? scripts : ['']).map(value => ({
+        id: generateId(),
+        value,
+      }))
+    }
   )
   const [localPorts, setLocalPorts] = useState<
     { id: string; port: string; label: string; host: string }[]
-  >([])
-  const [synced, setSynced] = useState(false)
-
-  // Sync from query data
-  useEffect(() => {
-    if (jeanConfig) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setLocalSetup(jeanConfig.scripts.setup ?? '')
-      setLocalTeardown(jeanConfig.scripts.teardown ?? '')
-      const scripts = normalizeRunScripts(jeanConfig.scripts.run)
-      setLocalRun(
-        (scripts.length > 0 ? scripts : ['']).map(value => ({
-          id: generateId(),
-          value,
-        }))
-      )
-
-      const ports = jeanConfig.ports ?? []
-      setLocalPorts(
-        ports.map(p => ({
-          id: generateId(),
-          port: String(p.port),
-          label: p.label,
-          host: p.host ?? '',
-        }))
-      )
-
-      setSynced(true)
-    }
-  }, [jeanConfig])
+  >(() =>
+    (jeanConfig?.ports ?? []).map(p => ({
+      id: generateId(),
+      port: String(p.port),
+      label: p.label,
+      host: p.host ?? '',
+    }))
+  )
+  const synced = jeanConfig !== null
 
   const originalRunScripts = normalizeRunScripts(jeanConfig?.scripts.run)
   const currentRunFiltered: string[] = []
@@ -116,6 +135,7 @@ export function JeanJsonPane({
 
     saveJeanConfig.mutate({
       projectPath,
+      projectId,
       config: {
         // Preserve any fields this pane doesn't manage (e.g. provider binding).
         ...jeanConfig,
@@ -133,22 +153,24 @@ export function JeanJsonPane({
     localTeardown,
     localRun,
     localPorts,
+    projectId,
     projectPath,
     saveJeanConfig,
   ])
 
   return (
     <div className="space-y-6">
-      <SettingsSection title="Automation Scripts">
-        <p className="text-xs text-muted-foreground">
-          Scripts from jean.json — setup runs after worktree creation, teardown
-          before deletion, run launches via the run command
-        </p>
+      <SettingsSection
+        title="Automation Scripts"
+        description="Stored in jean.json in the project root"
+      >
         <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="setup-script" className="text-sm">
-              Setup
-            </Label>
+          <InlineField
+            label="Setup"
+            description="Runs after a new worktree is created"
+            htmlFor="setup-script"
+            layout="stacked"
+          >
             <Input
               id="setup-script"
               placeholder="e.g. npm install"
@@ -156,12 +178,12 @@ export function JeanJsonPane({
               onChange={e => setLocalSetup(e.target.value)}
               className="font-mono text-base md:text-sm"
             />
-            <p className="text-xs text-muted-foreground">
-              Runs automatically after a new worktree is created
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm">Run</Label>
+          </InlineField>
+          <InlineField
+            label="Run"
+            description="Launched from the run command in the toolbar"
+            layout="stacked"
+          >
             {localRun.map((entry, i) => (
               <div key={entry.id} className="flex items-center gap-1">
                 <Input
@@ -177,8 +199,9 @@ export function JeanJsonPane({
                 {localRun.length > 1 && (
                   <Button
                     variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 shrink-0"
+                    size="icon-sm"
+                    className="shrink-0"
+                    aria-label="Remove command"
                     onClick={() =>
                       setLocalRun(localRun.filter(s => s.id !== entry.id))
                     }
@@ -199,12 +222,13 @@ export function JeanJsonPane({
               <Plus className="mr-1 h-3 w-3" />
               Add command
             </Button>
-            <p className="text-xs text-muted-foreground">
-              Launches via the run command in the toolbar
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm">Ports</Label>
+          </InlineField>
+          <InlineField
+            label="Ports"
+            description="Open in the browser with CMD+O"
+            help="Leave host blank to use this server's default preview hostname, or localhost."
+            layout="stacked"
+          >
             {localPorts.map((entry, i) => (
               <div key={entry.id} className="flex items-center gap-1">
                 <Input
@@ -240,8 +264,9 @@ export function JeanJsonPane({
                 />
                 <Button
                   variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0"
+                  size="icon-sm"
+                  className="shrink-0"
+                  aria-label="Remove port"
                   onClick={() =>
                     setLocalPorts(localPorts.filter(p => p.id !== entry.id))
                   }
@@ -269,15 +294,13 @@ export function JeanJsonPane({
               <Plus className="mr-1 h-3 w-3" />
               Add port
             </Button>
-            <p className="text-xs text-muted-foreground">
-              Open configured ports in the browser with CMD+O. Leave host blank
-              to use this server&apos;s default preview hostname, or localhost.
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="teardown-script" className="text-sm">
-              Teardown
-            </Label>
+          </InlineField>
+          <InlineField
+            label="Teardown"
+            description="Runs before a worktree is deleted"
+            htmlFor="teardown-script"
+            layout="stacked"
+          >
             <Input
               id="teardown-script"
               placeholder="e.g. docker compose down"
@@ -285,24 +308,31 @@ export function JeanJsonPane({
               onChange={e => setLocalTeardown(e.target.value)}
               className="font-mono text-base md:text-sm"
             />
-            <p className="text-xs text-muted-foreground">
-              Runs automatically before a worktree is deleted/archived
-            </p>
-          </div>
-          <div className="space-y-0.5 text-xs text-muted-foreground">
-            <p>
-              <code className="text-foreground/80">$JEAN_WORKSPACE_PATH</code>
-              {' — worktree directory'}
-            </p>
-            <p>
-              <code className="text-foreground/80">$JEAN_ROOT_PATH</code>
-              {' — repository root'}
-            </p>
-            <p>
-              <code className="text-foreground/80">$JEAN_BRANCH</code>
-              {' — branch name'}
-            </p>
-          </div>
+          </InlineField>
+          <Collapsible>
+            <CollapsibleTrigger className="group inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+              <ChevronRight className="size-3.5 transition-transform group-data-[state=open]:rotate-90" />
+              Environment variables
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                <dt>
+                  <code className="text-foreground/80">
+                    $JEAN_WORKSPACE_PATH
+                  </code>
+                </dt>
+                <dd>Worktree directory</dd>
+                <dt>
+                  <code className="text-foreground/80">$JEAN_ROOT_PATH</code>
+                </dt>
+                <dd>Repository root</dd>
+                <dt>
+                  <code className="text-foreground/80">$JEAN_BRANCH</code>
+                </dt>
+                <dd>Branch name</dd>
+              </dl>
+            </CollapsibleContent>
+          </Collapsible>
           <Button
             size="sm"
             onClick={handleSave}

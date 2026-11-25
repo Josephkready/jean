@@ -18,7 +18,7 @@ interface ImagePreviewProps {
   /** Whether removal is disabled (e.g., while sending) */
   disabled?: boolean
   /** Session that owns the pending image path. */
-  sessionId?: string
+  sessionId: string
 }
 
 /**
@@ -31,9 +31,7 @@ export function ImagePreview({
   disabled,
   sessionId,
 }: ImagePreviewProps) {
-  const serverId = sessionId
-    ? parseServerResourceKey(sessionId)?.serverId
-    : undefined
+  const serverId = parseServerResourceKey(sessionId)?.serverId
   const handleRemove = useCallback(
     async (e: React.MouseEvent, image: PendingImage) => {
       // Prevent the click from bubbling to the lightbox
@@ -45,7 +43,7 @@ export function ImagePreview({
       try {
         await invoke('delete_pasted_image', {
           path: image.path,
-          ...(sessionId ? { sessionId } : {}),
+          sessionId,
         })
       } catch (error) {
         console.error('Failed to delete image:', error)
@@ -74,7 +72,7 @@ export function ImagePreview({
                 src={image.path}
                 serverId={serverId}
                 alt={image.filename}
-                thumbnailClassName="h-16 w-16 object-cover rounded-md border border-border/50 bg-muted cursor-pointer hover:border-primary/50 transition-colors"
+                thumbnailClassName="h-16 w-16 object-cover rounded-md border border-border/50 bg-muted cursor-pointer hover:border-foreground/20 transition-colors"
               />
               {!disabled && (
                 <Tooltip>

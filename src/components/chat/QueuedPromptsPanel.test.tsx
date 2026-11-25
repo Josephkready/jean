@@ -29,7 +29,11 @@ describe('QueuedPromptsPanel', () => {
   })
 
   beforeEach(() => {
-    useChatStore.setState({ collapsedQueuedPromptsSessions: {} })
+    // Most tests interact with the open list
+    useChatStore.setState({
+      expandedQueuedPromptsSessions: { 'session-1': true },
+      editingQueuedMessageIds: {},
+    })
   })
 
   const messages = [
@@ -42,22 +46,27 @@ describe('QueuedPromptsPanel', () => {
     messages?: QueuedMessage[]
     onRemove?: (sessionId: string, messageId: string) => void
     onSendNow?: (sessionId: string, messageId: string) => void
-    onEdit?: (sessionId: string, messageId: string, message: string) => void
+    onEdit?: (sessionId: string, messageId: string) => void
+    onCancelEdit?: (sessionId: string) => void
+    isPaused?: boolean
   }) => {
     const onRemove = overrides?.onRemove ?? vi.fn()
     const onSendNow = overrides?.onSendNow ?? vi.fn()
     const onEdit = overrides?.onEdit ?? vi.fn()
+    const onCancelEdit = overrides?.onCancelEdit ?? vi.fn()
     const result = render(
       <QueuedPromptsPanel
         sessionId="session-1"
         messages={overrides?.messages ?? messages}
         isSessionBusy={false}
+        isPaused={overrides?.isPaused}
         onRemove={onRemove}
         onSendNow={onSendNow}
         onEdit={onEdit}
+        onCancelEdit={onCancelEdit}
       />
     )
-    return { ...result, onRemove, onSendNow, onEdit }
+    return { ...result, onRemove, onSendNow, onEdit, onCancelEdit }
   }
 
   it('renders count badge and all queued prompts', () => {
@@ -68,6 +77,35 @@ describe('QueuedPromptsPanel', () => {
     expect(screen.getByText('First prompt')).toBeInTheDocument()
     expect(screen.getByText('Second prompt')).toBeInTheDocument()
     expect(screen.getByText('Third prompt')).toBeInTheDocument()
+  })
+
+  it('marks the queue paused after a provider rejection', () => {
+    renderPanel({ isPaused: true })
+
+    expect(screen.getByText('Paused')).toBeInTheDocument()
+    // The queued prompts stay visible and untouched while paused.
+    expect(screen.getByText('First prompt')).toBeInTheDocument()
+    expect(screen.getByText('Third prompt')).toBeInTheDocument()
+  })
+
+  it('does not show the paused badge while the queue is draining', () => {
+    renderPanel()
+
+    expect(screen.queryByText('Paused')).not.toBeInTheDocument()
+  })
+
+  it('labels a queued session update by its sender', () => {
+    renderPanel({
+      messages: [
+        createMessage(
+          'msg-1',
+          '[Jean session update]\nsession: s2\nworktree: w2\nname: Fix login\nstatus: done\n---\nDone.'
+        ),
+      ],
+    })
+
+    expect(screen.getByText('Update from Fix login')).toBeInTheDocument()
+    expect(screen.queryByText(/Jean session update/)).not.toBeInTheDocument()
   })
 
   it('renders nothing when the queue is empty', () => {
@@ -149,13 +187,13 @@ describe('QueuedPromptsPanel', () => {
         onRemove={vi.fn()}
         onSendNow={onSendNow}
         onEdit={vi.fn()}
+        onCancelEdit={vi.fn()}
       />
     )
 
-    fireEvent.keyDown(
-      screen.getByRole('list', { name: 'Queued prompts' }),
-      { key: 'Enter' }
-    )
+    fireEvent.keyDown(screen.getByRole('list', { name: 'Queued prompts' }), {
+      key: 'Enter',
+    })
     expect(onSendNow).toHaveBeenCalledWith('session-1', 'msg-1')
   })
 
@@ -172,19 +210,26 @@ describe('QueuedPromptsPanel', () => {
     expect(screen.getByText('Queued prompts')).toBeInTheDocument()
   })
 
-  it('remembers the collapsed state per session', () => {
+  it('starts collapsed and remembers the expanded state per session', () => {
+    useChatStore.setState({ expandedQueuedPromptsSessions: {} })
     const { unmount } = renderPanel()
-    fireEvent.click(screen.getByText('Queued prompts'))
-    unmount()
-
-    // Same session stays collapsed after remount (e.g. session switch)
-    const { unmount: unmountAgain } = renderPanel()
     expect(
       screen.queryByRole('list', { name: 'Queued prompts' })
     ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('Queued prompts'))
+    expect(
+      screen.getByRole('list', { name: 'Queued prompts' })
+    ).toBeInTheDocument()
+    unmount()
+
+    // Same session stays expanded after remount (e.g. session switch)
+    const { unmount: unmountAgain } = renderPanel()
+    expect(
+      screen.getByRole('list', { name: 'Queued prompts' })
+    ).toBeInTheDocument()
     unmountAgain()
 
-    // Other sessions stay expanded
+    // Other sessions start collapsed
     render(
       <QueuedPromptsPanel
         sessionId="session-2"
@@ -193,11 +238,12 @@ describe('QueuedPromptsPanel', () => {
         onRemove={vi.fn()}
         onSendNow={vi.fn()}
         onEdit={vi.fn()}
+        onCancelEdit={vi.fn()}
       />
     )
     expect(
-      screen.getByRole('list', { name: 'Queued prompts' })
-    ).toBeInTheDocument()
+      screen.queryByRole('list', { name: 'Queued prompts' })
+    ).not.toBeInTheDocument()
   })
 
   it('row buttons call onRemove and onSendNow', () => {
@@ -217,17 +263,33 @@ describe('QueuedPromptsPanel', () => {
     expect(onSendNow).toHaveBeenCalledWith('session-1', 'msg-3')
   })
 
-  it('edits queued prompts when steering is not supported', () => {
+  it('edit button loads the prompt into the chat input', () => {
     const { onEdit } = renderPanel()
 
-    const editButton = screen.getAllByLabelText('Edit queued prompt')[0]
-    expect(editButton).toBeDefined()
+    const editButton = screen.getAllByLabelText('Edit queued prompt')[1]
     fireEvent.click(editButton as HTMLElement)
-    const editor = screen.getByLabelText('Queued prompt text')
-    fireEvent.change(editor, { target: { value: 'Updated prompt' } })
-    fireEvent.click(screen.getByLabelText('Save queued prompt'))
 
-    expect(onEdit).toHaveBeenCalledWith('session-1', 'msg-1', 'Updated prompt')
+    expect(onEdit).toHaveBeenCalledWith('session-1', 'msg-2')
+  })
+
+  it('shows the edited row as editing and only allows cancel', () => {
+    useChatStore.setState({ editingQueuedMessageIds: { 'session-1': 'msg-1' } })
+    const { onCancelEdit, onSendNow, onRemove } = renderPanel()
+
+    expect(
+      screen.getByText('Editing in the input below. Submit it to save.')
+    ).toBeInTheDocument()
+    expect(screen.queryByText('First prompt')).not.toBeInTheDocument()
+    expect(screen.getAllByLabelText('Send now')).toHaveLength(2)
+
+    const list = screen.getByRole('list', { name: 'Queued prompts' })
+    fireEvent.keyDown(list, { key: 'Enter' })
+    fireEvent.keyDown(list, { key: 'Backspace' })
+    expect(onSendNow).not.toHaveBeenCalled()
+    expect(onRemove).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByLabelText('Cancel queued prompt edit'))
+    expect(onCancelEdit).toHaveBeenCalledWith('session-1')
   })
 
   it('allows editing prompts that remain queued for steerable backends', () => {
@@ -246,45 +308,6 @@ describe('QueuedPromptsPanel', () => {
     })
 
     expect(screen.getAllByLabelText('Edit queued prompt')).toHaveLength(3)
-  })
-
-  it('allows editing queued prompts for the non-steerable Antigravity backend', () => {
-    const { onEdit } = renderPanel({
-      messages: [
-        createMessage('msg-1', 'Antigravity prompt', {
-          backend: 'antigravity',
-        } as Partial<QueuedMessage>),
-      ],
-    })
-
-    const editButton = screen.getByLabelText('Edit queued prompt')
-    fireEvent.click(editButton)
-    const editor = screen.getByLabelText('Queued prompt text')
-    fireEvent.change(editor, { target: { value: 'Updated antigravity' } })
-    fireEvent.click(screen.getByLabelText('Save queued prompt'))
-
-    expect(onEdit).toHaveBeenCalledWith(
-      'session-1',
-      'msg-1',
-      'Updated antigravity'
-    )
-  })
-
-  it('allows editing queued prompts for the non-steerable Muse backend', () => {
-    const { onEdit } = renderPanel({
-      messages: [
-        createMessage('msg-1', 'Muse prompt', {
-          backend: 'muse',
-        } as Partial<QueuedMessage>),
-      ],
-    })
-
-    fireEvent.click(screen.getByLabelText('Edit queued prompt'))
-    const editor = screen.getByLabelText('Queued prompt text')
-    fireEvent.change(editor, { target: { value: 'Updated muse' } })
-    fireEvent.click(screen.getByLabelText('Save queued prompt'))
-
-    expect(onEdit).toHaveBeenCalledWith('session-1', 'msg-1', 'Updated muse')
   })
 
   it('allows editing queued steering prompts with file @-mentions', () => {

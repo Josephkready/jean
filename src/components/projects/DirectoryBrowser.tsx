@@ -8,7 +8,7 @@ import {
   Check,
 } from '@/components/icons/reicon'
 import { toast } from 'sonner'
-import { invoke, invokeForServer } from '@/lib/transport'
+import { invokeForOptionalServer } from '@/lib/transport'
 import type { BrowseDirectoryResult, DirEntry } from '@/types/projects'
 import { cn } from '@/lib/utils'
 import {
@@ -36,7 +36,8 @@ interface DirectoryBrowserProps {
   description?: string
   defaultName?: string
   initialPath?: string
-  serverId?: string
+  /** Server whose filesystem is browsed; `undefined` means the active transport. */
+  serverId: string | undefined
 }
 
 function buildSavePath(currentPath: string, name: string): string {
@@ -75,13 +76,11 @@ export function DirectoryBrowser({
       setIsLoading(true)
 
       try {
-        const next = serverId
-          ? await invokeForServer<BrowseDirectoryResult>(
-              serverId,
-              'browse_directory',
-              { path }
-            )
-          : await invoke<BrowseDirectoryResult>('browse_directory', { path })
+        const next = await invokeForOptionalServer<BrowseDirectoryResult>(
+          serverId,
+          'browse_directory',
+          { path }
+        )
         if (requestId !== requestIdRef.current) return
         setResult(next)
         setPathInput(next.current_path)
@@ -144,7 +143,7 @@ export function DirectoryBrowser({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none sm:!w-auto sm:!max-w-2xl sm:!h-auto sm:!max-h-[85vh] sm:!rounded-lg flex flex-col overflow-hidden">
+      <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none sm:!w-auto sm:!max-w-2xl sm:!h-fit sm:!max-h-[85vh] sm:!rounded-lg flex flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>{title ?? 'Browse directories'}</DialogTitle>
           <DialogDescription>

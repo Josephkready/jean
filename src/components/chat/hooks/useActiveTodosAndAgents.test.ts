@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { useChatStore } from '@/store/chat-store'
 import {
   codexAgentCodename,
   codexSubagentDetail,
@@ -346,17 +347,24 @@ describe('useActiveTodosAndAgents', () => {
     ])
   })
 
-  it('keeps earlier subagents visible after a later turn', () => {
+  it('removes subagents of earlier turns when a new prompt is sent', () => {
+    const user = (id: string) =>
+      ({
+        id,
+        role: 'user',
+        content: 'prompt',
+        tool_calls: [],
+      }) as unknown as ChatMessage
     const first = {
       id: 'assistant-1',
       role: 'assistant',
       content: '',
       tool_calls: [
-        toolCall('Agent', {
-          id: 'task-1',
-          description: 'Explore auth',
-          subagent_type: 'Explore',
-        }),
+        toolCall(
+          'Agent',
+          { id: 'task-1', description: 'Explore auth' },
+          'Report'
+        ),
       ],
     } as ChatMessage
     const second = {
@@ -366,19 +374,33 @@ describe('useActiveTodosAndAgents', () => {
       tool_calls: [] as ToolCall[],
     } as ChatMessage
 
-    const { result } = renderHook(() =>
-      useActiveTodosAndAgents({
-        activeSessionId: 'session-1',
-        isSending: false,
-        currentToolCalls: [],
-        lastAssistantMessage: second,
-        messages: [first, second],
-      })
+    const { result, rerender } = renderHook(
+      props =>
+        useActiveTodosAndAgents({
+          activeSessionId: 'session-1',
+          currentToolCalls: [],
+          lastAssistantMessage: first,
+          ...props,
+        }),
+      {
+        initialProps: {
+          isSending: false,
+          messages: [user('user-1'), first],
+        } as { isSending: boolean; messages: ChatMessage[] },
+      }
     )
-
     expect(result.current.activeAgents).toMatchObject([
-      { id: 'task-1', prompt: 'Explore auth', status: 'completed' },
+      { id: 'task-1', status: 'completed' },
     ])
+
+    rerender({ isSending: true, messages: [user('user-1'), first, user('u2')] })
+    expect(result.current.activeAgents).toEqual([])
+
+    rerender({
+      isSending: false,
+      messages: [user('user-1'), first, user('u2'), second],
+    })
+    expect(result.current.activeAgents).toEqual([])
   })
 
   it('keeps agents of a reopened running turn in progress', () => {
@@ -412,6 +434,40 @@ describe('useActiveTodosAndAgents', () => {
     // The run ended but the snapshot id was not refreshed yet
     rerender({ isSending: false })
     expect(result.current.activeAgents[1]?.status).toBe('completed')
+  })
+
+  beforeEach(() => {
+    useChatStore.setState({ dismissedAgentWidgetIds: {} })
+  })
+
+  it('keeps the panel dismissed while a prompt streams and after a remount', () => {
+    const first = toolCall('Agent', { id: 'task-1' }, 'Report A')
+    const second = toolCall('Agent', { id: 'task-2' }, 'Report B')
+    const done = [first, second]
+    const render = () =>
+      renderHook(
+        props =>
+          useActiveTodosAndAgents({
+            activeSessionId: 'session-1',
+            lastAssistantMessage: undefined,
+            ...props,
+          }),
+        { initialProps: { isSending: true, currentToolCalls: done } }
+      )
+    const { result, rerender, unmount } = render()
+    act(() => result.current.dismissAgentWidget())
+    expect(result.current.isAgentWidgetDismissed).toBe(true)
+
+    // Streaming reorders the list and drops an agent for a moment
+    rerender({ isSending: true, currentToolCalls: [second, first] })
+    expect(result.current.isAgentWidgetDismissed).toBe(true)
+    rerender({ isSending: true, currentToolCalls: [second] })
+    expect(result.current.isAgentWidgetDismissed).toBe(true)
+    rerender({ isSending: true, currentToolCalls: done })
+    expect(result.current.isAgentWidgetDismissed).toBe(true)
+
+    unmount()
+    expect(render().result.current.isAgentWidgetDismissed).toBe(true)
   })
 
   it('keeps the panel dismissed when the finished turn gets a new message id', () => {

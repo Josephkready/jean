@@ -6,9 +6,9 @@
 
 use super::args::{
     build_exec_args, build_forward_args, classify_health_failure, classify_ssh_failure,
-    decide_after_failure, failure_message, preview_forward_failure, preview_forward_spec, redact,
-    sanitize_detail, AfterFailure, FailureClass, ForwardSpec, DEFAULT_REMOTE_HOST,
-    DEFAULT_REMOTE_PORT, DEFAULT_SSH_PORT,
+    decide_after_failure, failure_message, null_known_hosts_file, preview_forward_failure,
+    preview_forward_spec, redact, sanitize_detail, ssh_config_path, AfterFailure, FailureClass,
+    ForwardSpec, DEFAULT_REMOTE_HOST, DEFAULT_REMOTE_PORT, DEFAULT_SSH_PORT,
 };
 use super::hostkey::{
     parse_keyscan, parse_ssh_g, trusted_fingerprint_matches, upsert_trusted_key, ScannedKey,
@@ -1270,6 +1270,11 @@ fn scan_host_key(host: &str, port: u16) -> Result<ScannedKey, String> {
     if let Some(parsed) = parse_keyscan(&stdout) {
         return Ok(parsed);
     }
+    // Some ssh-keyscan builds (Windows OpenSSH) offer KEX methods they cannot
+    // complete, e.g. sntrup761x25519-sha512. The ssh client negotiates correctly.
+    if let Some(parsed) = probe_host_key(host, port) {
+        return Ok(parsed);
+    }
     let stderr = sanitize_detail(&String::from_utf8_lossy(&output.stderr));
     if stderr.is_empty() {
         Err(format!("Could not read an SSH host key for {host}:{port}."))
@@ -1278,6 +1283,50 @@ fn scan_host_key(host: &str, port: u16) -> Result<ScannedKey, String> {
             "Could not read an SSH host key for {host}:{port}. {stderr}"
         ))
     }
+}
+
+/// Reads the host key with the ssh client: it records the key in a throwaway
+/// known_hosts file during key exchange, before authentication fails.
+fn probe_host_key(host: &str, port: u16) -> Option<ScannedKey> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let dir = std::env::temp_dir().join(format!("jean-hostkey-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let known_hosts = dir.join("known_hosts");
+    let result = jean_core::silent_command("ssh")
+        .args(["-F", "none", "-T", "-p", &port.to_string()])
+        .args(["-o", "BatchMode=yes"])
+        .args(["-o", "ConnectTimeout=5"])
+        .args(["-o", "StrictHostKeyChecking=accept-new"])
+        .args(["-o", "HashKnownHosts=no"])
+        .args([
+            "-o",
+            &format!("UserKnownHostsFile={}", ssh_config_path(&known_hosts)),
+        ])
+        .args([
+            "-o",
+            &format!("GlobalKnownHostsFile={}", null_known_hosts_file()),
+        ])
+        .args([
+            "-o",
+            "HostKeyAlgorithms=ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256,ssh-rsa",
+        ])
+        .args(["-o", "PreferredAuthentications=publickey"])
+        .args(["-o", "IdentitiesOnly=yes"])
+        .args(["-o", "IdentityAgent=none"])
+        .args(["-o", "IdentityFile=none"])
+        .args(["-l", "jean-hostkey-probe", "--", host, "exit"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .and_then(|_| std::fs::read_to_string(&known_hosts).ok())
+        .and_then(|text| parse_keyscan(&text));
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1525,6 +1574,22 @@ mod tests {
         );
     }
 
+    /// Opens a preview forward on a free port. A child process that a parallel
+    /// test spawns can inherit the probe socket of `free_port` for a moment, so
+    /// the bind check of the supervisor can still see the port in use. Then try
+    /// the next port.
+    fn forward_on_free_port(
+        supervisor: &SshTunnelSupervisor,
+    ) -> (u16, Result<PreviewForwardPayload, String>) {
+        loop {
+            let port = free_port();
+            match supervisor.ensure_preview_forward(PROFILE, port) {
+                Err(error) if error.contains("already in use") => continue,
+                result => return (port, result),
+            }
+        }
+    }
+
     fn free_port() -> u16 {
         // Ephemeral ports (typically 32768–60999) can stay busy for a moment
         // after a probe bind. Preview tests use a private range instead.
@@ -1608,11 +1673,8 @@ time.sleep(30)
     fn preview_reports_ssh_auth_failure() {
         let harness = harness("#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n");
         seed_ready(&harness.supervisor, 41_000);
-        let port = free_port();
-        let error = harness
-            .supervisor
-            .ensure_preview_forward(PROFILE, port)
-            .unwrap_err();
+        let (_, result) = forward_on_free_port(&harness.supervisor);
+        let error = result.unwrap_err();
         assert!(
             error.contains("authentication"),
             "error should explain the SSH failure: {error}"
@@ -1626,11 +1688,8 @@ time.sleep(30)
         let log = dir.path().join("ssh.log");
         let harness = harness(&listening_script(&log));
         seed_ready(&harness.supervisor, 41_000);
-        let port = free_port();
-        let first = harness
-            .supervisor
-            .ensure_preview_forward(PROFILE, port)
-            .unwrap();
+        let (port, first) = forward_on_free_port(&harness.supervisor);
+        let first = first.unwrap();
         assert_eq!(first.local_port, port);
         assert_eq!(first.remote_port, port);
         std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();

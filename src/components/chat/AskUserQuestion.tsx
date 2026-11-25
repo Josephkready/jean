@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/collapsible'
 import { ChevronRight, CheckCircle2, Circle } from '@/components/icons/reicon'
 import { cn } from '@/lib/utils'
+import { ApprovalCard } from './ApprovalCard'
 import { formatShortcutDisplay, DEFAULT_KEYBINDINGS } from '@/types/keybindings'
 import type { Question, QuestionAnswer } from '@/types/chat'
 
@@ -45,6 +46,8 @@ interface AskUserQuestionProps {
   toolOutput?: string
   /** Disable Answer/Skip while the run that asked is still ending */
   submitDisabled?: boolean
+  /** Submit as soon as the user picks a single-choice option (no Answer button) */
+  submitOnSelect?: boolean
 }
 
 /**
@@ -63,6 +66,7 @@ export function AskUserQuestion({
   isSkipped = false,
   toolOutput,
   submitDisabled = false,
+  submitOnSelect = false,
 }: AskUserQuestionProps) {
   // Local state for answers
   // Structure: answers[questionIndex] = { selectedOptions: [0, 2], customText: 'foo' }
@@ -188,11 +192,18 @@ export function AskUserQuestion({
   )
 
   // Submit answers
-  const handleSubmit = useCallback(() => {
-    const answersArray = Array.from(answers.values())
-    setLocalSubmittedAnswers(answersArray) // Preserve for display when transitioning to read-only
-    onSubmit(toolCallId, answersArray)
-  }, [toolCallId, answers, onSubmit])
+  const submitAnswers = useCallback(
+    (answersArray: QuestionAnswer[]) => {
+      setLocalSubmittedAnswers(answersArray) // Preserve for display when transitioning to read-only
+      onSubmit(toolCallId, answersArray)
+    },
+    [toolCallId, onSubmit]
+  )
+
+  const handleSubmit = useCallback(
+    () => submitAnswers(Array.from(answers.values())),
+    [answers, submitAnswers]
+  )
 
   // Listen for keyboard shortcut event (CMD+Enter)
   const onAnswerQuestion = useEffectEvent(() => {
@@ -255,7 +266,7 @@ export function AskUserQuestion({
         onOpenChange={setIsExpanded}
         className="min-w-0"
       >
-        <div className="my-2 min-w-0 rounded border border-muted bg-muted/30 font-mono text-sm">
+        <div className="my-2 min-w-0 rounded-lg border border-border bg-muted/30 text-sm">
           <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted/50">
             <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
             <span className="truncate font-medium">{getAnswerSummary()}</span>
@@ -267,7 +278,7 @@ export function AskUserQuestion({
             />
           </CollapsibleTrigger>
           <CollapsibleContent>
-            <div className="border-t border-muted px-4 py-3">
+            <div className="border-t border-border px-4 py-3">
               {renderQuestionContent()}
             </div>
           </CollapsibleContent>
@@ -297,7 +308,7 @@ export function AskUserQuestion({
             <div key={qIndex}>
               {/* Header (optional) */}
               {question.header && (
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <div className="mb-2 text-xs font-medium text-muted-foreground">
                   {question.header}
                 </div>
               )}
@@ -384,9 +395,18 @@ export function AskUserQuestion({
                 ) : (
                   <RadioGroup
                     value={answer?.selectedOptions[0]?.toString() ?? ''}
-                    onValueChange={value =>
-                      selectOption(qIndex, parseInt(value, 10))
-                    }
+                    onValueChange={value => {
+                      const optionIndex = parseInt(value, 10)
+                      if (submitOnSelect)
+                        submitAnswers([
+                          {
+                            questionIndex: qIndex,
+                            selectedOptions: [optionIndex],
+                          },
+                        ])
+                      else selectOption(qIndex, optionIndex)
+                    }}
+                    disabled={submitOnSelect && submitDisabled}
                     className="space-y-2.5"
                   >
                     {question.options.map((option, oIndex) => (
@@ -426,8 +446,8 @@ export function AskUserQuestion({
                 {readOnly ? (
                   answer?.customText ? (
                     <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-foreground">
-                      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-success">
-                        Custom Answer
+                      <div className="mb-1 text-xs font-medium text-success">
+                        Custom answer
                       </div>
                       <div className="italic">
                         &ldquo;{answer.customText}&rdquo;
@@ -446,7 +466,7 @@ export function AskUserQuestion({
                       value={answers.get(qIndex)?.customText ?? ''}
                       onChange={e => updateCustomText(qIndex, e.target.value)}
                       disabled={readOnly}
-                      className="cursor-text font-mono text-base select-text bg-white dark:bg-input md:text-sm"
+                      className="cursor-text text-base select-text bg-white dark:bg-input md:text-sm"
                     />
                   </div>
                 ) : null}
@@ -454,18 +474,36 @@ export function AskUserQuestion({
             </div>
           )
         })}
+      </div>
+    )
+  }
 
-        {/* Submit/Skip buttons (only if not read-only) */}
-        {!readOnly && (
-          <div className="flex justify-start gap-2 pt-2">
-            <Button size="sm" onClick={handleSubmit} disabled={submitDisabled}>
-              Answer
-              <Kbd className="ml-1.5 h-4 text-[10px] bg-primary-foreground/20 text-primary-foreground">
-                {formatShortcutDisplay(
-                  DEFAULT_KEYBINDINGS.approve_plan ?? 'mod+enter'
-                )}
-              </Kbd>
-            </Button>
+  const answerOnSelect = submitOnSelect && !questions.some(q => q.multiSelect)
+
+  // Default: render full interactive question form
+  return (
+    <ApprovalCard
+      className="min-w-0 cursor-default select-none"
+      actions={
+        answerOnSelect && !onSkip ? undefined : (
+          <>
+            {!answerOnSelect && (
+              <Button
+                size="sm"
+                onClick={handleSubmit}
+                disabled={submitDisabled}
+              >
+                Answer
+                <Kbd
+                  modHint
+                  className="ml-1.5 h-4 bg-primary-foreground/20 text-2xs text-primary-foreground"
+                >
+                  {formatShortcutDisplay(
+                    DEFAULT_KEYBINDINGS.approve_plan ?? 'mod+enter'
+                  )}
+                </Kbd>
+              </Button>
+            )}
             {onSkip && (
               <Button
                 size="sm"
@@ -477,16 +515,11 @@ export function AskUserQuestion({
                 Skip
               </Button>
             )}
-          </div>
-        )}
-      </div>
-    )
-  }
-
-  // Default: render full interactive question form
-  return (
-    <div className="my-3 min-w-0 cursor-default rounded border border-muted bg-muted/30 p-4 font-mono text-sm select-none">
+          </>
+        )
+      }
+    >
       {renderQuestionContent()}
-    </div>
+    </ApprovalCard>
   )
 }

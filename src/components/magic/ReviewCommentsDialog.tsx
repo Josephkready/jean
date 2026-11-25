@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -237,7 +238,7 @@ function ReviewStateBadge({ state }: { state: string }) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-2xs font-medium ${
         isApproved
           ? 'bg-success/15 text-success'
           : isChangesRequested
@@ -327,10 +328,12 @@ export function ReviewCommentsDialog() {
     try {
       const [inlineResult, prDetail] = await Promise.all([
         invoke<GitHubReviewComment[]>('get_pr_review_comments', {
+          worktreeId: worktree?.id,
           projectPath: worktreePath,
           prNumber,
         }),
         invoke<GitHubPullRequestDetail>('get_github_pr', {
+          worktreeId: worktree?.id,
           projectPath: worktreePath,
           prNumber,
         }),
@@ -381,7 +384,7 @@ export function ReviewCommentsDialog() {
       setError(String(err))
       setPhase('select')
     }
-  }, [worktreePath, prNumber, resetTransientState])
+  }, [worktree?.id, worktreePath, prNumber, resetTransientState])
 
   // Fetch when modal opens
   useEffect(() => {
@@ -492,10 +495,11 @@ export function ReviewCommentsDialog() {
   )
 
   // Reset selection cursor when the visible list identity changes
+  const onFocusFirstRow = useEffectEvent(() => focusActiveRow(0))
   useEffect(() => {
     setActiveIndex(0)
-    requestAnimationFrame(() => focusActiveRow(0))
-  }, [tab, inlineFilter, focusActiveRow])
+    requestAnimationFrame(() => onFocusFirstRow())
+  }, [tab, inlineFilter])
 
   const toggleAll = useCallback(() => {
     if (tab === 'inline') {
@@ -525,7 +529,7 @@ export function ReviewCommentsDialog() {
     filteredInlineIndexes,
     selected,
     conversationSelected.size,
-    conversationItems.length,
+    conversationItems,
   ])
 
   const buildPrompt = useCallback(
@@ -751,11 +755,10 @@ export function ReviewCommentsDialog() {
     <Dialog open={reviewCommentsModalOpen} onOpenChange={handleOpenChange}>
       <DialogContent
         onKeyDown={handleDialogKeyDown}
-        className="!fixed !inset-0 !translate-x-0 !translate-y-0 !w-screen !h-dvh !max-w-screen !max-h-none !rounded-none flex flex-col overflow-hidden sm:!inset-auto sm:!top-[50%] sm:!left-[50%] sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:!w-[95vw] sm:!h-[90vh] sm:!max-w-none sm:!rounded-lg"
+        className="!fixed !inset-0 !w-screen !h-dvh !max-w-screen !max-h-none !rounded-none flex flex-col overflow-hidden sm:!w-[calc(100vw-4rem)] sm:!h-[85vh] sm:!max-w-none sm:!rounded-lg"
       >
         <DialogHeader className="pr-10 sm:pr-0">
-          <DialogTitle className="flex items-center gap-2">
-            <MessageSquare className="size-4" />
+          <DialogTitle>
             PR Comments {prNumber ? `#${prNumber}` : ''}
           </DialogTitle>
         </DialogHeader>
@@ -829,18 +832,6 @@ export function ReviewCommentsDialog() {
                 <span>
                   {activeSelectedCount} of {activeItemsLength} selected
                 </span>
-                <span className="hidden items-center gap-1 sm:inline-flex">
-                  <Kbd className="h-4 min-w-0 px-1 text-[10px]">↑/↓</Kbd>
-                  move
-                </span>
-                <span className="hidden items-center gap-1 sm:inline-flex">
-                  <Kbd className="h-4 min-w-0 px-1 text-[10px]">↵</Kbd>
-                  expand
-                </span>
-                <span className="hidden items-center gap-1 sm:inline-flex">
-                  <Kbd className="h-4 min-w-0 px-1 text-[10px]">Space</Kbd>
-                  select
-                </span>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
                 {tab === 'inline' && comments.length > 0 && (
@@ -889,6 +880,7 @@ export function ReviewCommentsDialog() {
                     const isActive = safeActiveIndex === rowIndex
 
                     return (
+                      // react-doctor-disable-next-line react-doctor/no-static-element-interactions -- pointer mirror of handleDialogKeyDown roving arrow navigation
                       <div
                         key={index}
                         ref={node => {
@@ -934,13 +926,13 @@ export function ReviewCommentsDialog() {
                                   )}
                                 </p>
                                 {comment.isResolved && (
-                                  <span className="inline-flex items-center gap-1 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium bg-success/15 text-success">
+                                  <span className="inline-flex items-center gap-1 shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium bg-success/15 text-success">
                                     <CheckCircle2 className="size-2.5" />
                                     Resolved
                                   </span>
                                 )}
                                 {comment.isOutdated && (
-                                  <span className="inline-flex items-center gap-1 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium bg-muted text-muted-foreground">
+                                  <span className="inline-flex items-center gap-1 shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium bg-muted text-muted-foreground">
                                     Outdated
                                   </span>
                                 )}
@@ -1031,6 +1023,7 @@ export function ReviewCommentsDialog() {
                         : `review:${item.data.author.login}:${item.data.submittedAt ?? ''}:${item.data.state}:${body.slice(0, 80)}`
 
                     return (
+                      // react-doctor-disable-next-line react-doctor/no-static-element-interactions -- pointer mirror of handleDialogKeyDown roving arrow navigation
                       <div
                         key={conversationKey}
                         ref={node => {
@@ -1085,7 +1078,7 @@ export function ReviewCommentsDialog() {
                                 {item.kind === 'review' && (
                                   <ReviewStateBadge state={item.data.state} />
                                 )}
-                                <span className="inline-flex items-center gap-1 text-muted-foreground/60 text-[10px]">
+                                <span className="inline-flex items-center gap-1 text-muted-foreground/60 text-2xs">
                                   <CalendarClock className="size-3" />
                                   {date}
                                 </span>
@@ -1149,9 +1142,9 @@ export function ReviewCommentsDialog() {
                   <MessageSquare className="size-3.5 mr-1.5" />
                 )}
                 Send to Chat ({activeSelectedCount})
-                <KbdGroup className="ml-1.5 hidden sm:inline-flex">
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">⇧</Kbd>
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">⌘↵</Kbd>
+                <KbdGroup modHint className="ml-1.5">
+                  <Kbd>⇧</Kbd>
+                  <Kbd>⌘↵</Kbd>
                 </KbdGroup>
               </Button>
               <Button
@@ -1165,9 +1158,9 @@ export function ReviewCommentsDialog() {
                   <MessagesSquare className="size-3.5 mr-1.5" />
                 )}
                 Send Separately ({activeSelectedCount})
-                <KbdGroup className="ml-1.5 hidden sm:inline-flex">
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">⌘</Kbd>
-                  <Kbd className="h-4 min-w-4 px-1 text-[10px]">↵</Kbd>
+                <KbdGroup modHint className="ml-1.5">
+                  <Kbd>⌘</Kbd>
+                  <Kbd>↵</Kbd>
                 </KbdGroup>
               </Button>
             </div>

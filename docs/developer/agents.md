@@ -2,8 +2,10 @@
 
 Agents are persistent AI workers (Jean, the coordinator, plus agents the user
 creates) that manage projects through the Jean MCP tools. They run on the
-backend, so they keep working with no client open. The feature is experimental:
-**Settings → Experimental → Agents** (`agents_enabled`, default off).
+backend, so they keep working with no client open. The feature is experimental and closed
+to new users: **Settings → General → Experimental → Agents** (`agents_enabled`,
+default off) shows only when `agents_enabled` is already true. Users who turn
+it off cannot turn it on again from the UI.
 
 Code: `jean-core/src/agents/` (backend), `src/components/agents/` and
 `src/services/agents.ts` (UI).
@@ -19,7 +21,7 @@ SQLite). Migrations are a list in `agents/db.rs` (`MIGRATIONS`, tracked with
 | `agents` | Definitions. Jean (`jean`, built-in) is seeded on every start. |
 | `delegations` | "Session S works for agent A". `origin_session_id` = the agent session that sent the work. Status: `active`, `waiting`, `done`, `failed`, `cancelled`. |
 | `events` | Queued updates for an agent (`delegation`, `schedule`, `approval`, `message`). `target_session_id` = where it goes; empty = a new task. |
-| `tasks` | One row per task session (background work): status, one-line result, archive state. |
+| `tasks` | One row per task session (background work): status, one-line result, closed state (`archived_at`). |
 | `notifications` | `notify_user` messages (inbox, toast). |
 | `wakes` | One row per wake-up, for the hourly budget (`max_wakes_per_hour`). |
 | `schedules` | One-shot, interval (`every_secs`), cron, and event routines. |
@@ -38,7 +40,7 @@ no worktree record. Each agent has two:
 
 | Worktree ID | Holds |
 |---|---|
-| `__jean_agent__` / `__agent_<id>__` | The chat with the user (current chat + archived old chats) |
+| `__jean_agent__` / `__agent_<id>__` | The chat with the user (current chat + closed old chats) |
 | `__agent_tasks_<id>__` | Task sessions: one per schedule run, agent request, or follow-up without an origin |
 
 Both run in the agent's scratch folder: `{app_data}/jean-agent` or
@@ -136,13 +138,13 @@ tick (every 5s, or nudge())
   │    event routines are queued by listeners, not by this tick
   ├─ deliver (not paused, within the hourly budget):
   │    ├─ target set ──► "[Jean agent update]" into that session when idle
-  │    │                 (an archived old chat forwards to the current chat)
+  │    │                 (a closed old chat forwards to the current chat)
   │    └─ no target ──► new task session (max 2 running per agent)
   └─ maintenance (every 60s):
-       ├─ chat ≥ 40 messages and idle 10 min ──► new chat, old one archived,
+       ├─ chat ≥ 40 messages and idle 10 min ──► new chat, old one closed,
        │                                        end saved as carry_over, shorter
        │                                        copy stored as a journal entry
-       └─ finished tasks: archive after 3 days, delete 30 days later
+       └─ finished tasks: close after 3 days, purge 30 days later
 ```
 
 Test overrides (environment, for isolated test servers only):
@@ -217,7 +219,7 @@ delivered early. These routines do not add a hop. If the woken task calls
 `message_agent`, that call still uses `MAX_AGENT_HOPS`.
 
 The same occurrence is stored in `schedule_event_keys`, so a merged PR does
-not queue twice. Session and archive keys include the second they happened,
+not queue twice. Session keys include the second they happened,
 so each run of a session is a new occurrence. Changing the event type clears those
 keys. Pausing does not.
 
@@ -225,7 +227,6 @@ keys. Pausing does not.
 |---|---|---|
 | `session_finished` | `chat:done` | The session belongs to an agent (chat or task) or is an active delegation. Those already wake their agent, and a routine on them would loop. |
 | `session_failed` | `chat:error` | Same exclusion. `chat:cancelled` is not a trigger. |
-| `worktree_archived` | `worktree:archived` | The payload has no worktree id. |
 | `pr_merged` | `pr:status-update` whose `state` is `merged` | The same worktree and PR number already woke this routine. Open and closed PRs do not match. |
 | `approval_resolved` | `decide_approval`, after the result is queued back to the requesting session | The approval id already woke this routine. |
 
@@ -275,7 +276,10 @@ When a chat rotates (40 messages and 10 minutes idle), the end is still saved as
 
 Agent-only tools: `schedule_create/update/list/cancel`, `memory_save/search/update/forget/supersede`, `journal_add/search`,
 `message_agent`, `notify_user` (emits `agents:notification` for the toast),
-`task_list`. The caller is identified by `JEAN_MCP_SESSION`. Codex threads
+`set_status`, `task_list`. `set_status` returns only `shown`: the agent chat
+reads the latest call from the streamed tool calls and shows its 2-5 word text
+in the status line (`agent-status.ts`). A Jean-tool allowlist cannot
+block it. The caller is identified by `JEAN_MCP_SESSION`. Codex threads
 get it per thread through a config override
 (`jean_mcp_config::codex_session_config_override`), because the persistent
 `~/.codex/config.toml` entry only has a fixed label.
@@ -291,8 +295,8 @@ a line opens the conversation dialog (`AgentMessageLink.tsx`). For
 task created after the send (`findRequestTask` in `agent-messages.ts`).
 
 **Approval gate:** `delete_worktree`, `permanently_delete_worktree`,
-`push_worktree`, `merge_pull_request`, `create_pull_request` and
-`remove_project` called from an
+`push_worktree`, `merge_pull_request`, `create_pull_request`,
+`remove_project` and `set_connector` called from an
 agent session are stored in `approvals` and not run. When the user approves,
 `jean_mcp_core::run_approved_tool` runs the same call, and the result goes to
 the agent as an event. The gate is in `call_tool`, so it works for every
@@ -445,7 +449,7 @@ config). The file readers are:
 |---|---|---|
 | Claude | `~/.claude.json` (`mcpServers` and `projects[path].mcpServers`), `<worktree>/.mcp.json` | `claude mcp list` for `claude.ai` and `plugin:` names |
 | Codex | `~/.codex/config.toml` and `<worktree>/.codex/config.toml` `[mcp_servers.*]` | app-server `mcpServerStatus/list` |
-| OpenCode | project, home, and `~/.config/opencode` `opencode.json` / `.jsonc` `mcp` object | `opencode mcp list` |
+| OpenCode | project, home, and `~/.config/opencode` `opencode.json` / `.jsonc`: `mcp` object (1.x) and `mcp.servers` (2.x) | `opencode mcp list` |
 | Cursor | `~/.cursor/mcp.json` and `<worktree>/.cursor/mcp.json` | `cursor-agent mcp list` |
 | Grok | `~/.grok/config.toml` and project `.grok/config.toml`, plus Claude, Cursor, and `.mcp.json` compat files | `grok mcp doctor --json` |
 | Kimi | `~/.kimi-code/mcp.json` and project `.kimi-code/mcp.json` | none |
@@ -528,6 +532,16 @@ leave those tools off when the limit must hold. The
 read-only agent tool `list_connectors` reports the saved limit, the discovered
 servers, and whether this backend applied the limit. It does not change
 anything and does not return server config (that can hold tokens).
+
+`set_connector` (Jean MCP, needs approval) turns one discovered server on or
+off in the list a settings page edits: `global` (preferences
+`default_enabled_mcp_servers`), `project` (`enabled_mcp_servers`) or `agent`
+(the connector limit above). It saves through `patch_preferences`,
+`update_project_settings` or `update_agent`, so the UI gets the same cache
+update as a UI save. Enable on a project or agent with no saved list starts a
+list with only that server, like the settings switches. Jean does not store
+server definitions (command, URL, env, headers); each backend CLI owns them.
+The tool takes only backend and server name and never returns server config.
 
 The settings section is **Connectors and tools** on the agent page. With no
 saved MCP limit the switches are off (nothing is selected). Turning one on

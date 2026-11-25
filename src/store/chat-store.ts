@@ -16,6 +16,7 @@ import {
   type ContentBlock,
   type Todo,
   type QueuedMessage,
+  type QueuedMessageEdit,
   type PermissionDenial,
   type CodexCommandApprovalRequest,
   type CodexPermissionRequest,
@@ -24,6 +25,7 @@ import {
   type CodexMcpElicitationRequest,
   type CodexDynamicToolCallRequest,
   type ExecutionMode,
+  type RunState,
   type SendMessageArgs,
   type PermissionMode,
   type LabelData,
@@ -69,6 +71,210 @@ function hasActiveStreamingState(
     (state.streamingContentBlocks[sessionId]?.length ?? 0) > 0 ||
     (state.activeToolCalls[sessionId]?.length ?? 0) > 0
   )
+}
+
+/** Backend-owned facts about one session's run, as the store consumes them. */
+export interface RunStateSnapshotOptions {
+  /**
+   * Sessions this snapshot is authoritative for. An owned session that is
+   * sending here but absent from the snapshot finished while this client was
+   * not listening. Omit when the snapshot covers only requested ids.
+   */
+  ownsSession?: (sessionId: string) => boolean
+  /**
+   * When the snapshot was requested. A local send that started after that is
+   * newer than the snapshot and is left alone; the backend's own
+   * `chat:sending` and `chat:done` settle it.
+   */
+  requestedAt: number
+}
+
+type RunStateSlice = Pick<
+  ChatUIState,
+  | 'streamingContents'
+  | 'streamingContentBlocks'
+  | 'streamingReplayContentBlocks'
+  | 'activeToolCalls'
+  | 'sendingSessionIds'
+  | 'sendStartedAt'
+  | 'localSendIds'
+  | 'completedDurations'
+  | 'streamingPlanApprovals'
+  | 'executingModes'
+  | 'waitingForInputSessionIds'
+  | 'runStateVersions'
+>
+
+/** The session's run is over: drop every live-turn indicator. */
+function withRunEnded(state: RunStateSlice, sessionId: string): RunStateSlice {
+  if (
+    !(sessionId in state.sendingSessionIds) &&
+    !hasActiveStreamingState(state, sessionId) &&
+    !(sessionId in state.executingModes) &&
+    !(sessionId in state.sendStartedAt)
+  ) {
+    return state
+  }
+  const sendStarted = state.sendStartedAt[sessionId] ?? 0
+  const { [sessionId]: _sc, ...streamingContents } = state.streamingContents
+  const { [sessionId]: _sb, ...streamingContentBlocks } =
+    state.streamingContentBlocks
+  const { [sessionId]: _srb, ...streamingReplayContentBlocks } =
+    state.streamingReplayContentBlocks
+  const { [sessionId]: _tc, ...activeToolCalls } = state.activeToolCalls
+  const { [sessionId]: _ss, ...sendingSessionIds } = state.sendingSessionIds
+  const { [sessionId]: _sp, ...streamingPlanApprovals } =
+    state.streamingPlanApprovals
+  const { [sessionId]: _em, ...executingModes } = state.executingModes
+  const { [sessionId]: _sa, ...sendStartedAt } = state.sendStartedAt
+  const { [sessionId]: _ls, ...localSendIds } = state.localSendIds
+  return {
+    ...state,
+    streamingContents,
+    streamingContentBlocks,
+    streamingReplayContentBlocks,
+    activeToolCalls,
+    sendingSessionIds,
+    streamingPlanApprovals,
+    executingModes,
+    sendStartedAt,
+    localSendIds,
+    completedDurations:
+      sendStarted > 0
+        ? { ...state.completedDurations, [sessionId]: Date.now() - sendStarted }
+        : state.completedDurations,
+  }
+}
+
+/** The session's run is live on the backend: show it as sending. */
+function withRunLive(
+  state: RunStateSlice,
+  sessionId: string,
+  startedAtMs: number | undefined,
+  executionMode: string | undefined
+): RunStateSlice {
+  let next = state
+  if (next.localSendIds[sessionId]) {
+    const { [sessionId]: _ls, ...localSendIds } = next.localSendIds
+    next = { ...next, localSendIds }
+  }
+  if (!next.sendingSessionIds[sessionId]) {
+    const { [sessionId]: _done, ...completedDurations } =
+      next.completedDurations
+    next = {
+      ...next,
+      sendingSessionIds: { ...next.sendingSessionIds, [sessionId]: true },
+      sendStartedAt: {
+        ...next.sendStartedAt,
+        [sessionId]: startedAtMs ?? next.sendStartedAt[sessionId] ?? Date.now(),
+      },
+      completedDurations,
+    }
+  } else if (startedAtMs != null && next.sendStartedAt[sessionId] == null) {
+    next = {
+      ...next,
+      sendStartedAt: { ...next.sendStartedAt, [sessionId]: startedAtMs },
+    }
+  }
+  const mode = toExecutionMode(executionMode)
+  if (mode && next.executingModes[sessionId] !== mode) {
+    next = {
+      ...next,
+      executingModes: { ...next.executingModes, [sessionId]: mode },
+    }
+  }
+  return next
+}
+
+function toExecutionMode(mode: string | undefined): ExecutionMode | undefined {
+  return mode === 'plan' || mode === 'build' || mode === 'yolo'
+    ? mode
+    : undefined
+}
+
+function withWaitingForInput(
+  state: RunStateSlice,
+  sessionId: string,
+  waiting: boolean
+): RunStateSlice {
+  if (!!state.waitingForInputSessionIds[sessionId] === waiting) return state
+  if (waiting) {
+    return {
+      ...state,
+      waitingForInputSessionIds: {
+        ...state.waitingForInputSessionIds,
+        [sessionId]: true,
+      },
+    }
+  }
+  const { [sessionId]: _w, ...waitingForInputSessionIds } =
+    state.waitingForInputSessionIds
+  return { ...state, waitingForInputSessionIds }
+}
+
+/**
+ * Fold one backend run state into the slice. Returns the same object when
+ * the state is older than what this client already applied.
+ */
+function withRunState(
+  state: RunStateSlice,
+  runState: RunState,
+  requestedAt: number
+): RunStateSlice {
+  const { sessionId } = runState
+  const known = state.runStateVersions[sessionId]
+  if (known != null && runState.statusVersion < known) return state
+  let next =
+    known === runState.statusVersion
+      ? state
+      : {
+          ...state,
+          runStateVersions: {
+            ...state.runStateVersions,
+            [sessionId]: runState.statusVersion,
+          },
+        }
+  if (runState.status === 'running') {
+    next = withRunLive(
+      next,
+      sessionId,
+      runState.startedAt != null ? runState.startedAt * 1000 : undefined,
+      runState.executionMode
+    )
+  } else if (snapshotMayEndRun(next, sessionId, requestedAt)) {
+    next = withRunEnded(next, sessionId)
+  }
+  return withWaitingForInput(next, sessionId, runState.waitingForInput)
+}
+
+/**
+ * How long a local send may go unacknowledged before a snapshot may end it.
+ * The backend's versioned `chat:user-turn` follows the send invoke within
+ * moments; this only has to outlast the per-session setup awaits that run
+ * between `addSendingSession` and that invoke.
+ */
+const LOCAL_SEND_ACK_GRACE_MS = 10_000
+
+/**
+ * A snapshot taken before this client's send started, or for a send the
+ * backend has not acknowledged yet, says nothing about that send. Streamed
+ * output or a versioned event is the acknowledgement; until one arrives the
+ * backend may simply not have received the prompt.
+ */
+function snapshotMayEndRun(
+  state: RunStateSlice,
+  sessionId: string,
+  requestedAt: number
+): boolean {
+  const sendStarted = state.sendStartedAt[sessionId] ?? 0
+  if (
+    state.localSendIds[sessionId] &&
+    !hasActiveStreamingState(state, sessionId) &&
+    requestedAt - sendStarted < LOCAL_SEND_ACK_GRACE_MS
+  ) {
+    return false
+  }
+  return sendStarted <= requestedAt
 }
 
 function compactReplayBlocks(blocks: ContentBlock[]): ContentBlock[] {
@@ -122,12 +328,20 @@ interface ChatUIState {
   // Set of session IDs currently sending (supports multiple concurrent sessions)
   sendingSessionIds: Record<string, boolean>
 
+  // Highest backend run-state version applied per session. Events and
+  // snapshots carrying a lower version are stale and ignored.
+  runStateVersions: Record<string, number>
+
   // Session IDs whose AI-generated names are pending
   namingSessionIds: Record<string, boolean>
 
   // Timestamp of last addSendingSession call per session — used to protect new sends
   // from stale completion events arriving from a previous cancelled run
   sendStartedAt: Record<string, number>
+
+  // Sessions this client started a send for that the backend has not yet
+  // reported as running. A run-state snapshot never ends these.
+  localSendIds: Record<string, true>
 
   // Duration (ms) of the last completed run per session — set by completeSession
   completedDurations: Record<string, number>
@@ -186,7 +400,7 @@ interface ChatUIState {
   // Pending/fired/cancelled ScheduleWakeup entries keyed by tool_call_id
   // so ToolCallInline can render a live countdown + status indicator.
   scheduledWakeups: Record<string, ScheduledWakeupState>
-  // Session ownership for scheduled wakeups, allowing close/archive cleanup.
+  // Session ownership for scheduled wakeups, allowing close cleanup.
   scheduledWakeupSessionIds: Record<string, string>
 
   // Answered questions per session (to make them read-only after answering)
@@ -197,6 +411,10 @@ interface ChatUIState {
 
   // Error state per session (for inline error display)
   errors: Record<string, string | null>
+
+  // Sessions whose queue is paused after a provider rejection (usage limit,
+  // auth, API error). The backend holds the queue until a turn succeeds.
+  queueHeld: Record<string, boolean>
 
   // Last sent message per session (for restoring on error)
   lastSentMessages: Record<string, string>
@@ -243,6 +461,9 @@ interface ChatUIState {
 
   // Message queues per session (FIFO - messages waiting to be sent)
   messageQueues: Record<string, QueuedMessage[]>
+
+  // Queued message currently loaded into the composer for editing (per session)
+  editingQueuedMessageIds: Record<string, string>
 
   // Execution mode the currently-executing prompt was sent with (per session)
   executingModes: Record<string, ExecutionMode>
@@ -296,17 +517,17 @@ interface ChatUIState {
   // Pending plan message IDs per session (persisted)
   pendingPlanMessageIds: Record<string, string | null>
 
-  // Sessions currently generating context in the background
-  savingContext: Record<string, boolean>
-
   // Sessions where user skipped questions (auto-skip all subsequent questions)
   skippedQuestionSessions: Record<string, boolean>
 
   // Sessions where the user expanded the Subagents panel (collapsed by default)
   expandedAgentWidgetSessions: Record<string, boolean>
 
-  // Sessions where the user collapsed the Queued prompts panel (expanded by default)
-  collapsedQueuedPromptsSessions: Record<string, boolean>
+  // Subagent ids the user dismissed from the Subagents panel, per session
+  dismissedAgentWidgetIds: Record<string, string[]>
+
+  // Sessions where the user expanded the Queued prompts panel (collapsed by default)
+  expandedQueuedPromptsSessions: Record<string, boolean>
 
   // Worktree loading operations (commit, pr, review, merge, pull)
   worktreeLoadingOperations: Record<string, string | null>
@@ -419,7 +640,15 @@ interface ChatUIState {
   getWorktreePath: (worktreeId: string) => string | undefined
 
   // Actions - Session-based sending state
-  addSendingSession: (sessionId: string, startTime?: number) => void
+  /**
+   * `local` is false when the run was not started by this client (another
+   * client's send, a resumed run): snapshots may then end it at once.
+   */
+  addSendingSession: (
+    sessionId: string,
+    startTime?: number,
+    local?: boolean
+  ) => void
   removeSendingSession: (sessionId: string) => void
   isSending: (sessionId: string) => boolean
   setSessionNaming: (sessionId: string, isNaming: boolean) => void
@@ -561,10 +790,12 @@ interface ChatUIState {
   setQuestionsSkipped: (sessionId: string, skipped: boolean) => void
   areQuestionsSkipped: (sessionId: string) => boolean
   setAgentWidgetExpanded: (sessionId: string, expanded: boolean) => void
-  setQueuedPromptsCollapsed: (sessionId: string, collapsed: boolean) => void
+  dismissAgentWidget: (sessionId: string, agentIds: string[]) => void
+  setQueuedPromptsExpanded: (sessionId: string, expanded: boolean) => void
 
   // Actions - Error handling (session-based)
   setError: (sessionId: string, error: string | null) => void
+  setQueueHeld: (sessionId: string, held: boolean) => void
   setLastSentMessage: (sessionId: string, message: string) => void
   clearLastSentMessage: (sessionId: string) => void
   setLastSentArgs: (sessionId: string, args: SendMessageArgs) => void
@@ -648,8 +879,11 @@ interface ChatUIState {
   updateQueuedMessage: (
     sessionId: string,
     messageId: string,
-    message: string
+    edit: QueuedMessageEdit
   ) => void
+  /** Load a queued message (text + attachments) into the composer to edit it */
+  startEditingQueuedMessage: (sessionId: string, message: QueuedMessage) => void
+  stopEditingQueuedMessage: (sessionId: string) => void
   moveQueuedMessageFront: (sessionId: string, messageId: string) => void
   clearQueue: (sessionId: string) => void
   getQueueLength: (sessionId: string) => number
@@ -739,6 +973,26 @@ interface ChatUIState {
       }
     | undefined
 
+  // Actions - Backend run state (the backend is the source of truth)
+  /**
+   * Record a versioned run-state event. Returns false when the event is older
+   * than the version already applied, so the caller drops it. Unversioned
+   * events (no `version`) are always accepted.
+   */
+  acceptRunStateVersion: (
+    sessionId: string,
+    version: number | null | undefined
+  ) => boolean
+  /**
+   * Reconcile sending/streaming/waiting indicators from a backend snapshot.
+   * Returns the sessions whose run it ended while streamed output was still
+   * on screen; the caller refetches those so the persisted reply replaces it.
+   */
+  applyRunStateSnapshot: (
+    states: RunState[],
+    options: RunStateSnapshotOptions
+  ) => string[]
+
   // Actions - Batch state transitions (single set() to avoid render cascades)
   /** Atomically clear all streaming state and mark session as reviewing */
   completeSession: (sessionId: string) => void
@@ -749,7 +1003,7 @@ interface ChatUIState {
   /** Atomically clear streaming state after an error, mark as reviewing */
   failSession: (sessionId: string) => void
 
-  // Actions - Unified session state cleanup (for close/archive)
+  // Actions - Unified session state cleanup (for close)
   clearSessionState: (
     sessionId: string,
     options?: { removeReferences?: boolean }
@@ -764,10 +1018,6 @@ interface ChatUIState {
     sessionId: string
   ) => { timestamp: number; trigger: string } | undefined
   clearLastCompaction: (sessionId: string) => void
-
-  // Actions - Save context tracking
-  setSavingContext: (sessionId: string, saving: boolean) => void
-  isSavingContext: (sessionId: string) => boolean
 
   // Actions - Worktree loading operations (commit, pr, review, merge, pull)
   setWorktreeLoading: (worktreeId: string, operation: string) => void
@@ -803,7 +1053,9 @@ const SESSION_SCOPED_RECORD_KEYS = [
   'hiddenTableChecklists',
   'pinnedTables',
   'sendingSessionIds',
+  'runStateVersions',
   'sendStartedAt',
+  'localSendIds',
   'completedDurations',
   'userInitiatedSessionIds',
   'waitingForInputSessionIds',
@@ -833,6 +1085,7 @@ const SESSION_SCOPED_RECORD_KEYS = [
   'activeTodos',
   'streamingPlanApprovals',
   'messageQueues',
+  'editingQueuedMessageIds',
   'executingModes',
   'approvedTools',
   'pendingPermissionDenials',
@@ -849,10 +1102,10 @@ const SESSION_SCOPED_RECORD_KEYS = [
   'sessionStatusOverrides',
   'planFilePaths',
   'pendingPlanMessageIds',
-  'savingContext',
   'skippedQuestionSessions',
   'expandedAgentWidgetSessions',
-  'collapsedQueuedPromptsSessions',
+  'dismissedAgentWidgetIds',
+  'expandedQueuedPromptsSessions',
   'sessionLabels',
   'codexGoals',
 ] as const
@@ -963,8 +1216,10 @@ export const useChatStore = create<ChatUIState>()(
       pinnedTables: {},
       worktreePaths: {},
       sendingSessionIds: {},
+      runStateVersions: {},
       namingSessionIds: {},
       sendStartedAt: {},
+      localSendIds: {},
       completedDurations: {},
       userInitiatedSessionIds: {},
       waitingForInputSessionIds: {},
@@ -988,6 +1243,7 @@ export const useChatStore = create<ChatUIState>()(
       answeredQuestions: {},
       submittedAnswers: {},
       errors: {},
+      queueHeld: {},
       lastSentMessages: {},
       lastSentArgs: {},
       autoResume: {},
@@ -1002,6 +1258,7 @@ export const useChatStore = create<ChatUIState>()(
       fixedFindings: {},
       streamingPlanApprovals: {},
       messageQueues: {},
+      editingQueuedMessageIds: {},
       executingModes: {},
       approvedTools: {},
       pendingPermissionDenials: {},
@@ -1018,10 +1275,10 @@ export const useChatStore = create<ChatUIState>()(
       sessionStatusOverrides: {},
       planFilePaths: {},
       pendingPlanMessageIds: {},
-      savingContext: {},
       skippedQuestionSessions: {},
       expandedAgentWidgetSessions: {},
-      collapsedQueuedPromptsSessions: {},
+      dismissedAgentWidgetIds: {},
+      expandedQueuedPromptsSessions: {},
       worktreeLoadingOperations: {},
       sessionLabels: {},
       codexGoals: {},
@@ -1633,7 +1890,7 @@ export const useChatStore = create<ChatUIState>()(
       getWorktreePath: worktreeId => get().worktreePaths[worktreeId],
 
       // Sending state (session-based)
-      addSendingSession: (sessionId, startTime) =>
+      addSendingSession: (sessionId, startTime, local = true) =>
         set(
           state => {
             // Guard: skip no-op updates to avoid re-renders on every streaming chunk
@@ -1657,6 +1914,9 @@ export const useChatStore = create<ChatUIState>()(
                 [sessionId]: true,
               },
               sendStartedAt: { ...state.sendStartedAt, [sessionId]: now },
+              ...(local
+                ? { localSendIds: { ...state.localSendIds, [sessionId]: true } }
+                : {}),
               completedDurations: restDurations,
             }
           },
@@ -1673,7 +1933,8 @@ export const useChatStore = create<ChatUIState>()(
               currentSending: Object.keys(state.sendingSessionIds),
             })
             const { [sessionId]: _, ...rest } = state.sendingSessionIds
-            return { sendingSessionIds: rest }
+            const { [sessionId]: _ls, ...localSendIds } = state.localSendIds
+            return { sendingSessionIds: rest, localSendIds }
           },
           undefined,
           'removeSendingSession'
@@ -2607,6 +2868,7 @@ export const useChatStore = create<ChatUIState>()(
                 const replyDir = req.working_dir?.trim()
                 if (!replyDir) continue
                 void invoke('respond_opencode_permission', {
+                  sessionId,
                   worktreePath: replyDir,
                   requestId: req.request_id,
                   reply: 'always',
@@ -2927,29 +3189,46 @@ export const useChatStore = create<ChatUIState>()(
           'setAgentWidgetExpanded'
         ),
 
-      // Queued prompts panel collapsed state (session-based, expanded by default)
-      setQueuedPromptsCollapsed: (sessionId, collapsed) =>
+      // Subagents panel dismissal: hide these agents until a new one appears
+      dismissAgentWidget: (sessionId, agentIds) =>
         set(
           state => {
-            if (
-              !!state.collapsedQueuedPromptsSessions[sessionId] === collapsed
-            ) {
+            const existing = state.dismissedAgentWidgetIds[sessionId] ?? []
+            // react-doctor-disable-next-line react-doctor/js-set-map-lookups -- per-session subagent list is small
+            const added = agentIds.filter(id => !existing.includes(id))
+            if (added.length === 0) return state
+            return {
+              dismissedAgentWidgetIds: {
+                ...state.dismissedAgentWidgetIds,
+                [sessionId]: [...existing, ...added],
+              },
+            }
+          },
+          undefined,
+          'dismissAgentWidget'
+        ),
+
+      // Queued prompts panel expanded state (session-based, collapsed by default)
+      setQueuedPromptsExpanded: (sessionId, expanded) =>
+        set(
+          state => {
+            if (!!state.expandedQueuedPromptsSessions[sessionId] === expanded) {
               return state
             }
-            if (collapsed) {
+            if (expanded) {
               return {
-                collapsedQueuedPromptsSessions: {
-                  ...state.collapsedQueuedPromptsSessions,
+                expandedQueuedPromptsSessions: {
+                  ...state.expandedQueuedPromptsSessions,
                   [sessionId]: true,
                 },
               }
             }
             const { [sessionId]: _, ...rest } =
-              state.collapsedQueuedPromptsSessions
-            return { collapsedQueuedPromptsSessions: rest }
+              state.expandedQueuedPromptsSessions
+            return { expandedQueuedPromptsSessions: rest }
           },
           undefined,
-          'setQueuedPromptsCollapsed'
+          'setQueuedPromptsExpanded'
         ),
 
       // Error handling (session-based)
@@ -2960,6 +3239,17 @@ export const useChatStore = create<ChatUIState>()(
           }),
           undefined,
           'setError'
+        ),
+
+      setQueueHeld: (sessionId, held) =>
+        set(
+          state => {
+            // queue:released fires on every drain start; skip no-op updates.
+            if ((state.queueHeld[sessionId] ?? false) === held) return state
+            return { queueHeld: { ...state.queueHeld, [sessionId]: held } }
+          },
+          undefined,
+          'setQueueHeld'
         ),
 
       setLastSentMessage: (sessionId, message) =>
@@ -3458,23 +3748,62 @@ export const useChatStore = create<ChatUIState>()(
           'removeQueuedMessage'
         ),
 
-      updateQueuedMessage: (sessionId, messageId, message) =>
+      updateQueuedMessage: (sessionId, messageId, edit) =>
         set(
           state => {
             const queue = state.messageQueues[sessionId] ?? []
-            const idx = queue.findIndex(m => m.id === messageId)
-            if (idx === -1 || queue[idx]?.message === message) return state
+            if (!queue.some(m => m.id === messageId)) return state
             return {
               messageQueues: {
                 ...state.messageQueues,
                 [sessionId]: queue.map(m =>
-                  m.id === messageId ? { ...m, message } : m
+                  m.id === messageId ? { ...m, ...edit } : m
                 ),
               },
             }
           },
           undefined,
           'updateQueuedMessage'
+        ),
+
+      startEditingQueuedMessage: (sessionId, message) =>
+        set(
+          state => ({
+            editingQueuedMessageIds: {
+              ...state.editingQueuedMessageIds,
+              [sessionId]: message.id,
+            },
+            inputDrafts: { ...state.inputDrafts, [sessionId]: message.message },
+            pendingImages: {
+              ...state.pendingImages,
+              [sessionId]: message.pendingImages,
+            },
+            pendingFiles: {
+              ...state.pendingFiles,
+              [sessionId]: message.pendingFiles,
+            },
+            pendingSkills: {
+              ...state.pendingSkills,
+              [sessionId]: message.pendingSkills,
+            },
+            pendingTextFiles: {
+              ...state.pendingTextFiles,
+              [sessionId]: message.pendingTextFiles,
+            },
+          }),
+          undefined,
+          'startEditingQueuedMessage'
+        ),
+
+      stopEditingQueuedMessage: sessionId =>
+        set(
+          state => {
+            if (!(sessionId in state.editingQueuedMessageIds)) return state
+            const { [sessionId]: _, ...rest } = state.editingQueuedMessageIds
+            return { editingQueuedMessageIds: rest }
+          },
+          undefined,
+          'stopEditingQueuedMessage'
         ),
 
       moveQueuedMessageFront: (sessionId, messageId) =>
@@ -3826,6 +4155,64 @@ export const useChatStore = create<ChatUIState>()(
       getDeniedMessageContext: sessionId =>
         get().deniedMessageContext[sessionId],
 
+      acceptRunStateVersion: (sessionId, version) => {
+        if (version == null) return true
+        const known = get().runStateVersions[sessionId]
+        if (known != null && version < known) {
+          console.warn(
+            `[Store] stale run state ignored session=${sessionId} version=${version} known=${known}`
+          )
+          return false
+        }
+        // A versioned event is the backend's acknowledgement of this session's
+        // run, so a later snapshot may end it.
+        if (known !== version || get().localSendIds[sessionId]) {
+          set(
+            state => {
+              const { [sessionId]: _ls, ...localSendIds } = state.localSendIds
+              return {
+                runStateVersions: {
+                  ...state.runStateVersions,
+                  [sessionId]: version,
+                },
+                localSendIds,
+              }
+            },
+            undefined,
+            'acceptRunStateVersion'
+          )
+        }
+        return true
+      },
+
+      applyRunStateSnapshot: (states, { ownsSession, requestedAt }) => {
+        const before = get()
+        const wasSending = Object.keys(before.sendingSessionIds).filter(
+          sessionId => hasActiveStreamingState(before, sessionId)
+        )
+        set(
+          state => {
+            let next: RunStateSlice = state
+            const listed = new Set(states.map(runState => runState.sessionId))
+            if (ownsSession) {
+              for (const sessionId of Object.keys(next.sendingSessionIds)) {
+                if (listed.has(sessionId) || !ownsSession(sessionId)) continue
+                if (!snapshotMayEndRun(next, sessionId, requestedAt)) continue
+                next = withRunEnded(next, sessionId)
+              }
+            }
+            for (const runState of states) {
+              next = withRunState(next, runState, requestedAt)
+            }
+            return next === state ? state : next
+          },
+          undefined,
+          'applyRunStateSnapshot'
+        )
+        const after = get().sendingSessionIds
+        return wasSending.filter(sessionId => !after[sessionId])
+      },
+
       // Batch state transitions — single set() to avoid render cascades
       // Used by useStreamingEvents to atomically transition session state
       completeSession: sessionId =>
@@ -3873,7 +4260,9 @@ export const useChatStore = create<ChatUIState>()(
             const { [sessionId]: _em, ...executingModes } = state.executingModes
             const { [sessionId]: _sa, ...sendStartedAtRest } =
               state.sendStartedAt
+            const { [sessionId]: _ls, ...localSendIds } = state.localSendIds
             return {
+              localSendIds,
               streamingContents,
               streamingContentBlocks,
               streamingReplayContentBlocks,
@@ -3939,7 +4328,9 @@ export const useChatStore = create<ChatUIState>()(
               state.deniedMessageContext
             const { [sessionId]: _sa, ...sendStartedAtRest } =
               state.sendStartedAt
+            const { [sessionId]: _ls, ...localSendIds } = state.localSendIds
             return {
+              localSendIds,
               streamingContents,
               streamingContentBlocks,
               streamingReplayContentBlocks,
@@ -3998,7 +4389,9 @@ export const useChatStore = create<ChatUIState>()(
             const { [sessionId]: _em, ...executingModes } = state.executingModes
             const { [sessionId]: _sa, ...sendStartedAtRest } =
               state.sendStartedAt
+            const { [sessionId]: _ls, ...localSendIds } = state.localSendIds
             return {
+              localSendIds,
               streamingContents,
               streamingReplayContentBlocks,
               sendingSessionIds,
@@ -4039,7 +4432,9 @@ export const useChatStore = create<ChatUIState>()(
               state.waitingForInputSessionIds
             const { [sessionId]: _sa, ...sendStartedAtRest } =
               state.sendStartedAt
+            const { [sessionId]: _ls, ...localSendIds } = state.localSendIds
             return {
+              localSendIds,
               streamingContents,
               streamingContentBlocks,
               streamingReplayContentBlocks,
@@ -4065,7 +4460,7 @@ export const useChatStore = create<ChatUIState>()(
           'failSession'
         ),
 
-      // Unified session state cleanup (for close/archive)
+      // Unified session state cleanup (for close)
       clearSessionState: (sessionId, options) =>
         set(
           state => {
@@ -4227,23 +4622,6 @@ export const useChatStore = create<ChatUIState>()(
           undefined,
           'clearLastCompaction'
         ),
-
-      // Save context tracking
-      setSavingContext: (sessionId, saving) =>
-        set(
-          state => ({
-            savingContext: saving
-              ? { ...state.savingContext, [sessionId]: true }
-              : (() => {
-                  const { [sessionId]: _, ...rest } = state.savingContext
-                  return rest
-                })(),
-          }),
-          undefined,
-          'setSavingContext'
-        ),
-
-      isSavingContext: sessionId => get().savingContext[sessionId] ?? false,
 
       // Worktree loading operations (commit, pr, review, merge, pull)
       setWorktreeLoading: (worktreeId, operation) =>

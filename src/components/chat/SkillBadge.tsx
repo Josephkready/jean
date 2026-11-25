@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { Wand2, Loader2, X } from '@/components/icons/reicon'
-import { invoke } from '@/lib/transport'
+import { invokeForOptionalServer } from '@/lib/transport'
 import {
   Dialog,
   DialogContent,
@@ -20,6 +20,8 @@ import {
 interface SkillBadgeProps {
   /** The pending skill to display */
   skill: PendingSkill
+  /** Server that owns the skill file; `undefined` means the active transport. */
+  serverId: string | undefined
   /** Optional callback to remove this skill (shows X button if provided) */
   onRemove?: () => void
   /** Whether the badge is in a compact display mode */
@@ -30,7 +32,12 @@ interface SkillBadgeProps {
  * Displays a skill mention as a clickable badge that opens a preview dialog
  * Used in chat input for pending skills and in messages for sent skills
  */
-export function SkillBadge({ skill, onRemove, compact }: SkillBadgeProps) {
+export function SkillBadge({
+  skill,
+  serverId,
+  onRemove,
+  compact,
+}: SkillBadgeProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [content, setContent] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -44,9 +51,11 @@ export function SkillBadge({ skill, onRemove, compact }: SkillBadgeProps) {
       setIsLoading(true)
       setError(null)
       try {
-        const fileContent = await invoke<string>('read_file_content', {
-          path: skill.path,
-        })
+        const fileContent = await invokeForOptionalServer<string>(
+          serverId,
+          'read_file_content',
+          { path: skill.path }
+        )
         setContent(fileContent)
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
@@ -54,7 +63,7 @@ export function SkillBadge({ skill, onRemove, compact }: SkillBadgeProps) {
         setIsLoading(false)
       }
     }
-  }, [content, isLoading, skill.path])
+  }, [content, isLoading, serverId, skill.path])
 
   const handleRemove = useCallback(
     (e: React.MouseEvent) => {
@@ -68,7 +77,7 @@ export function SkillBadge({ skill, onRemove, compact }: SkillBadgeProps) {
     <>
       <div
         className={cn(
-          'inline-flex items-center rounded-md border border-border/50 bg-muted/50 hover:border-primary/50 transition-colors',
+          'inline-flex items-center rounded-md border border-border/50 bg-muted/50 hover:border-foreground/20 transition-colors',
           compact ? 'h-6' : 'h-7'
         )}
       >
@@ -84,14 +93,14 @@ export function SkillBadge({ skill, onRemove, compact }: SkillBadgeProps) {
             >
               <Wand2
                 className={cn(
-                  'shrink-0 text-purple-600 dark:text-purple-400',
+                  'shrink-0 text-info',
                   compact ? 'h-3 w-3' : 'h-3.5 w-3.5'
                 )}
               />
               <span
                 className={cn(
                   'font-medium truncate max-w-[120px]',
-                  compact ? 'text-[10px]' : 'text-xs'
+                  compact ? 'text-2xs' : 'text-xs'
                 )}
               >
                 /{skill.name}
@@ -126,9 +135,9 @@ export function SkillBadge({ skill, onRemove, compact }: SkillBadgeProps) {
       </div>
 
       <Dialog open={isOpen} onOpenChange={setIsOpen}>
-        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-auto sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95">
+        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-fit sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95">
           <DialogTitle className="text-sm font-medium flex items-center gap-2">
-            <Wand2 className="h-4 w-4 text-purple-600 dark:text-purple-400" />
+            <Wand2 className="size-4 text-info" />
             Skill: {skill.name}
           </DialogTitle>
           <DialogDescription className="sr-only">

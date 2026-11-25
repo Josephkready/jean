@@ -1,4 +1,3 @@
-import { isNativeApp } from '@/lib/environment'
 import { formatServerTarget, type Project } from '@/types/projects'
 import { LOCAL_SERVER_ID } from '@/types/server-resource'
 import { projectServerId } from '../server-filter'
@@ -12,7 +11,7 @@ export function isLegacyConnectionCopy(project: Project): boolean {
 }
 
 /**
- * Servers for the Servers tab. Every Jean shows its own entries: its machine
+ * Servers for the Servers section of the Workspace view. Every Jean shows its own entries: its machine
  * (no SSH) and the SSH servers it stores. The native app lists them for all
  * connected Jeans; Web Access only gets its own Jean.
  * Order: this computer, other Jean machines, then SSH servers.
@@ -52,19 +51,14 @@ export function jeansWithoutLocalEntry(
 }
 
 /**
- * Subtitle of a server row. A Jean's own machine runs without SSH: this
- * computer in the native app, a Jean server otherwise. SSH servers show their
- * target and, in the native app, the Jean that runs them.
+ * Subtitle of a server row: an SSH server's target and, in the native app,
+ * the Jean that runs it. A Jean's own machine needs no subtitle.
  */
 export function serverSubtitle(project: Project): string {
   const owner = projectServerId(project)
   const remoteOwner =
     owner !== LOCAL_SERVER_ID ? (project.serverName ?? 'remote Jean') : null
-  if (project.server?.local) {
-    return owner === LOCAL_SERVER_ID && isNativeApp()
-      ? 'This computer · no SSH'
-      : 'Jean server · no SSH'
-  }
+  if (project.server?.local) return ''
   const target = project.server ? formatServerTarget(project.server) : ''
   return remoteOwner ? `${target} · via ${remoteOwner}` : target
 }

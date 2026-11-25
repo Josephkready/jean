@@ -14,6 +14,7 @@ import {
   Github,
   GitPullRequest,
   CircleDot,
+  MessagesSquare,
   Globe,
   ShieldAlert,
   Siren,
@@ -45,9 +46,11 @@ import {
   useWorktree,
   usePorts,
 } from '@/services/projects'
+import type { GitRepoOwner } from '@/services/git-status'
 import {
   useLoadedIssueContexts,
   useLoadedPRContexts,
+  useLoadedDiscussionContexts,
   useLoadedSecurityContexts,
   useLoadedAdvisoryContexts,
 } from '@/services/github'
@@ -56,8 +59,9 @@ import { parseServerResourceKey } from '@/lib/server-resource'
 import { LOCAL_SERVER_ID } from '@/types/server-resource'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { notify } from '@/lib/notifications'
-import { openExternal } from '@/lib/platform'
+import { getModifierSymbol, openExternal } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+import { Kbd } from '@/components/ui/kbd'
 import {
   canOpenInEditor,
   canOpenInFinder,
@@ -126,6 +130,10 @@ export function OpenInModal() {
     activeSessionId,
     selectedWorktreeId
   )
+  const { data: loadedDiscussions } = useLoadedDiscussionContexts(
+    activeSessionId,
+    selectedWorktreeId
+  )
   const { data: loadedSecurityAlerts } = useLoadedSecurityContexts(
     activeSessionId,
     selectedWorktreeId
@@ -149,23 +157,40 @@ export function OpenInModal() {
     worktree?.serverId ?? selectedProject?.serverId
   )
 
-  const targetPath = useMemo(() => {
-    if (worktree?.path) return worktree.path
+  // The owner id comes from the same object as the path, so routing picks
+  // that object's Jean server even when two servers share the path.
+  const target = useMemo((): {
+    path: string
+    owner: GitRepoOwner
+  } | null => {
+    if (worktree?.path) {
+      return { path: worktree.path, owner: { worktreeId: worktree.id } }
+    }
     if (selectedWorktreeId) {
       const path = useChatStore.getState().getWorktreePath(selectedWorktreeId)
-      if (path) return path
+      if (path) return { path, owner: { worktreeId: selectedWorktreeId } }
     }
-    if (selectedProject) return selectedProject.path
+    if (selectedProject) {
+      return {
+        path: selectedProject.path,
+        owner: { projectId: selectedProject.id },
+      }
+    }
     return null
-  }, [worktree?.path, selectedWorktreeId, selectedProject])
-  const { data: gitProviderInfo } = useProjectGitProvider(targetPath)
+  }, [worktree?.path, worktree?.id, selectedWorktreeId, selectedProject])
+  const targetPath = target?.path ?? null
+  const targetOwner = target?.owner ?? null
+  const { data: gitProviderInfo } = useProjectGitProvider(
+    targetPath,
+    targetOwner ?? {}
+  )
   const gitProvider = gitProviderInfo?.provider ?? 'github'
   const forgeLabels = providerLabels(gitProvider)
   const forgeHost =
     gitProviderInfo?.host ??
     (gitProvider === 'gitlab' ? 'gitlab.com' : 'github.com')
 
-  const { data: ports } = usePorts(targetPath)
+  const { data: ports } = usePorts(targetPath, targetOwner)
 
   // Base options (Editor, Terminal, Finder, GitHub)
   const baseOptions = useMemo(() => {
@@ -224,6 +249,18 @@ export function OpenInModal() {
     forgeLabels.pullRequestShort,
     gitProvider,
   ])
+
+  const portOptions: ModalOption[] = useMemo(() => {
+    if (!ports || ports.length === 0) return []
+    return ports.map((p, i) => ({
+      id: `port-${p.port}`,
+      label: `${p.label} (${resolvePortHost(p, preferences?.browser_default_host)}:${p.port})`,
+      icon: Globe,
+      key: i < 9 ? String(i + 1) : undefined,
+      metaKey: true,
+      url: resolvePortUrl(p, preferences?.browser_default_host),
+    }))
+  }, [ports, preferences?.browser_default_host])
 
   // Context options (worktree + loaded GitHub contexts, numbered 1-9)
   const contextOptions = useMemo(() => {
@@ -297,6 +334,17 @@ export function OpenInModal() {
       }
     }
 
+    if (loadedDiscussions) {
+      for (const discussion of loadedDiscussions) {
+        addOption({
+          id: `discussion-${discussion.number}`,
+          label: `Discussion #${discussion.number}`,
+          icon: MessagesSquare,
+          url: `${hostedRepoWebUrl(forgeHost, discussion.repoOwner, discussion.repoName)}/discussions/${discussion.number}`,
+        })
+      }
+    }
+
     if (loadedSecurityAlerts) {
       for (const alert of loadedSecurityAlerts) {
         addOption({
@@ -323,6 +371,7 @@ export function OpenInModal() {
   }, [
     loadedPRs,
     loadedIssues,
+    loadedDiscussions,
     forgeHost,
     forgeLabels.pullRequestShort,
     gitProvider,
@@ -347,18 +396,6 @@ export function OpenInModal() {
     },
     [setOpenInModalOpen, canOpenEditor]
   )
-
-  const portOptions: ModalOption[] = useMemo(() => {
-    if (!ports || ports.length === 0) return []
-    return ports.map((p, i) => ({
-      id: `port-${p.port}`,
-      label: `${p.label} (${resolvePortHost(p, preferences?.browser_default_host)}:${p.port})`,
-      icon: Globe,
-      key: i < 9 ? String(i + 1) : undefined,
-      metaKey: true,
-      url: resolvePortUrl(p, preferences?.browser_default_host),
-    }))
-  }, [ports, preferences?.browser_default_host])
 
   const allOptions = useMemo(
     () => [...baseOptions, ...portOptions, ...contextOptions],
@@ -385,7 +422,7 @@ export function OpenInModal() {
         return
       }
 
-      if (!targetPath) {
+      if (!targetPath || !targetOwner) {
         notify('No project or worktree selected', undefined, { type: 'error' })
         setOpenInModalOpen(false)
         return
@@ -395,17 +432,19 @@ export function OpenInModal() {
         case 'editor':
           openInEditor.mutate({
             worktreePath: targetPath,
+            ...targetOwner,
             editor: preferences?.editor,
           })
           break
         case 'terminal':
           openInTerminal.mutate({
             worktreePath: targetPath,
+            ...targetOwner,
             terminal: preferences?.terminal,
           })
           break
         case 'finder':
-          openInFinder.mutate(targetPath)
+          openInFinder.mutate({ worktreePath: targetPath, ...targetOwner })
           break
         case 'open-pr':
           if (worktree?.pr_url) {
@@ -424,6 +463,8 @@ export function OpenInModal() {
           }
           invoke<GitHubRemote[]>('get_github_remotes', {
             repoPath: targetPath,
+            worktreeId: targetOwner.worktreeId,
+            projectId: targetOwner.projectId,
           })
             .then(remotes => {
               if (!remotes || remotes.length <= 1) {
@@ -433,6 +474,8 @@ export function OpenInModal() {
                 } else {
                   invoke<string>('get_github_branch_url', {
                     repoPath: targetPath,
+                    worktreeId: targetOwner.worktreeId,
+                    projectId: targetOwner.projectId,
                     branch,
                   })
                     .then(branchUrl => openExternal(branchUrl))
@@ -442,12 +485,18 @@ export function OpenInModal() {
                       })
                     )
                 }
-              } else {
-                openRemotePicker(targetPath as string, remoteName => {
-                  const remote = remotes.find(r => r.name === remoteName)
-                  if (remote)
-                    openExternal(branchWebUrl(remote.url, branch, gitProvider))
-                })
+              } else if (worktree) {
+                openRemotePicker(
+                  targetPath as string,
+                  { worktreeId: worktree.id },
+                  remoteName => {
+                    const remote = remotes.find(r => r.name === remoteName)
+                    if (remote)
+                      openExternal(
+                        branchWebUrl(remote.url, branch, gitProvider)
+                      )
+                  }
+                )
               }
             })
             .catch(() =>
@@ -463,6 +512,7 @@ export function OpenInModal() {
       portOptions,
       contextOptions,
       targetPath,
+      targetOwner,
       openInEditor,
       openInTerminal,
       openInFinder,
@@ -540,9 +590,11 @@ export function OpenInModal() {
           <span className="truncate">{option.label}</span>
         </div>
         {option.key && (
-          <kbd className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded ml-2 shrink-0">
-            {option.metaKey ? `⌘${option.key}` : option.key}
-          </kbd>
+          <Kbd modHint={option.metaKey} className="ml-2 shrink-0">
+            {option.metaKey
+              ? `${getModifierSymbol()}${option.key}`
+              : option.key}
+          </Kbd>
         )}
       </button>
     )
@@ -555,7 +607,7 @@ export function OpenInModal() {
         tabIndex={-1}
         className={cn(
           'p-0 outline-none',
-          useWideLayout ? 'sm:max-w-[560px]' : 'sm:max-w-[280px]'
+          useWideLayout ? 'sm:max-w-lg' : 'sm:max-w-xs'
         )}
         onOpenAutoFocus={e => {
           e.preventDefault()
@@ -570,18 +622,18 @@ export function OpenInModal() {
         <div className="min-w-0 pb-2">{baseOptions.map(renderOption)}</div>
 
         {portOptions.length > 0 && (
-          <div className="min-w-0 border-t pb-2">
-            <div className="px-4 pt-2 pb-1">
-              <span className="text-xs text-muted-foreground">Ports</span>
+          <div className="min-w-0 pb-2">
+            <div className="px-4 py-1.5 text-xs text-muted-foreground">
+              Ports
             </div>
             {portOptions.map(renderOption)}
           </div>
         )}
 
         {contextOptions.length > 0 && (
-          <div className="min-w-0 border-t pb-2">
-            <div className="px-4 pt-2 pb-1">
-              <span className="text-xs text-muted-foreground">Contexts</span>
+          <div className="min-w-0 pb-2">
+            <div className="px-4 py-1.5 text-xs text-muted-foreground">
+              Contexts
             </div>
             {useWideLayout ? (
               <div className="grid grid-cols-2">

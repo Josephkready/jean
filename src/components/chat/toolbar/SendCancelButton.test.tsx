@@ -44,6 +44,25 @@ describe('SendCancelButton', () => {
     expect(
       screen.queryByRole('button', { name: /^yolo$/i })
     ).not.toBeInTheDocument()
+    // The only icon belongs to the ⌘-held "Send in background" label.
+    expect(container.querySelector('.send-label svg')).toBeNull()
+    expect(container.querySelector('.send-background-label')).toHaveTextContent(
+      'Send in background⌘↵'
+    )
+  })
+
+  it('does not offer the background send on mobile', () => {
+    runtime.isMobile = true
+    const { container } = render(
+      <SendCancelButton
+        isSending={false}
+        canSend
+        queuedMessageCount={0}
+        onCancel={vi.fn()}
+      />
+    )
+
+    expect(container.querySelector('.send-background-label')).toBeNull()
     expect(container.querySelector('svg')).toBeNull()
   })
 
@@ -109,13 +128,30 @@ describe('SendCancelButton', () => {
         isSending
         canSend
         willSteer
-        steerWithModifier
+        actionWithModifier
         queuedMessageCount={0}
         onCancel={vi.fn()}
       />
     )
 
     expect(screen.getByRole('button', { name: /^steer$/i })).toHaveTextContent(
+      '⌘↵'
+    )
+  })
+
+  it('renders Queue with the modifier shortcut when auto-steer is inverted', () => {
+    render(
+      <SendCancelButton
+        isSending
+        canSend
+        actionWithModifier
+        canSteer
+        queuedMessageCount={0}
+        onCancel={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: /^queue$/i })).toHaveTextContent(
       '⌘↵'
     )
   })
@@ -154,6 +190,27 @@ describe('SendCancelButton', () => {
     expect(screen.getByRole('button', { name: /^queue$/i })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /^steer$/i }))
     expect(onSteer).toHaveBeenCalledOnce()
+  })
+
+  it('offers a separate Queue action when auto-steer is on in mobile view', () => {
+    runtime.isMobile = true
+    const onQueue = vi.fn()
+
+    render(
+      <SendCancelButton
+        isSending
+        canSend
+        canSteer
+        willSteer
+        onCancel={vi.fn()}
+        onSteer={vi.fn()}
+        onQueue={onQueue}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: /^steer$/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^queue$/i }))
+    expect(onQueue).toHaveBeenCalledOnce()
   })
 
   it('offers separate Queue and Steer actions in mobile view', () => {

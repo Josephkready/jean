@@ -27,6 +27,7 @@ import {
 import { AGENT_COLOR_CHOICES } from './agents'
 import { useAgentsEnabledServers } from './agents-feature'
 import { AgentRunFields } from './AgentRunFields'
+import { AgentColorPicker } from './agent-ui'
 import {
   agentRunPatch,
   EMPTY_AGENT_RUN,
@@ -69,6 +70,7 @@ export function NewAgentDialog({
   // New agents can run on any online server that has Agents turned on
   const enabledServers = useAgentsEnabledServers()
   const servers = useSessionServerSources().filter(
+    // react-doctor-disable-next-line react-doctor/js-set-map-lookups -- list of configured servers is tiny
     source => source.online && enabledServers.includes(source.serverId)
   )
   // null = follow the sidebar's server filter until the user picks one
@@ -229,30 +231,11 @@ export function NewAgentDialog({
               </div>
               <div className="space-y-1.5">
                 <Label>Color</Label>
-                <div
-                  className="flex gap-2"
-                  role="radiogroup"
-                  aria-label="Color"
-                >
-                  {AGENT_COLOR_CHOICES.map(color => (
-                    <button
-                      key={color}
-                      type="button"
-                      role="radio"
-                      aria-checked={icon === color}
-                      aria-label={color}
-                      className={cn(
-                        'rounded-md p-1 transition-colors',
-                        icon === color
-                          ? 'bg-primary/15 ring-1 ring-primary'
-                          : 'hover:bg-muted'
-                      )}
-                      onClick={() => setIcon(color)}
-                    >
-                      <AgentIcon icon={color} className="size-6" />
-                    </button>
-                  ))}
-                </div>
+                <AgentColorPicker
+                  value={icon}
+                  choices={AGENT_COLOR_CHOICES}
+                  onChange={setIcon}
+                />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="agent-description">Short description</Label>

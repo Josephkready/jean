@@ -1,4 +1,9 @@
-import { Search, Loader2, RefreshCw, AlertCircle } from '@/components/icons/reicon'
+import {
+  Search,
+  Loader2,
+  RefreshCw,
+  AlertCircle,
+} from '@/components/icons/reicon'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -13,12 +18,8 @@ import { GhAuthError } from '@/components/shared/GhAuthError'
 import { isGlabAuthError } from '@/services/glab-cli'
 import { GlabAuthError } from '@/components/shared/GlabAuthError'
 import { providerLabels } from '@/services/git-provider'
-import {
-  LoadedIssueItem,
-  LoadedPRItem,
-  IssueItem,
-  PRItem,
-} from './LoadContextItems'
+import { LoadedIssueItem, LoadedPRItem } from './LoadContextItems'
+import { IssueItem, PRItem } from '@/components/worktree/NewWorktreeItems'
 import type {
   GitHubIssue,
   GitHubPullRequest,
@@ -26,6 +27,7 @@ import type {
   LoadedPullRequestContext,
 } from '@/types/github'
 import type { GitProvider } from '@/types/provider'
+import type { ContextLinkLookup } from '@/hooks/useContextLinkUsage'
 
 type GitHubItemsTabConfig =
   | {
@@ -76,6 +78,8 @@ interface GitHubItemsTabProps {
    * transient "Sign in to GitHub" flash on GitLab projects.
    */
   providerResolved?: boolean
+  /** Marks items that other worktrees/sessions already use */
+  contextLinks?: ContextLinkLookup
 }
 
 export function GitHubItemsTab({
@@ -100,6 +104,7 @@ export function GitHubItemsTab({
   isCliInstalled,
   provider = 'github',
   providerResolved = true,
+  contextLinks,
 }: GitHubItemsTabProps) {
   const labels = providerLabels(provider)
   const isIssues = config.kind === 'issues'
@@ -110,7 +115,9 @@ export function GitHubItemsTab({
   const closedLabel = isIssues
     ? 'Include closed issues'
     : `Include closed/merged ${labels.pullRequestsShort}`
-  const loadedLabel = isIssues ? 'Loaded Issues' : `Loaded ${labels.pullRequest}s`
+  const loadedLabel = isIssues
+    ? 'Loaded Issues'
+    : `Loaded ${labels.pullRequest}s`
   const checkboxId = isIssues
     ? 'load-include-closed-issues'
     : 'load-include-closed-prs'
@@ -231,9 +238,16 @@ export function GitHubItemsTab({
 
         {error &&
           providerResolved &&
-          ((provider === 'gitlab' ? isGlabAuthError(error) : isGhAuthError(error)) ? (
+          ((
+            provider === 'gitlab'
+              ? isGlabAuthError(error)
+              : isGhAuthError(error)
+          ) ? (
             provider === 'gitlab' ? (
-              <GlabAuthError onLogin={onLogin} isGlabInstalled={isCliInstalled} />
+              <GlabAuthError
+                onLogin={onLogin}
+                isGlabInstalled={isCliInstalled}
+              />
             ) : (
               <GhAuthError onLogin={onLogin} isGhInstalled={isCliInstalled} />
             )
@@ -282,7 +296,12 @@ export function GitHubItemsTab({
                     issue={issue}
                     index={index}
                     isSelected={index === selectedIndex}
-                    isLoading={loadingNumbers.has(issue.number)}
+                    isCreating={loadingNumbers.has(issue.number)}
+                    contextMatches={contextLinks?.getMatches({
+                      type: 'issue',
+                      id: issue.number,
+                    })}
+                    currentWorktreeId={contextLinks?.currentWorktreeId}
                     onMouseEnter={() => setSelectedIndex(index)}
                     onClick={() => config.onSelectItem(issue)}
                     onPreview={() => config.onPreviewItem(issue)}
@@ -294,7 +313,12 @@ export function GitHubItemsTab({
                     pr={pr}
                     index={index}
                     isSelected={index === selectedIndex}
-                    isLoading={loadingNumbers.has(pr.number)}
+                    isCreating={loadingNumbers.has(pr.number)}
+                    contextMatches={contextLinks?.getMatches({
+                      type: 'pr',
+                      id: pr.number,
+                    })}
+                    currentWorktreeId={contextLinks?.currentWorktreeId}
                     onMouseEnter={() => setSelectedIndex(index)}
                     onClick={() => config.onSelectItem(pr)}
                     onPreview={() => config.onPreviewItem(pr)}

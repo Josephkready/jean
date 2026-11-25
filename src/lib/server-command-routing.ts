@@ -1,7 +1,7 @@
 import { parseServerResourceKey, serverResourceKey } from './server-resource'
 import { LOCAL_SERVER_ID, type ServerId } from '@/types/server-resource'
 
-const ROUTED_ARGUMENT_KEYS = new Set([
+export const ROUTED_ARGUMENT_KEYS: ReadonlySet<string> = new Set([
   'projectId',
   'project_id',
   'worktreeId',
@@ -26,12 +26,18 @@ const ROUTED_ARGUMENT_KEYS = new Set([
   'parent_id',
   'activeSessionId',
   'active_session_id',
+  'sourceSessionId',
+  'source_session_id',
+  'targetSessionId',
+  'target_session_id',
+  'sourceWorktreeId',
+  'source_worktree_id',
   // Agents: each Jean server has its own agents
   'agentId',
   'agent_id',
 ])
 
-const PATH_ARGUMENT_KEYS = new Set([
+export const PATH_ARGUMENT_KEYS: ReadonlySet<string> = new Set([
   'projectPath',
   'project_path',
   'worktreePath',
@@ -56,6 +62,14 @@ export function registerServerResourcePath(
 
 export function clearServerResourcePaths(): void {
   pathOwners.clear()
+}
+
+/** A removed or disabled server must not keep making its paths ambiguous. */
+export function forgetServerResourcePaths(serverId: ServerId): void {
+  for (const [path, owners] of pathOwners) {
+    owners.delete(serverId)
+    if (owners.size === 0) pathOwners.delete(path)
+  }
 }
 
 export interface ResolvedServerCommand {
@@ -191,6 +205,134 @@ export function resolveServerCommand(
   return resolved ? { serverId: resolved, args: stripped } : null
 }
 
+/**
+ * Commands whose arguments do not name their owner by themselves. The generic
+ * key scan in `resolveServerCommand` routes every other command.
+ *
+ * - `owner`: the command addresses a path or job id that only its owning
+ *   server knows. Callers must also send one of these id keys (the backend
+ *   ignores it), or use `invokeForServer` / `invokeForOptionalServer`.
+ * - `fanOut`: the array argument can hold resources of several servers. Each
+ *   owning server receives its own items.
+ * - `routeBy`: only these keys name the owning server. Other ids are data;
+ *   their scope is stripped only when they belong to that same server.
+ *
+ * `server-command-routing.test.ts` fails when a dispatch command reads an
+ * owner-looking key that neither the key scan nor this table covers.
+ */
+export const COMMAND_OWNERS: Record<
+  string,
+  | { owner: readonly string[] }
+  | { fanOut: string }
+  | { routeBy: readonly string[] }
+> = {
+  read_file_content: { owner: ['sessionId', 'worktreeId', 'projectId'] },
+  read_file_base64: { owner: ['sessionId', 'worktreeId', 'projectId'] },
+  write_file_content: { owner: ['sessionId', 'worktreeId', 'projectId'] },
+  read_plan_file: { owner: ['sessionId', 'worktreeId'] },
+  read_pasted_text: { owner: ['sessionId'] },
+  update_pasted_text: { owner: ['sessionId'] },
+  delete_pasted_text: { owner: ['sessionId'] },
+  save_pasted_text: { owner: ['sessionId', 'terminalId'] },
+  save_pasted_image: { owner: ['sessionId', 'terminalId'] },
+  delete_pasted_image: { owner: ['sessionId'] },
+  save_dropped_image: { owner: ['sessionId'] },
+  read_context_file: { owner: ['sessionId', 'worktreeId', 'projectId'] },
+  delete_context_file: { owner: ['sessionId', 'worktreeId', 'projectId'] },
+  browse_directory: { owner: [] },
+  get_recent_worktrees: { owner: [] },
+  get_commit_job: { owner: ['worktreeId', 'worktreePath'] },
+  get_review_job: { owner: ['worktreeId', 'worktreePath'] },
+  cancel_review_job: { owner: ['worktreeId', 'worktreePath'] },
+  cancel_review_with_ai: { owner: ['worktreeId', 'worktreePath'] },
+  decide_agent_approval: { owner: ['agentId'] },
+  install_agent_template: { owner: ['agentId'] },
+  revert_agent_change: { owner: ['agentId'] },
+  start_prompt_on_models: { owner: ['projectId'] },
+  attach_session_reference: { routeBy: ['targetSessionId'] },
+  reorder_projects: { fanOut: 'projectIds' },
+  set_sessions_last_opened_bulk: { fanOut: 'sessionIds' },
+  get_run_states: { fanOut: 'sessionIds' },
+  set_all_worktrees_for_polling: { fanOut: 'worktrees' },
+  set_pr_worktrees_for_polling: { fanOut: 'worktrees' },
+}
+
+/** One backend call. `serverId: null` means the active transport. */
+export interface ServerCommandRoute {
+  serverId: ServerId | null
+  args: Record<string, unknown> | undefined
+}
+
+/** Owner of one fan-out item and the item as that owner stores it. */
+function fanOutItem(item: unknown): [ServerId | null, unknown] {
+  if (typeof item === 'string') {
+    const ref = parseServerResourceKey(item)
+    return ref ? [ref.serverId, ref.resourceId] : [null, item]
+  }
+  if (item && typeof item === 'object') {
+    const routed = resolveServerCommand(item as Record<string, unknown>)
+    return routed ? [routed.serverId, routed.args] : [null, item]
+  }
+  return [null, item]
+}
+
+/**
+ * Route a command by its `COMMAND_OWNERS` entry and its arguments. Returns one
+ * route, or one per owning server for a mixed fan-out batch.
+ * `ownerDeclared` means the caller already chose the server explicitly.
+ */
+export function routeServerCommand(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  ownerDeclared = false
+): ServerCommandRoute[] {
+  const spec = COMMAND_OWNERS[command]
+  if (spec && 'owner' in spec && !ownerDeclared) {
+    const hasOwner = spec.owner.some(key => {
+      const value = args?.[key]
+      return typeof value === 'string' && value.length > 0
+    })
+    if (!hasOwner) {
+      const fix = spec.owner.length
+        ? `Send ${spec.owner.join(' or ')} with it, or call invokeForServer`
+        : 'Call invokeForServer or invokeForOptionalServer'
+      throw new Error(
+        `${command} cannot tell which Jean server owns its arguments. ${fix}.`
+      )
+    }
+  }
+
+  if (spec && 'fanOut' in spec && Array.isArray(args?.[spec.fanOut])) {
+    const groups = new Map<ServerId | null, unknown[]>()
+    for (const item of args[spec.fanOut] as unknown[]) {
+      const [owner, raw] = fanOutItem(item)
+      groups.set(owner, [...(groups.get(owner) ?? []), raw])
+    }
+    if (groups.size > 1 || (groups.size === 1 && !groups.has(null))) {
+      return [...groups].map(([serverId, items]) => ({
+        serverId,
+        args: { ...args, [spec.fanOut]: items },
+      }))
+    }
+  }
+
+  if (spec && 'routeBy' in spec && args) {
+    const owner = resolveServerCommand(
+      Object.fromEntries(spec.routeBy.map(key => [key, args[key]]))
+    )
+    if (!owner) return [{ serverId: null, args }]
+    return [
+      {
+        serverId: owner.serverId,
+        args: { ...stripServerScope(owner.serverId, args), ...owner.args },
+      },
+    ]
+  }
+
+  const routed = args ? resolveServerCommand(args) : null
+  return [routed ?? { serverId: null, args }]
+}
+
 /** Reduce scoped ids to the raw ids their owning server stores and matches. */
 export function stripServerScope(
   serverId: ServerId,
@@ -206,6 +348,20 @@ export function stripServerScope(
   }
 }
 
+/** Run states name their session and worktree by raw id; scope both. */
+function decorateRunStates(serverId: ServerId, value: unknown): unknown {
+  if (!Array.isArray(value)) return value
+  return value.map(item => {
+    if (!item || typeof item !== 'object') return item
+    const runState = item as Record<string, unknown>
+    return {
+      ...runState,
+      sessionId: scopedId(serverId, runState.sessionId),
+      worktreeId: scopedId(serverId, runState.worktreeId),
+    }
+  })
+}
+
 function scopedId(serverId: ServerId, resourceId: unknown): unknown {
   return typeof resourceId === 'string' && resourceId
     ? serverResourceKey({ serverId, resourceId })
@@ -214,7 +370,6 @@ function scopedId(serverId: ServerId, resourceId: unknown): unknown {
 
 const EVENT_RESOURCE_KEYS = new Set([
   ...ROUTED_ARGUMENT_KEYS,
-  'archived_worktree_id',
   'parent_session_id',
 ])
 
@@ -281,8 +436,20 @@ function decorateSession(serverId: ServerId, value: unknown): unknown {
     ...(session.parent_session_id
       ? { parent_session_id: scopedId(serverId, session.parent_session_id) }
       : {}),
+    ...(session.delegated_by && typeof session.delegated_by === 'object'
+      ? { delegated_by: decorateDelegator(serverId, session.delegated_by) }
+      : {}),
     serverId,
     resourceId: session.id,
+  }
+}
+
+function decorateDelegator(serverId: ServerId, value: object): unknown {
+  const delegator = value as Record<string, unknown>
+  return {
+    ...delegator,
+    origin_session_id: scopedId(serverId, delegator.origin_session_id),
+    origin_worktree_id: scopedId(serverId, delegator.origin_worktree_id),
   }
 }
 
@@ -353,23 +520,32 @@ export function decorateServerResult<T>(
     [
       'get_worktree',
       'create_worktree',
+      'create_worktree_from_existing_branch',
+      'checkout_pr',
+      'import_worktree',
       'rename_worktree',
-      'unarchive_worktree',
       'create_base_session',
     ].includes(command)
   ) {
     return decorateWorktree(serverId, value) as T
   }
-  if (command === 'list_archived_worktrees' && Array.isArray(value)) {
-    return value.map(item => decorateWorktree(serverId, item)) as T
-  }
   if (
-    ['get_session', 'create_session', 'unarchive_session'].includes(command)
+    command === 'fork_session_to_worktree' &&
+    value &&
+    typeof value === 'object'
   ) {
+    const result = value as Record<string, unknown>
+    return {
+      ...result,
+      worktree: decorateWorktree(serverId, result.worktree),
+      session: decorateSession(serverId, result.session),
+    } as T
+  }
+  if (['get_session', 'create_session'].includes(command)) {
     return decorateSession(serverId, value) as T
   }
-  // These return the next active session id (or null) as a bare string.
-  if (command === 'close_session' || command === 'archive_session') {
+  // Returns the next active session id (or null) as a bare string.
+  if (command === 'close_session') {
     return scopedId(serverId, value) as T
   }
   if (
@@ -383,9 +559,6 @@ export function decorateServerResult<T>(
       sessionId: scopedId(serverId, result.sessionId),
       worktreeId: scopedId(serverId, result.worktreeId),
     } as T
-  }
-  if (command === 'list_archived_sessions' && Array.isArray(value)) {
-    return value.map(item => decorateSession(serverId, item)) as T
   }
   if (
     (command === 'list_all_sessions' || command === 'list_unread_sessions') &&
@@ -431,6 +604,9 @@ export function decorateServerResult<T>(
   if (command === 'get_sessions') {
     return decorateWorktreeSessions(serverId, value) as T
   }
+  if (command === 'get_run_states') {
+    return decorateRunStates(serverId, value) as T
+  }
   if (command === 'bootstrap_project' && value && typeof value === 'object') {
     const bootstrap = value as Record<string, unknown>
     const sessions = bootstrap.sessionsByWorktree as
@@ -446,11 +622,7 @@ export function decorateServerResult<T>(
       : sessions
     return {
       ...bootstrap,
-      runningSessions: Array.isArray(bootstrap.runningSessions)
-        ? bootstrap.runningSessions.map(sessionId =>
-            scopedId(serverId, sessionId)
-          )
-        : bootstrap.runningSessions,
+      runStates: decorateRunStates(serverId, bootstrap.runStates),
       worktrees: Array.isArray(bootstrap.worktrees)
         ? bootstrap.worktrees.map(worktree =>
             decorateWorktree(serverId, worktree)

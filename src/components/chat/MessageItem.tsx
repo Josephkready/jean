@@ -1,17 +1,31 @@
-import { memo, useCallback, useMemo } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { AgentMessageFromRow } from '@/components/agents/AgentMessageLink'
 import { parseAgentSentMessage } from '@/components/agents/agent-messages'
-import { Copy } from '@/components/icons/reicon'
 import { toast } from 'sonner'
-import { PILL_BUBBLE_CLASS, ReplyBubble } from './ReplyBubble'
+import {
+  ReplyBubble,
+  USER_CARD_BUBBLE_CLASS,
+  USER_PILL_BUBBLE_CLASS,
+} from './ReplyBubble'
 import { ChatContinuedNotice } from './ChatContinuedNotice'
-import { parseInlineNumberedQuestion } from './inline-question-utils'
+import { SessionUpdateLine } from './SessionDelegation'
+import { parseSessionUpdates } from './session-update'
+import {
+  parseInlineNumberedQuestion,
+  withoutInlineQuestion,
+} from './inline-question-utils'
 import { InlineQuestionOptions } from './InlineQuestionOptions'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/path-utils'
 import { copyToClipboard } from '@/lib/clipboard'
 import { Markdown } from '@/components/ui/markdown'
 import { MessageThreadContextMenu } from './message-thread-context-menu'
+import {
+  CopyIconButton,
+  findTurnPrompt,
+  USER_HOVER_REVEAL,
+  USER_TAP_HIDDEN,
+} from './user-prompt-chrome'
 import type {
   ChatMessage,
   Question,
@@ -36,17 +50,11 @@ import { FileMentionBadge } from './FileMentionBadge'
 import { SkillBadge } from './SkillBadge'
 import { ToolCallsDisplay } from './ToolCallsDisplay'
 import { ExitPlanModeButton } from './ExitPlanModeButton'
-import { EditedFilesDisplay } from './EditedFilesDisplay'
 import {
   CheckpointTurnRestoreButton,
   isUserTurnFinished,
   turnHasFileEdits,
 } from './CheckpointTurnRestoreButton'
-import {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from '@/components/ui/tooltip'
 import { ThinkingBlock } from './ThinkingBlock'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
@@ -78,6 +86,9 @@ import type { ApprovalModelOverride } from './ApprovalModelSubmenu'
 import { useUIStore } from '@/store/ui-store'
 
 const EMPTY_PATHS: string[] = []
+
+const ASSISTANT_HOVER_REVEAL =
+  'transition-opacity [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:group-hover/message:opacity-100 [@media(pointer:fine)]:group-focus-within/message:opacity-100'
 
 interface MessageItemProps {
   /** The message to render */
@@ -171,11 +182,9 @@ interface MessageItemProps {
   hideApproveButtons?: boolean
   /** Hide the built-in cancelled marker when a parent compact row renders it externally */
   hideCancelledIndicator?: boolean
-  /** Hide the edited-files summary when a compact parent renders it outside. */
-  hideEditedFiles?: boolean
   /** Duration of this assistant message in ms (computed from user→assistant timestamp delta) */
   durationMs?: number | null
-  /** Render the assistant reply in a bubble (agent chat) */
+  /** Render the assistant reply in a bubble */
   bubble?: boolean
   /** Agent chat: hide backend, model, mode, and effort under the user prompt and show it as a pill */
   hideSettingsBadges?: boolean
@@ -221,7 +230,6 @@ export const MessageItem = memo(function MessageItem({
   onCopyToInput,
   hideApproveButtons,
   hideCancelledIndicator,
-  hideEditedFiles = false,
   durationMs,
   bubble = false,
   hideSettingsBadges = false,
@@ -288,6 +296,13 @@ export const MessageItem = memo(function MessageItem({
   // (the streaming section handles rendering those)
   const skipToolCalls =
     isSending && isLastMessage && message.role === 'assistant'
+  const shownInlineQuestion =
+    inlineQuestion && onSendAnswer && !skipToolCalls ? inlineQuestion : null
+  // The question buttons replace the same question in the text
+  const withoutShownQuestion = (text: string) =>
+    shownInlineQuestion
+      ? withoutInlineQuestion(text, shownInlineQuestion)
+      : text
   const shouldRenderTimeline =
     message.role === 'assistant' &&
     !!message.content_blocks &&
@@ -347,26 +362,29 @@ export const MessageItem = memo(function MessageItem({
     onCopyToInput?.(message)
   }, [onCopyToInput, message])
 
+  const [showUserDetails, setShowUserDetails] = useState(false)
+  const handleUserBubbleClick = useCallback((e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('a, button')) return
+    setShowUserDetails(prev => !prev)
+  }, [])
+
+  // Steered prompts inside this reply show the settings of the turn's prompt
+  const turnPrompt = useMemo(
+    () =>
+      message.role === 'assistant' &&
+      getMessages &&
+      message.content_blocks?.some(block => block.type === 'user_input')
+        ? findTurnPrompt(getMessages(), messageIndex)
+        : undefined,
+    [message.role, message.content_blocks, getMessages, messageIndex]
+  )
+
   const userTurnHasFileEdits = useMemo(() => {
     if (message.role !== 'user' || !getMessages) return false
     return turnHasFileEdits(getMessages(), messageIndex)
   }, [message.role, getMessages, messageIndex])
 
-  // The last assistant message of a finished turn also lists the turn
-  // checkpoint's changes made without file tools (e.g. Bash edits).
-  const turnUserMessageId = useMemo(() => {
-    if (message.role !== 'assistant' || !worktreeId || !getMessages) {
-      return undefined
-    }
-    const messages = getMessages()
-    const next = messages[messageIndex + 1]
-    if (next ? next.role !== 'user' : isSending) return undefined
-    for (let i = messageIndex - 1; i >= 0; i--) {
-      const previous = messages[i]
-      if (previous?.role === 'user') return previous.id
-    }
-    return undefined
-  }, [message.role, worktreeId, getMessages, messageIndex, isSending])
+  const showSettingsBadges = !hideSettingsBadges && Boolean(message.model)
 
   // Only offer Restore after the agent turn finishes (not mid-stream).
   const showTurnRestore = useMemo(() => {
@@ -381,21 +399,6 @@ export const MessageItem = memo(function MessageItem({
       .then(() => toast.success('Response copied to clipboard'))
       .catch(() => toast.error('Failed to copy response'))
   }, [assistantResponse])
-
-  const handleCopySteeredText = useCallback(
-    (text: string) => {
-      onCopyToInput?.({
-        id: `${message.id}-steered-copy`,
-        session_id: message.session_id,
-        role: 'user',
-        content: text,
-        timestamp: message.timestamp,
-        content_blocks: [],
-        tool_calls: [],
-      })
-    },
-    [message.id, message.session_id, message.timestamp, onCopyToInput]
-  )
 
   // Content for the message box (shared between user and assistant)
   const {
@@ -517,8 +520,21 @@ export const MessageItem = memo(function MessageItem({
     Boolean(showContent) && !isDuplicateAssistantPlanContent
   const durationBadge =
     message.role === 'assistant' && durationMs != null && durationMs > 0 ? (
-      <span className="mt-1 block min-h-4 text-xs leading-4 text-muted-foreground/40 tabular-nums font-mono">
+      <span
+        className={cn(
+          'mt-1 flex min-h-4 items-center gap-2 text-xs leading-4 text-muted-foreground/40 tabular-nums',
+          ASSISTANT_HOVER_REVEAL
+        )}
+      >
         <MessageTiming durationMs={durationMs} timestamp={message.timestamp} />
+        {!zenMode && assistantResponse && (
+          <span className="hidden md:inline-flex">
+            <CopyIconButton
+              label="Copy response"
+              onClick={handleCopyAssistantResponse}
+            />
+          </span>
+        )}
       </span>
     ) : null
 
@@ -535,7 +551,7 @@ export const MessageItem = memo(function MessageItem({
                 messageServerId === 'local' ? undefined : messageServerId
               }
               alt={`Attached image ${idx + 1}`}
-              thumbnailClassName="h-20 max-w-40 object-contain rounded border border-border/50 cursor-pointer hover:border-primary/50 transition-colors"
+              thumbnailClassName="h-20 max-w-40 object-contain rounded border border-border/50 cursor-pointer hover:border-foreground/20 transition-colors"
             />
           ))}
         </div>
@@ -599,6 +615,9 @@ export const MessageItem = memo(function MessageItem({
                   name: name ?? path,
                   path,
                 }}
+                serverId={
+                  messageServerId === 'local' ? undefined : messageServerId
+                }
                 compact
               />
             )
@@ -705,7 +724,9 @@ export const MessageItem = memo(function MessageItem({
                                   messageId={message.id}
                                   sessionId={sessionId}
                                 >
-                                  {item.text}
+                                  {item.key === lastVisibleTextKey
+                                    ? withoutShownQuestion(item.text)
+                                    : item.text}
                                 </Markdown>
                                 {item.key === lastVisibleTextKey &&
                                   durationBadge}
@@ -716,16 +737,13 @@ export const MessageItem = memo(function MessageItem({
                             return (
                               <SteeredPromptGroup
                                 texts={item.texts}
+                                bubble={hideSettingsBadges}
+                                settings={turnPrompt}
                                 worktreePath={worktreePath}
                                 serverId={
                                   messageServerId === 'local'
                                     ? undefined
                                     : messageServerId
-                                }
-                                onCopyText={
-                                  onCopyToInput
-                                    ? handleCopySteeredText
-                                    : undefined
                                 }
                               />
                             )
@@ -836,6 +854,7 @@ export const MessageItem = memo(function MessageItem({
                             return (
                               <PlanDisplay
                                 filePath={planFilePath}
+                                sessionId={sessionId}
                                 defaultCollapsed={
                                   message.plan_approved || hasFollowUpMessage
                                 }
@@ -960,7 +979,7 @@ export const MessageItem = memo(function MessageItem({
                     messageId={message.id}
                     sessionId={sessionId}
                   >
-                    {displayContent}
+                    {withoutShownQuestion(displayContent)}
                   </Markdown>
                   {!fallbackPrePlanText && durationBadge}
                 </>
@@ -993,30 +1012,14 @@ export const MessageItem = memo(function MessageItem({
         </>
       )}
 
-      {inlineQuestion && onSendAnswer && !skipToolCalls && (
+      {shownInlineQuestion && onSendAnswer && (
         <InlineQuestionOptions
-          question={inlineQuestion.question}
-          options={inlineQuestion.options}
+          question={shownInlineQuestion.question}
+          options={shownInlineQuestion.options}
           disabled={isSending}
           onSend={onSendAnswer}
         />
       )}
-
-      {/* Show edited files at the bottom of assistant messages */}
-      {message.role === 'assistant' &&
-        ((message.tool_calls?.length ?? 0) > 0 || turnUserMessageId) &&
-        !hideEditedFiles &&
-        !skipToolCalls && (
-          <EditedFilesDisplay
-            toolCalls={message.tool_calls}
-            worktreePath={worktreePath}
-            getMessages={getMessages}
-            messageIndex={messageIndex}
-            serverId={messageServerId === 'local' ? undefined : messageServerId}
-            worktreeId={worktreeId ?? undefined}
-            turnUserMessageId={turnUserMessageId}
-          />
-        )}
 
       {message.cancelled && !hideCancelledIndicator && (
         <span className="text-xs text-muted-foreground/50 italic">
@@ -1035,65 +1038,55 @@ export const MessageItem = memo(function MessageItem({
     >
       {message.role === 'user' ? (
         <div className="group flex max-w-[85%] min-w-0 flex-col items-end gap-1 sm:max-w-[70%]">
+          {/* react-doctor-disable-next-line react-doctor/no-static-element-interactions, react-doctor/click-events-have-key-events -- touch-only tap reveal; fine pointers/keyboard reveal details via group-hover/focus-within */}
           <div
+            onClick={handleUserBubbleClick}
             className={cn(
               'max-w-full',
               hideSettingsBadges
-                ? cn(
-                    PILL_BUBBLE_CLASS,
-                    '[--bubble-bg:var(--agent-accent,var(--muted))] bg-(--bubble-bg)',
-                    // Agent-colored bubbles are strong shades: use white text
-                    '[--bubble-fg:var(--agent-accent-fg,var(--foreground))] text-(--bubble-fg) [&_a]:text-inherit',
-                    // Attachments: the bubble color, a bit darker
-                    '[&_[data-attachments]>*]:border-transparent [&_[data-attachments]>*]:bg-[color-mix(in_oklab,var(--bubble-bg)_80%,black)]'
-                  )
-                : 'min-w-0 break-words [overflow-wrap:anywhere] rounded-lg border border-border bg-muted/20 px-3 py-2 text-foreground'
+                ? USER_PILL_BUBBLE_CLASS
+                : USER_CARD_BUBBLE_CLASS
             )}
           >
             {messageBoxContent}
-            {!zenMode && !hideSettingsBadges && message.model && (
-              <div className="mt-1.5">
-                <MessageSettingsBadges
-                  model={message.model}
-                  executionMode={message.execution_mode}
-                  thinkingLevel={message.thinking_level}
-                  effortLevel={message.effort_level}
-                  provider={message.custom_profile_name}
-                  isCursor={message.model.startsWith('cursor/')}
-                />
+          </div>
+          {/* Settings and actions under the prompt, revealed on hover/focus
+              (restore only after finished turns with file edits) */}
+          {!zenMode &&
+            (showSettingsBadges || showTurnRestore || onCopyToInput) && (
+              <div
+                className={cn(
+                  'flex shrink-0 items-center gap-1 pr-0.5',
+                  USER_HOVER_REVEAL,
+                  !showUserDetails && USER_TAP_HIDDEN
+                )}
+              >
+                {showSettingsBadges && message.model && (
+                  <MessageSettingsBadges
+                    model={message.model}
+                    executionMode={message.execution_mode}
+                    thinkingLevel={message.thinking_level}
+                    effortLevel={message.effort_level}
+                    provider={message.custom_profile_name}
+                    isCursor={message.model.startsWith('cursor/')}
+                  />
+                )}
+                {showTurnRestore && (
+                  <CheckpointTurnRestoreButton
+                    userMessageId={message.id}
+                    worktreeId={worktreeId}
+                    hasFileEdits
+                    className="mt-0"
+                  />
+                )}
+                {onCopyToInput && (
+                  <CopyIconButton
+                    label="Copy prompt"
+                    onClick={handleCopyToInput}
+                  />
+                )}
               </div>
             )}
-          </div>
-          {/* Actions under the prompt (restore only after finished turns with file edits) */}
-          {!zenMode && (showTurnRestore || onCopyToInput) && (
-            <div className="flex shrink-0 items-center gap-1 pr-0.5">
-              {showTurnRestore && (
-                <CheckpointTurnRestoreButton
-                  userMessageId={message.id}
-                  worktreeId={worktreeId}
-                  hasFileEdits
-                  variant="userBubble"
-                  className="mt-0"
-                />
-              )}
-              {onCopyToInput && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label="Copy message to input"
-                      onClick={handleCopyToInput}
-                      className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] cursor-pointer transition-colors text-muted-foreground/80 hover:bg-muted/50 hover:text-foreground focus-visible:text-foreground [@media(pointer:fine)]:text-muted-foreground/0 [@media(pointer:fine)]:group-hover:text-muted-foreground/70"
-                    >
-                      <Copy className="h-3.5 w-3.5 shrink-0" />
-                      <span>Copy</span>
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Copy to clipboard</TooltipContent>
-                </Tooltip>
-              )}
-            </div>
-          )}
         </div>
       ) : (
         <div className="group/message group relative text-foreground/90 w-full min-w-0 break-words">
@@ -1103,21 +1096,17 @@ export const MessageItem = memo(function MessageItem({
             messageBoxContent
           )}
           {!zenMode && assistantResponse && (
-            <div className="mt-1 flex justify-end">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="Copy response to clipboard"
-                    onClick={handleCopyAssistantResponse}
-                    className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] cursor-pointer transition-colors text-muted-foreground/80 hover:bg-muted/50 hover:text-foreground focus-visible:text-foreground [@media(pointer:fine)]:text-muted-foreground/0 [@media(pointer:fine)]:group-hover:text-muted-foreground/70"
-                  >
-                    <Copy className="h-3.5 w-3.5 shrink-0" />
-                    <span>Copy</span>
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Copy response</TooltipContent>
-              </Tooltip>
+            <div
+              className={cn(
+                'mt-1 flex justify-end',
+                durationBadge && 'md:hidden',
+                ASSISTANT_HOVER_REVEAL
+              )}
+            >
+              <CopyIconButton
+                label="Copy response"
+                onClick={handleCopyAssistantResponse}
+              />
             </div>
           )}
         </div>
@@ -1131,6 +1120,9 @@ export const MessageItem = memo(function MessageItem({
     if (isAgentUpdateMessage(message.content)) return null
     if (isChatContinuedMessage(message.content))
       return <ChatContinuedNotice content={message.content} />
+    // Sub-session results live in the side panel; the stream keeps one line
+    const sessionUpdates = parseSessionUpdates(message.content)
+    if (sessionUpdates) return <SessionUpdateLine updates={sessionUpdates} />
     // A message from an agent: one line that opens the conversation
     const agentSent = parseAgentSentMessage(message.content)
     if (agentSent)

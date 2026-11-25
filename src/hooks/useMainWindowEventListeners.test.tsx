@@ -3,6 +3,7 @@ import { renderHook } from '@testing-library/react'
 import { useChatStore } from '@/store/chat-store'
 import { useTerminalStore } from '@/store/terminal-store'
 import { useUIStore } from '@/store/ui-store'
+import { useProjectsStore } from '@/store/projects-store'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   addTerminalTabForShortcut,
@@ -19,7 +20,6 @@ import {
   isAgentsViewActive,
   isChatComposerTarget,
   isPlainSessionTerminalFocused,
-  resolveShortcutWithBypass,
   shouldAllowKeybindingThroughOpenOverlay,
   shouldLetChatInputHandleAction,
   shouldLetPlanDialogHandleAction,
@@ -118,51 +118,6 @@ describe('shouldLetChatInputHandleAction', () => {
     expect(
       shouldLetChatInputHandleAction('previous_session', document.body, false)
     ).toBe(false)
-  })
-})
-
-describe('resolveShortcutWithBypass', () => {
-  it('maps the modifier-decorated close shortcut to the close action and flags bypass', () => {
-    // Shift held → `mod+shift+w`, which is unbound; strip Shift → `mod+w`.
-    expect(
-      resolveShortcutWithBypass('mod+shift+w', DEFAULT_KEYBINDINGS, 'shift')
-    ).toEqual({
-      matchedAction: 'close_session_or_worktree',
-      bypassConfirm: true,
-    })
-  })
-
-  it('maps the plain close shortcut without a bypass flag', () => {
-    expect(
-      resolveShortcutWithBypass('mod+w', DEFAULT_KEYBINDINGS, 'shift')
-    ).toEqual({
-      matchedAction: 'close_session_or_worktree',
-      bypassConfirm: false,
-    })
-  })
-
-  it('does not strip-and-retry when the bypass modifier is off', () => {
-    expect(
-      resolveShortcutWithBypass('mod+shift+w', DEFAULT_KEYBINDINGS, 'none')
-    ).toEqual({ matchedAction: null, bypassConfirm: false })
-  })
-
-  it('rejects the retry when the stripped shortcut maps to a non-close action', () => {
-    // Alt held → `mod+alt+t` (unbound); strip Alt → `mod+t` = new_session.
-    // Narrow acceptance: only the close action may ride the stripped retry.
-    expect(
-      resolveShortcutWithBypass('mod+alt+t', DEFAULT_KEYBINDINGS, 'alt')
-    ).toEqual({ matchedAction: null, bypassConfirm: false })
-  })
-
-  it('prefers a direct user binding of the decorated shortcut over the bypass', () => {
-    const keybindings = {
-      ...DEFAULT_KEYBINDINGS,
-      new_worktree: 'mod+shift+w',
-    }
-    expect(
-      resolveShortcutWithBypass('mod+shift+w', keybindings, 'shift')
-    ).toEqual({ matchedAction: 'new_worktree', bypassConfirm: false })
   })
 })
 
@@ -313,7 +268,6 @@ describe('useMainWindowEventListeners terminal shortcuts', () => {
       compactingSessions: {},
       reviewingSessions: {},
       sessionLabels: {},
-      savingContext: {},
       skippedQuestionSessions: {},
     })
 
@@ -1032,6 +986,32 @@ describe('close shortcut on the Agents page', () => {
     window.removeEventListener('close-session-or-worktree', onClose)
   })
 
+  it.each([
+    ['new session', { key: 't', code: 'KeyT', shiftKey: false }],
+    ['new session picker', { key: 'T', code: 'KeyT', shiftKey: true }],
+  ])('blocks the %s shortcut while an agent page is open', (_, keys) => {
+    const queryClient = new QueryClient()
+    queryClient.setQueryData(['preferences'], { agents_enabled: true })
+    useUIStore.setState({ railSection: 'agents' })
+    const onCreate = vi.fn()
+    window.addEventListener('create-new-session', onCreate)
+    const { unmount } = renderListeners(queryClient)
+
+    const event = new KeyboardEvent('keydown', {
+      ...keys,
+      metaKey: true,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.body.dispatchEvent(event)
+
+    expect(onCreate).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(true)
+    unmount()
+    window.removeEventListener('create-new-session', onCreate)
+  })
+
   it('still closes the session or worktree in the projects view', () => {
     const queryClient = new QueryClient()
     queryClient.setQueryData(['preferences'], { agents_enabled: true })
@@ -1364,5 +1344,89 @@ describe('toggleBrowserKeybinding', () => {
     expect(useTerminalStore.getState().modalTerminalOpen['canvas-wt']).toBe(
       false
     )
+  })
+})
+
+describe('Recent session navigation shortcuts', () => {
+  function pressArrow(key: 'ArrowUp' | 'ArrowDown', shiftKey: boolean) {
+    const event = new KeyboardEvent('keydown', {
+      key,
+      code: key,
+      metaKey: true,
+      ctrlKey: true,
+      shiftKey,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.body.dispatchEvent(event)
+    return event
+  }
+
+  function renderListeners() {
+    const queryClient = new QueryClient()
+    return renderHook(() => useMainWindowEventListeners(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      ),
+    })
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    useUIStore.setState({
+      leftSidebarVisible: true,
+      sessionChatModalOpen: false,
+      commandPaletteOpen: false,
+      preferencesOpen: false,
+      magicModalOpen: false,
+    })
+    useProjectsStore.setState({ sidebarActiveTab: 'recent' })
+  })
+
+  it('opens the adjacent Recent session with Cmd/Ctrl+Shift+Arrow', () => {
+    const onAdjacent = vi.fn()
+    window.addEventListener('open-adjacent-recent-session', onAdjacent)
+    const { unmount } = renderListeners()
+
+    expect(pressArrow('ArrowDown', true).defaultPrevented).toBe(true)
+    expect(pressArrow('ArrowUp', true).defaultPrevented).toBe(true)
+
+    expect(
+      onAdjacent.mock.calls.map(([e]) => (e as CustomEvent).detail.direction)
+    ).toEqual([1, -1])
+    unmount()
+    window.removeEventListener('open-adjacent-recent-session', onAdjacent)
+  })
+
+  it('scrolls the chat with Cmd/Ctrl+Arrow while Recent is visible', () => {
+    const onAdjacent = vi.fn()
+    const onScroll = vi.fn()
+    window.addEventListener('open-adjacent-recent-session', onAdjacent)
+    window.addEventListener('scroll-chat', onScroll)
+    const { unmount } = renderListeners()
+
+    pressArrow('ArrowDown', false)
+
+    expect(onAdjacent).not.toHaveBeenCalled()
+    expect((onScroll.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      direction: 'down',
+    })
+    unmount()
+    window.removeEventListener('open-adjacent-recent-session', onAdjacent)
+    window.removeEventListener('scroll-chat', onScroll)
+  })
+
+  it('leaves Cmd/Ctrl+Shift+Arrow alone when Recent is hidden', () => {
+    useProjectsStore.setState({ sidebarActiveTab: 'projects' })
+    const onAdjacent = vi.fn()
+    window.addEventListener('open-adjacent-recent-session', onAdjacent)
+    const { unmount } = renderListeners()
+
+    expect(pressArrow('ArrowDown', true).defaultPrevented).toBe(false)
+    expect(onAdjacent).not.toHaveBeenCalled()
+    unmount()
+    window.removeEventListener('open-adjacent-recent-session', onAdjacent)
   })
 })

@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils'
 import {
   IDENTITY_ZOOM,
   clampPan,
+  clampScale,
   distance,
   isDoubleTap,
   isZoomed,
@@ -26,6 +27,9 @@ interface ZoomableImageProps {
  * Pinch-to-zoom, drag-to-pan, double-tap and wheel zoom around any child.
  * Uses pointer events with `touch-action: none` so iOS Safari does not
  * swallow the gesture (the page viewport is locked via the viewport meta).
+ * With `onSwipe`, a horizontal drag at 1x moves the content with the finger
+ * and calls `onSwipe` on release once the drag is long enough. A zoomed image
+ * pans instead and never swipes.
  */
 export function ZoomableImage({
   children,
@@ -34,9 +38,12 @@ export function ZoomableImage({
 }: ZoomableImageProps) {
   const ref = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState<ZoomState>(IDENTITY_ZOOM)
+  const [dragging, setDragging] = useState(false)
   const zoomRef = useRef(zoom)
   const pointers = useRef(new Map<number, Point>())
-  const pinch = useRef<{ dist: number; zoom: ZoomState } | null>(null)
+  const pinch = useRef<{ dist: number; origin: Point; zoom: ZoomState } | null>(
+    null
+  )
   const drag = useRef<{ start: Point; origin: ZoomState } | null>(null)
   const lastTap = useRef<{ time: number; point: Point } | null>(null)
   const moved = useRef(false)
@@ -62,12 +69,20 @@ export function ZoomableImage({
   }
 
   const onPointerDown = (e: React.PointerEvent) => {
-    ref.current?.setPointerCapture?.(e.pointerId)
+    // Touch pointers are already bound to their target. Capturing them here
+    // would hide pointerup from the context menu's long-press timer.
+    if (e.pointerType === 'mouse') ref.current?.setPointerCapture?.(e.pointerId)
+    setDragging(true)
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     moved.current = false
     if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()] as [Point, Point]
-      pinch.current = { dist: distance(a, b), zoom: zoomRef.current }
+      const mid = midpoint(a, b)
+      pinch.current = {
+        dist: distance(a, b),
+        origin: local(mid.x, mid.y),
+        zoom: zoomRef.current,
+      }
       drag.current = null
     } else if (pointers.current.size === 1) {
       drag.current = {
@@ -85,8 +100,20 @@ export function ZoomableImage({
       const mid = midpoint(a, b)
       const start = pinch.current
       const ratio = distance(a, b) / (start.dist || 1)
+      const scale = clampScale(start.zoom.scale * ratio)
+      const scaleRatio = scale / start.zoom.scale
+      const center = local(mid.x, mid.y)
+      // The content point under the initial pinch center follows the fingers'
+      // midpoint, so a pinch also pans.
       apply(
-        zoomAt(start.zoom, start.zoom.scale * ratio, local(mid.x, mid.y), box())
+        clampPan(
+          {
+            scale,
+            x: center.x - (start.origin.x - start.zoom.x) * scaleRatio,
+            y: center.y - (start.origin.y - start.zoom.y) * scaleRatio,
+          },
+          box()
+        )
       )
       moved.current = true
     } else if (drag.current) {
@@ -104,6 +131,9 @@ export function ZoomableImage({
             box()
           )
         )
+      } else if (onSwipe && moved.current) {
+        // At 1x the content follows the finger horizontally.
+        apply({ scale: 1, x: dx, y: 0 })
       }
     }
   }
@@ -120,15 +150,15 @@ export function ZoomableImage({
     }
     const d = drag.current
     drag.current = null
+    setDragging(false)
     if (!wasSingle || !d) return
     const end = { x: e.clientX, y: e.clientY }
     if (moved.current) {
-      const dir = swipeDirection(
-        zoomRef.current,
-        end.x - d.start.x,
-        end.y - d.start.y
-      )
+      const dir = onSwipe
+        ? swipeDirection(zoomRef.current, end.x - d.start.x, end.y - d.start.y)
+        : 0
       if (dir !== 0) onSwipe?.(dir)
+      else if (!isZoomed(zoomRef.current)) apply(IDENTITY_ZOOM)
       return
     }
     const now = Date.now()
@@ -144,6 +174,8 @@ export function ZoomableImage({
     pointers.current.delete(e.pointerId)
     pinch.current = null
     drag.current = null
+    setDragging(false)
+    if (!isZoomed(zoomRef.current)) apply(IDENTITY_ZOOM)
   }
 
   // Non-passive wheel listener so ctrl+wheel (trackpad pinch) is not also
@@ -183,9 +215,13 @@ export function ZoomableImage({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
+      onDragStart={e => e.preventDefault()}
     >
       <div
-        className="flex max-h-full max-w-full items-center justify-center will-change-transform"
+        className={cn(
+          'flex max-h-full max-w-full items-center justify-center will-change-transform',
+          !dragging && 'transition-transform duration-200 ease-out'
+        )}
         style={{
           transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`,
           cursor: isZoomed(zoom) ? 'grab' : 'zoom-in',

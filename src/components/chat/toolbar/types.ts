@@ -11,11 +11,7 @@ import type {
   Backend,
 } from '@/types/chat'
 import type { McpServerInfo } from '@/types/chat'
-import type {
-  PrDisplayStatus,
-  CheckStatus,
-  MergeableStatus,
-} from '@/types/pr-status'
+import type { PrDisplayStatus, CheckStatus } from '@/types/pr-status'
 import type { DiffRequest } from '@/types/git-diff'
 import type { PackageScript } from '@/services/projects'
 import type {
@@ -53,6 +49,8 @@ export interface ChatToolbarProps {
   hasPendingAttachments: boolean
   hasInputValue: boolean
   executionMode: ExecutionMode
+  /** Agent chats cannot use Plan mode */
+  hidePlanMode?: boolean
   selectedBackend: Backend
   selectedModel: string
   selectedProvider: string | null
@@ -72,11 +70,12 @@ export interface ChatToolbarProps {
   branchDiffAdded: number
   branchDiffRemoved: number
 
+  /** Inside SessionChatModal, whose header already links the PR */
+  isModal?: boolean
   prUrl: string | undefined
   prNumber: number | undefined
   displayStatus: PrDisplayStatus | undefined
   checkStatus: CheckStatus | undefined
-  mergeableStatus: MergeableStatus | undefined
 
   activeWorktreePath: string | undefined
   worktreeId: string | null
@@ -97,7 +96,6 @@ export interface ChatToolbarProps {
 
   /** Undefined hides magic commands (server sessions) */
   onOpenMagicModal?: () => void
-  onSaveContext: () => void
   onLoadContext: () => void
   onCommit: () => void
   onCommitAndPush: () => void
@@ -105,7 +103,6 @@ export interface ChatToolbarProps {
   onReview: () => void
   onMerge: () => void
   onMergePr: () => void
-  onResolvePrConflicts: () => void
   onResolveConflicts: () => void
   hasOpenPr: boolean
   onSetDiffRequest: (request: DiffRequest) => void
@@ -123,9 +120,10 @@ export interface ChatToolbarProps {
   onCancel: () => void
   /** When true while sending, the secondary submit button steers instead of queues. */
   willSteer?: boolean
-  steerWithModifier?: boolean
+  actionWithModifier?: boolean
   canSteer?: boolean
   onSteer?: () => void
+  onQueue?: () => void
   queuedMessageCount?: number
 
   availableMcpServers: McpServerInfo[]

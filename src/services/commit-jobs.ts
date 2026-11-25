@@ -46,6 +46,8 @@ export async function startCommitJob(
 
   const currentJob = await invoke<CommitJob | null>('get_commit_job', {
     jobId: job.id,
+    worktreeId: args.worktreeId,
+    worktreePath: args.worktreePath,
   })
   handleUpdate(currentJob)
 
@@ -56,9 +58,8 @@ async function startWebCommitJob(
   args: StartCommitJobArgs,
   jobId: string
 ): Promise<StartCommitJobResponse> {
-  const token = localStorage.getItem('jean-http-token') ?? ''
-  const query = token ? `?token=${encodeURIComponent(token)}` : ''
-  const url = `/api/commit-jobs${query}`
+  // Same-origin request: the web access session cookie authenticates it.
+  const url = '/api/commit-jobs'
   const body = JSON.stringify({ ...args, jobId })
 
   // Beacon is specifically designed to be delivered while iOS suspends the

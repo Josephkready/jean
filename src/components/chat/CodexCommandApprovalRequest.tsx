@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { ApprovalCard } from './ApprovalCard'
+import { ApprovalShortcutKbd, useApprovalShortcuts } from './approval-shortcuts'
 import type { CodexCommandApprovalRequest } from '@/types/chat'
 import { isCodexDecisionAvailable } from './codex-command-approval-utils'
 
@@ -24,6 +25,12 @@ export function CodexCommandApprovalRequestCard({
   const isDecisionAvailable = (decision: 'accept' | 'decline' | 'cancel') =>
     isCodexDecisionAvailable(request.available_decisions, decision)
 
+  useApprovalShortcuts({
+    onApprove: isDecisionAvailable('accept') ? onApprove : undefined,
+    onApproveYolo,
+    onDeny: isDecisionAvailable('decline') ? onDecline : undefined,
+  })
+
   return (
     <ApprovalCard
       title={title}
@@ -33,6 +40,7 @@ export function CodexCommandApprovalRequestCard({
           {isDecisionAvailable('accept') ? (
             <Button size="sm" onClick={onApprove}>
               Approve
+              <ApprovalShortcutKbd action="approve_plan" />
             </Button>
           ) : null}
           {/*
@@ -42,10 +50,12 @@ export function CodexCommandApprovalRequestCard({
         */}
           <Button size="sm" variant="destructive" onClick={onApproveYolo}>
             Approve (Full access)
+            <ApprovalShortcutKbd action="approve_plan_yolo" />
           </Button>
           {isDecisionAvailable('decline') ? (
             <Button size="sm" variant="secondary" onClick={onDecline}>
-              Decline
+              Deny
+              <ApprovalShortcutKbd action="deny_permission" />
             </Button>
           ) : null}
           {onCancel && isDecisionAvailable('cancel') ? (
@@ -57,7 +67,7 @@ export function CodexCommandApprovalRequestCard({
       }
     >
       {request.command ? (
-        <pre className="mb-3 overflow-x-auto rounded bg-background px-3 py-2 text-xs">
+        <pre className="mb-3 rounded bg-background px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
           {request.command}
         </pre>
       ) : null}
@@ -99,7 +109,7 @@ export function CodexCommandApprovalRequestCard({
             <div className="font-medium text-foreground">
               Additional permissions
             </div>
-            <pre className="overflow-x-auto rounded bg-background/60 p-2 text-[11px] whitespace-pre-wrap break-words">
+            <pre className="overflow-x-auto rounded bg-background/60 p-2 font-mono text-2xs whitespace-pre-wrap break-words">
               {JSON.stringify(request.additional_permissions, null, 2)}
             </pre>
           </div>

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, State};
 
-use super::BackgroundTaskManager;
+use super::{BackgroundTaskManager, UiClient};
 use crate::projects::git_status::ActiveWorktreeInfo;
 use crate::projects::storage::load_projects_data;
 use serde::Deserialize;
@@ -57,22 +57,24 @@ fn load_status_contexts(app: &AppHandle) -> HashMap<String, WorktreeStatusContex
 
 /// Set the application focus state
 ///
-/// This controls whether background polling is active.
-/// Polling only occurs when the application is focused.
+/// Reports focus for the native app window. WebSocket clients report under
+/// their own connection id in `http_server::websocket`, so one client's blur
+/// does not pause polling for the others.
 pub fn set_app_focus_state(
     state: State<'_, BackgroundTaskManager>,
     focused: bool,
 ) -> Result<(), String> {
-    state.set_focused(focused);
+    state.set_client_focus(UiClient::Native, focused);
     Ok(())
 }
 
-/// Set the active worktree for git status polling
+/// Set the worktree `client` has selected, for fast git status polling.
 ///
-/// Pass null/None values to clear the active worktree and stop polling.
+/// Pass null/None values to clear that client's active worktree. Loads
+/// projects data from disk, so callers on an async loop should run it off-thread.
 pub fn set_active_worktree_for_polling(
     app: AppHandle,
-    state: State<'_, BackgroundTaskManager>,
+    client: UiClient,
     worktree_id: Option<String>,
     worktree_path: Option<String>,
     base_branch: Option<String>,
@@ -96,7 +98,8 @@ pub fn set_active_worktree_for_polling(
         _ => None,
     };
 
-    state.set_active_worktree(info);
+    app.state::<BackgroundTaskManager>()
+        .set_active_worktree(client, info);
     Ok(())
 }
 
@@ -133,7 +136,7 @@ pub struct PrWorktreeInfo {
 
 /// Set all worktrees with open PRs for background sweep polling.
 ///
-/// The sweep polls these worktrees round-robin at a slow interval (5 min)
+/// Every 5 minutes the sweep refreshes all of them except the active one,
 /// to detect PR merges even when the worktree isn't actively selected.
 pub fn set_pr_worktrees_for_polling(
     app: AppHandle,
@@ -172,7 +175,7 @@ pub struct AllWorktreeInfo {
 
 /// Set all worktrees for background git status sweep polling.
 ///
-/// The sweep polls these worktrees round-robin at a slow interval (60s)
+/// Every 2 minutes the sweep refreshes all of them except the active one,
 /// to keep uncommitted diff stats up to date even when not actively selected.
 pub fn set_all_worktrees_for_polling(
     app: AppHandle,

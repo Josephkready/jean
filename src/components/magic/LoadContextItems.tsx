@@ -18,13 +18,9 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from '@/components/ui/tooltip'
-import { getModifierSymbol } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+import { SeverityBadge } from '@/components/worktree/NewWorktreeItems'
 import type {
-  GitHubIssue,
-  GitHubPullRequest,
-  DependabotAlert,
-  RepositoryAdvisory,
   LoadedIssueContext,
   LoadedPullRequestContext,
   LoadedSecurityAlertContext,
@@ -47,6 +43,102 @@ export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// =============================================================================
+// Shared row actions
+// =============================================================================
+
+const ACTION_BUTTON_CLASS =
+  'p-1 rounded focus:outline-none focus:ring-1 focus:ring-ring transition-colors'
+
+function ActionButton({
+  label,
+  onClick,
+  disabled,
+  destructive = false,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  disabled: boolean
+  destructive?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          onClick={onClick}
+          disabled={disabled}
+          className={cn(
+            ACTION_BUTTON_CLASS,
+            destructive ? 'hover:bg-destructive/10' : 'hover:bg-accent'
+          )}
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** View, optional refresh, and remove buttons for a loaded context row */
+function ContextItemActions({
+  refreshLabel,
+  isLoading = false,
+  isRemoving,
+  onView,
+  onRefresh,
+  onRemove,
+}: {
+  refreshLabel?: string
+  isLoading?: boolean
+  isRemoving: boolean
+  onView: () => void
+  onRefresh?: () => void
+  onRemove: () => void
+}) {
+  const isDisabled = isLoading || isRemoving
+  const spinner = (
+    <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
+  )
+
+  return (
+    <div className="flex items-center gap-1 flex-shrink-0">
+      <ActionButton label="View context" onClick={onView} disabled={isDisabled}>
+        <Eye className="h-3.5 w-3.5 text-muted-foreground" />
+      </ActionButton>
+      {onRefresh && refreshLabel && (
+        <ActionButton
+          label={refreshLabel}
+          onClick={onRefresh}
+          disabled={isDisabled}
+        >
+          {isLoading ? (
+            spinner
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
+          )}
+        </ActionButton>
+      )}
+      <ActionButton
+        label="Remove from context"
+        onClick={onRemove}
+        disabled={isDisabled}
+        destructive
+      >
+        {isRemoving ? (
+          spinner
+        ) : (
+          <X className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
+        )}
+      </ActionButton>
+    </div>
+  )
 }
 
 // =============================================================================
@@ -93,67 +185,14 @@ export function LoadedIssueItem({
           )}
         </div>
       </div>
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="View context"
-              onClick={onView}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>View context</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Refresh issue"
-              onClick={onRefresh}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isLoading ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Refresh issue</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Remove from context"
-              onClick={onRemove}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-destructive/10 focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isRemoving ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <X className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Remove from context</TooltipContent>
-        </Tooltip>
-      </div>
+      <ContextItemActions
+        refreshLabel="Refresh issue"
+        isLoading={isLoading}
+        isRemoving={isRemoving}
+        onView={onView}
+        onRefresh={onRefresh}
+        onRemove={onRemove}
+      />
     </div>
   )
 }
@@ -202,95 +241,15 @@ export function LoadedPRItem({
           )}
         </div>
       </div>
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="View context"
-              onClick={onView}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>View context</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Refresh PR"
-              onClick={onRefresh}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isLoading ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Refresh PR</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Remove from context"
-              onClick={onRemove}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-destructive/10 focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isRemoving ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <X className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Remove from context</TooltipContent>
-        </Tooltip>
-      </div>
+      <ContextItemActions
+        refreshLabel="Refresh PR"
+        isLoading={isLoading}
+        isRemoving={isRemoving}
+        onView={onView}
+        onRefresh={onRefresh}
+        onRemove={onRemove}
+      />
     </div>
-  )
-}
-
-// =============================================================================
-// Severity Badge (shared)
-// =============================================================================
-
-const SEVERITY_COLORS: Record<string, string> = {
-  critical: 'bg-destructive/10 text-destructive border-destructive/20',
-  high: 'bg-warning/10 text-warning border-warning/20',
-  medium: 'bg-warning/10 text-warning border-warning/20',
-  low: 'bg-info/10 text-info border-info/20',
-}
-
-function SeverityBadge({ severity }: { severity: string }) {
-  const colorClasses =
-    SEVERITY_COLORS[severity.toLowerCase()] ??
-    'bg-muted text-muted-foreground border-border'
-  return (
-    <span
-      className={cn(
-        'px-1.5 py-0.5 text-[10px] rounded-full border capitalize flex-shrink-0',
-        colorClasses
-      )}
-    >
-      {severity}
-    </span>
   )
 }
 
@@ -336,157 +295,14 @@ export function LoadedSecurityItem({
           </span>
         </div>
       </div>
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="View context"
-              onClick={onView}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>View context</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Refresh alert"
-              onClick={onRefresh}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isLoading ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Refresh alert</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Remove from context"
-              onClick={onRemove}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-destructive/10 focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isRemoving ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <X className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Remove from context</TooltipContent>
-        </Tooltip>
-      </div>
-    </div>
-  )
-}
-
-// =============================================================================
-// Security Alert Item (search result)
-// =============================================================================
-
-interface SecurityAlertItemProps {
-  alert: DependabotAlert
-  index: number
-  isSelected: boolean
-  isLoading: boolean
-  onMouseEnter: () => void
-  onClick: () => void
-  onPreview: () => void
-}
-
-export function SecurityAlertItem({
-  alert,
-  index,
-  isSelected,
-  isLoading,
-  onMouseEnter,
-  onClick,
-  onPreview,
-}: SecurityAlertItemProps) {
-  return (
-    <div
-      data-load-item-index={index}
-      onMouseEnter={onMouseEnter}
-      className={cn(
-        'w-full flex items-start gap-3 px-3 py-2 text-left transition-colors',
-        'hover:bg-accent',
-        isSelected && 'bg-accent',
-        isLoading && 'opacity-50'
-      )}
-    >
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={isLoading}
-        className="flex items-start gap-3 flex-1 min-w-0 focus:outline-none"
-      >
-        {isLoading ? (
-          <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
-        ) : (
-          <Shield
-            className={cn(
-              'h-4 w-4 mt-0.5 flex-shrink-0',
-              alert.state === 'open' ? 'text-warning' : 'text-muted-foreground'
-            )}
-          />
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <SeverityBadge severity={alert.severity} />
-            <span className="text-xs text-muted-foreground shrink-0">
-              #{alert.number}
-            </span>
-            <span className="text-sm font-medium truncate">
-              {alert.packageName}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
-            <span className="text-xs text-muted-foreground truncate">
-              {alert.summary}
-            </span>
-            <span className="text-xs text-muted-foreground/60 shrink-0">
-              {alert.cveId ?? alert.ghsaId}
-            </span>
-          </div>
-        </div>
-      </button>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="Preview alert"
-            onClick={e => {
-              e.stopPropagation()
-              onPreview()
-            }}
-            className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 hover:bg-accent hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-colors mt-0.5 flex-shrink-0"
-          >
-            <Eye className="h-3.5 w-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent>Preview alert ({getModifierSymbol()}O)</TooltipContent>
-      </Tooltip>
+      <ContextItemActions
+        refreshLabel="Refresh alert"
+        isLoading={isLoading}
+        isRemoving={isRemoving}
+        onView={onView}
+        onRefresh={onRefresh}
+        onRemove={onRemove}
+      />
     </div>
   )
 }
@@ -531,377 +347,14 @@ export function LoadedAdvisoryItem({
           </span>
         </div>
       </div>
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="View context"
-              onClick={onView}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>View context</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Refresh advisory"
-              onClick={onRefresh}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isLoading ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Refresh advisory</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Remove from context"
-              onClick={onRemove}
-              disabled={isDisabled}
-              className={cn(
-                'p-1 rounded hover:bg-destructive/10 focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isRemoving ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <X className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Remove from context</TooltipContent>
-        </Tooltip>
-      </div>
-    </div>
-  )
-}
-
-// =============================================================================
-// Advisory Item (search result)
-// =============================================================================
-
-interface AdvisoryItemProps {
-  advisory: RepositoryAdvisory
-  index: number
-  isSelected: boolean
-  isLoading: boolean
-  onMouseEnter: () => void
-  onClick: () => void
-  onPreview: () => void
-}
-
-export function AdvisoryItem({
-  advisory,
-  index,
-  isSelected,
-  isLoading,
-  onMouseEnter,
-  onClick,
-  onPreview,
-}: AdvisoryItemProps) {
-  const vulnCount = advisory.vulnerabilities.length
-  return (
-    <div
-      data-load-item-index={index}
-      onMouseEnter={onMouseEnter}
-      className={cn(
-        'w-full flex items-start gap-3 px-3 py-2 text-left transition-colors',
-        'hover:bg-accent',
-        isSelected && 'bg-accent',
-        isLoading && 'opacity-50'
-      )}
-    >
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={isLoading}
-        className="flex items-start gap-3 flex-1 min-w-0 focus:outline-none"
-      >
-        {isLoading ? (
-          <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
-        ) : (
-          <ShieldAlert
-            className={cn(
-              'h-4 w-4 mt-0.5 flex-shrink-0',
-              advisory.state === 'published'
-                ? 'text-warning'
-                : 'text-muted-foreground'
-            )}
-          />
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <SeverityBadge severity={advisory.severity} />
-            <span className="text-sm font-medium truncate">
-              {advisory.summary}
-            </span>
-            {vulnCount > 0 && (
-              <span className="shrink-0 text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full border border-border">
-                {vulnCount} {vulnCount === 1 ? 'pkg' : 'pkgs'}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5 mt-0.5">
-            <span className="text-xs text-muted-foreground/60 shrink-0">
-              {advisory.cveId ?? advisory.ghsaId}
-            </span>
-          </div>
-        </div>
-      </button>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="Preview advisory"
-            onClick={e => {
-              e.stopPropagation()
-              onPreview()
-            }}
-            className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 hover:bg-accent hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-colors mt-0.5 flex-shrink-0"
-          >
-            <Eye className="h-3.5 w-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent>
-          Preview advisory ({getModifierSymbol()}O)
-        </TooltipContent>
-      </Tooltip>
-    </div>
-  )
-}
-
-// =============================================================================
-// Issue Item (search result)
-// =============================================================================
-
-interface IssueItemProps {
-  issue: GitHubIssue
-  index: number
-  isSelected: boolean
-  isLoading: boolean
-  onMouseEnter: () => void
-  onClick: () => void
-  onPreview: () => void
-}
-
-export function IssueItem({
-  issue,
-  index,
-  isSelected,
-  isLoading,
-  onMouseEnter,
-  onClick,
-  onPreview,
-}: IssueItemProps) {
-  return (
-    <div
-      data-load-item-index={index}
-      onMouseEnter={onMouseEnter}
-      className={cn(
-        'w-full flex items-start gap-3 px-3 py-2 text-left transition-colors',
-        'hover:bg-accent',
-        isSelected && 'bg-accent',
-        isLoading && 'opacity-50'
-      )}
-    >
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={isLoading}
-        className="flex items-start gap-3 flex-1 min-w-0 focus:outline-none"
-      >
-        {isLoading ? (
-          <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
-        ) : (
-          <CircleDot
-            className={cn(
-              'h-4 w-4 mt-0.5 flex-shrink-0',
-              issue.state === 'OPEN'
-                ? 'text-success'
-                : 'text-purple-600 dark:text-purple-400'
-            )}
-          />
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">
-              #{issue.number}
-            </span>
-            <span className="text-sm font-medium truncate">{issue.title}</span>
-          </div>
-          {issue.labels.length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-1">
-              {issue.labels.slice(0, 3).map(label => (
-                <span
-                  key={label.name}
-                  className="px-1.5 py-0.5 text-xs rounded-full"
-                  style={{
-                    backgroundColor: `#${label.color}20`,
-                    color: `#${label.color}`,
-                    border: `1px solid #${label.color}40`,
-                  }}
-                >
-                  {label.name}
-                </span>
-              ))}
-              {issue.labels.length > 3 && (
-                <span className="text-xs text-muted-foreground">
-                  +{issue.labels.length - 3}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      </button>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="Preview issue"
-            onClick={e => {
-              e.stopPropagation()
-              onPreview()
-            }}
-            className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 hover:bg-accent hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-colors mt-0.5 flex-shrink-0"
-          >
-            <Eye className="h-3.5 w-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent>Preview issue ({getModifierSymbol()}O)</TooltipContent>
-      </Tooltip>
-    </div>
-  )
-}
-
-// =============================================================================
-// PR Item (search result)
-// =============================================================================
-
-interface PRItemProps {
-  pr: GitHubPullRequest
-  index: number
-  isSelected: boolean
-  isLoading: boolean
-  onMouseEnter: () => void
-  onClick: () => void
-  onPreview: () => void
-}
-
-export function PRItem({
-  pr,
-  index,
-  isSelected,
-  isLoading,
-  onMouseEnter,
-  onClick,
-  onPreview,
-}: PRItemProps) {
-  return (
-    <div
-      data-load-item-index={index}
-      onMouseEnter={onMouseEnter}
-      className={cn(
-        'w-full flex items-start gap-3 px-3 py-2 text-left transition-colors',
-        'hover:bg-accent',
-        isSelected && 'bg-accent',
-        isLoading && 'opacity-50'
-      )}
-    >
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={isLoading}
-        className="flex items-start gap-3 flex-1 min-w-0 focus:outline-none"
-      >
-        {isLoading ? (
-          <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-muted-foreground flex-shrink-0" />
-        ) : (
-          <GitPullRequest
-            className={cn(
-              'h-4 w-4 mt-0.5 flex-shrink-0',
-              pr.state === 'OPEN'
-                ? 'text-success'
-                : pr.state === 'MERGED'
-                  ? 'text-purple-600 dark:text-purple-400'
-                  : 'text-destructive'
-            )}
-          />
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">#{pr.number}</span>
-            <span className="text-sm font-medium truncate">{pr.title}</span>
-            {pr.isDraft && (
-              <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                Draft
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-xs text-muted-foreground truncate">
-              {pr.headRefName} → {pr.baseRefName}
-            </span>
-          </div>
-          {pr.labels.length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-1">
-              {pr.labels.slice(0, 3).map(label => (
-                <span
-                  key={label.name}
-                  className="px-1.5 py-0.5 text-xs rounded-full"
-                  style={{
-                    backgroundColor: `#${label.color}20`,
-                    color: `#${label.color}`,
-                    border: `1px solid #${label.color}40`,
-                  }}
-                >
-                  {label.name}
-                </span>
-              ))}
-              {pr.labels.length > 3 && (
-                <span className="text-xs text-muted-foreground">
-                  +{pr.labels.length - 3}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      </button>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="Preview PR"
-            onClick={e => {
-              e.stopPropagation()
-              onPreview()
-            }}
-            className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 hover:bg-accent hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-colors mt-0.5 flex-shrink-0"
-          >
-            <Eye className="h-3.5 w-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent>Preview PR ({getModifierSymbol()}O)</TooltipContent>
-      </Tooltip>
+      <ContextItemActions
+        refreshLabel="Refresh advisory"
+        isLoading={isLoading}
+        isRemoving={isRemoving}
+        onView={onView}
+        onRefresh={onRefresh}
+        onRemove={onRemove}
+      />
     </div>
   )
 }
@@ -948,7 +401,7 @@ export function ContextItem({
   if (isEditing) {
     return (
       <div
-        data-load-item-index={index}
+        data-item-index={index}
         className="w-full flex items-start gap-3 px-3 py-2 bg-accent"
       >
         <FolderOpen className="h-4 w-4 mt-0.5 text-muted-foreground flex-shrink-0" />
@@ -975,7 +428,7 @@ export function ContextItem({
 
   return (
     <div
-      data-load-item-index={index}
+      data-item-index={index}
       onMouseEnter={onMouseEnter}
       className={cn(
         'w-full flex items-start gap-3 px-3 py-2 text-left transition-colors group',
@@ -1092,46 +545,11 @@ export function AttachedContextItem({
           </span>
         </div>
       </div>
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="View context"
-              onClick={onView}
-              disabled={isRemoving}
-              className={cn(
-                'p-1 rounded hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>View context</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Remove from context"
-              onClick={onRemove}
-              disabled={isRemoving}
-              className={cn(
-                'p-1 rounded hover:bg-destructive/10 focus:outline-none focus:ring-1 focus:ring-ring',
-                'transition-colors'
-              )}
-            >
-              {isRemoving ? (
-                <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              ) : (
-                <X className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Remove from context</TooltipContent>
-        </Tooltip>
-      </div>
+      <ContextItemActions
+        isRemoving={isRemoving}
+        onView={onView}
+        onRemove={onRemove}
+      />
     </div>
   )
 }
@@ -1186,7 +604,7 @@ export function SessionGroup({
           return (
             <div
               key={session.id}
-              data-load-item-index={flatIndex}
+              data-item-index={flatIndex}
               className={cn(
                 'w-full flex items-start gap-3 px-3 py-2 text-left transition-colors',
                 'hover:bg-accent',

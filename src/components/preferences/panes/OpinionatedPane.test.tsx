@@ -1,14 +1,21 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { render, screen, waitFor, within } from '@/test/test-utils'
-import { invoke } from '@/lib/transport'
+import { invoke, invokeForOptionalServer } from '@/lib/transport'
+import { SettingsTargetProvider } from '@/lib/settings-target'
 import { openExternal } from '@/lib/platform'
-import { useUIStore } from '@/store/ui-store'
 import { OpinionatedPane } from './OpinionatedPane'
 
-vi.mock('@/lib/transport', () => ({
-  invoke: vi.fn(),
-}))
+vi.mock('@/lib/transport', () => {
+  const invoke = vi.fn()
+  return {
+    invoke,
+    invokeForOptionalServer: vi.fn(
+      (_serverId: string | undefined, command: string, args?: unknown) =>
+        invoke(command, args)
+    ),
+  }
+})
 
 vi.mock('@/lib/platform', () => ({
   openExternal: vi.fn(),
@@ -24,7 +31,6 @@ vi.mock('sonner', () => ({
 
 describe('OpinionatedPane', () => {
   beforeEach(() => {
-    useUIStore.getState().closeCliLoginModal()
     vi.clearAllMocks()
     vi.mocked(invoke).mockImplementation(async command => {
       if (command === 'check_opinionated_plugin_status') {
@@ -68,6 +74,69 @@ describe('OpinionatedPane', () => {
       expect(invoke).toHaveBeenCalledWith('uninstall_opinionated_plugin', {
         pluginName: 'superpowers',
       })
+    })
+  })
+
+  it('sends plugin commands to the server picked in Settings', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <SettingsTargetProvider serverId="devserver">
+        <OpinionatedPane />
+      </SettingsTargetProvider>
+    )
+
+    await screen.findByRole('button', { name: /Superpowers/i })
+    const row = screen.getByText('Superpowers').closest('.rounded-md')
+    if (!row) throw new Error('Expected Superpowers row')
+    await user.click(
+      within(row as HTMLElement).getByRole('button', { name: /Uninstall/i })
+    )
+
+    await waitFor(() => {
+      expect(invokeForOptionalServer).toHaveBeenCalledWith(
+        'devserver',
+        'uninstall_opinionated_plugin',
+        { pluginName: 'superpowers' }
+      )
+    })
+    expect(invokeForOptionalServer).toHaveBeenCalledWith(
+      'devserver',
+      'check_opinionated_plugin_status',
+      { pluginName: 'superpowers' }
+    )
+  })
+
+  it('lists installed plugins first within a section', async () => {
+    const installed = new Set(['caveman', 'pstack'])
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'check_opinionated_plugin_status') {
+        return {
+          installed: installed.has((args as { pluginName: string }).pluginName),
+          version: null,
+        }
+      }
+      throw new Error(`Unexpected command ${command}`)
+    })
+
+    render(<OpinionatedPane />)
+
+    const section = (
+      await screen.findByRole('heading', { name: 'AI backend skills' })
+    ).closest('section')
+    if (!section) throw new Error('Expected AI backend skills section')
+
+    await waitFor(() => {
+      const names = within(section)
+        .getAllByText(/^(Caveman|Superpowers|pstack|tstack|Security Audit)$/)
+        .map(el => el.textContent)
+      expect(names).toEqual([
+        'Caveman',
+        'pstack',
+        'Superpowers',
+        'tstack',
+        'Security Audit',
+      ])
     })
   })
 
@@ -123,6 +192,32 @@ describe('OpinionatedPane', () => {
     ).toBeInTheDocument()
   })
 
+  it('offers Security Audit for every Jean AI backend', async () => {
+    render(<OpinionatedPane />)
+
+    const label = await screen.findByText('Security Audit')
+    const card = label.closest('.rounded-md')?.parentElement
+    if (!card) throw new Error('Expected Security Audit card')
+
+    await userEvent.click(label)
+
+    expect(within(card as HTMLElement).getByText('Codex')).toBeInTheDocument()
+    expect(within(card as HTMLElement).getByText('Claude')).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText('Command Code')
+    ).toBeInTheDocument()
+    expect(
+      within(card as HTMLElement).getByText('security audit this codebase')
+    ).toBeInTheDocument()
+
+    await userEvent.click(
+      within(card as HTMLElement).getByRole('button', { name: 'GitHub' })
+    )
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://github.com/cloudflare/security-audit-skill'
+    )
+  })
+
   it('shows opinionated skill installation status for each backend', async () => {
     render(<OpinionatedPane />)
 
@@ -165,34 +260,66 @@ describe('OpinionatedPane', () => {
     ).toBeInTheDocument()
   })
 
+  it('shows partial status when some backends have the pack but not all detected CLIs', async () => {
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      const pluginName = (args as { pluginName?: string })?.pluginName
+      if (command === 'check_opinionated_plugin_status') {
+        if (pluginName === 'pstack') {
+          return {
+            installed: false,
+            version: 'claude',
+            backends: [
+              { id: 'claude', label: 'Claude', installed: true },
+              { id: 'codex', label: 'Codex', installed: false },
+            ],
+          }
+        }
+        return { installed: false, version: null, install_supported: true }
+      }
+      throw new Error(`Unexpected command ${command}`)
+    })
+
+    render(<OpinionatedPane />)
+
+    const pstackLabel = await screen.findByText('pstack')
+    const pstackHeader = pstackLabel.closest('.rounded-md')
+    if (!pstackHeader) throw new Error('Expected pstack card header')
+
+    await within(pstackHeader as HTMLElement).findByText('Partial')
+    expect(
+      within(pstackHeader as HTMLElement).getByText('Reinstall')
+    ).toBeInTheDocument()
+    expect(
+      within(pstackHeader as HTMLElement).queryByText('Not installed')
+    ).not.toBeInTheDocument()
+  })
+
   it('groups recommended plugins into kind sections', async () => {
     render(<OpinionatedPane />)
 
-    await screen.findByRole('button', { name: /CLIProxyAPI/i })
+    await screen.findByRole('button', { name: /RTK/i })
 
     expect(
       screen
         .getAllByRole('heading', { level: 4 })
         .map(heading => heading.textContent)
-    ).toEqual(['Local proxy', 'System-wide (shell)', 'AI backend skills'])
-
-    const localProxy = screen.getByRole('region', { name: 'Local proxy' })
-    expect(within(localProxy).getByText('CLIProxyAPI')).toBeInTheDocument()
-    expect(within(localProxy).queryByText('RTK')).not.toBeInTheDocument()
-    expect(within(localProxy).queryByText('Caveman')).not.toBeInTheDocument()
+    ).toEqual(['System-wide (shell)', 'AI backend skills'])
 
     const shell = screen.getByRole('region', { name: 'System-wide (shell)' })
     expect(within(shell).getByText('RTK')).toBeInTheDocument()
-    expect(within(shell).queryByText('CLIProxyAPI')).not.toBeInTheDocument()
+    expect(within(shell).queryByText('Caveman')).not.toBeInTheDocument()
 
     const skills = screen.getByRole('region', { name: 'AI backend skills' })
-    for (const name of ['Caveman', 'Superpowers', 'pstack', 'tstack']) {
+    for (const name of [
+      'Caveman',
+      'Superpowers',
+      'pstack',
+      'tstack',
+      'Security Audit',
+    ]) {
       expect(within(skills).getByText(name)).toBeInTheDocument()
     }
     expect(within(skills).queryByText('RTK')).not.toBeInTheDocument()
-    expect(
-      screen.queryByText('Local proxy (localhost)')
-    ).not.toBeInTheDocument()
   })
 
   it('keeps installed and not-installed rows on the same layout', async () => {
@@ -297,162 +424,36 @@ describe('OpinionatedPane', () => {
     ).toBeInTheDocument()
   })
 
-  it('describes CLIProxyAPI as an external localhost proxy and can start it', async () => {
+  it('offers an RTK update only when a newer release exists', async () => {
     const user = userEvent.setup()
+    let installed = '0.49.0'
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       const pluginName = (args as { pluginName?: string })?.pluginName
       if (command === 'check_opinionated_plugin_status') {
-        if (pluginName === 'cliproxyapi') {
-          return {
-            installed: true,
-            version: 'v8.0.43',
-            install_supported: true,
-            running: false,
-            endpoint: 'http://127.0.0.1:8317',
-            management_url: 'http://127.0.0.1:8317/management.html',
-            lan_exposed: false,
-            auth_file_count: 0,
-          }
-        }
-        return { installed: false, version: null, install_supported: true }
+        return pluginName === 'rtk'
+          ? { installed: true, version: installed, latest_version: '0.50.1' }
+          : { installed: false, version: null, install_supported: true }
       }
-      if (command === 'start_opinionated_plugin') {
-        return 'CLIProxyAPI is running at http://127.0.0.1:8317'
-      }
-      if (command === 'prepare_cliproxyapi_account_login') {
-        const provider = (args as { provider?: string })?.provider
-        return {
-          provider,
-          binary: '/home/ada/.jean/opinionated/cliproxyapi/cli-proxy-api',
-          args: [
-            '--config',
-            '/home/ada/.jean/opinionated/cliproxyapi/config.yaml',
-            provider === 'codex' ? '-codex-login' : '-claude-login',
-          ],
-          started_proxy: true,
-          message:
-            'CLIProxyAPI was stopped, so Jean started it. Jean does not keep a copy.',
-        }
+      if (command === 'install_opinionated_plugin' && pluginName === 'rtk') {
+        installed = '0.50.1'
+        return 'RTK installed'
       }
       throw new Error(`Unexpected command ${command}`)
     })
 
     render(<OpinionatedPane />)
 
-    const label = await screen.findByText('CLIProxyAPI')
-    const card = label.closest('.rounded-md')?.parentElement
-    if (!card) throw new Error('Expected CLIProxyAPI card')
-
-    expect(within(card as HTMLElement).getByText('Stopped')).toBeInTheDocument()
-    expect(
-      within(screen.getByRole('region', { name: 'Local proxy' })).getByText(
-        'CLIProxyAPI'
-      )
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).queryByText('Local proxy (localhost)')
-    ).not.toBeInTheDocument()
-
-    await user.click(label)
-
-    expect(
-      within(card as HTMLElement).getByText(
-        /pooling and round-robin outside Jean/i
-      )
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).getByText(
-        /does not store extra Claude or Codex/i
-      )
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).getByText(/127\.0\.0\.1:8317\/v1/)
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).getByText(/-claude-login/)
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).getByText(/not in Jean/i)
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).getByText(/0 OAuth files in CLIProxyAPI/)
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).getByText(
-        /Jean does not read or copy those files/
-      )
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).getByRole('button', { name: 'MIT license' })
-    ).toBeInTheDocument()
-    expect(
-      within(card as HTMLElement).queryByRole('button', {
-        name: 'EasyCLIProxyAPI',
-      })
-    ).not.toBeInTheDocument()
-
     await user.click(
-      within(card as HTMLElement).getByRole('button', {
-        name: 'Add Claude account',
-      })
+      await screen.findByRole('button', { name: 'Update to v0.50.1' })
     )
 
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('prepare_cliproxyapi_account_login', {
-        provider: 'claude',
-      })
+    expect(invoke).toHaveBeenCalledWith('install_opinionated_plugin', {
+      pluginName: 'rtk',
     })
-    expect(useUIStore.getState().cliLoginModalOpen).toBe(true)
-    expect(useUIStore.getState().cliLoginModalType).toBe('cliproxyapi')
-    expect(useUIStore.getState().cliLoginModalCommand).toBe(
-      '/home/ada/.jean/opinionated/cliproxyapi/cli-proxy-api'
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: /Update to/ })
+      ).not.toBeInTheDocument()
     )
-    expect(useUIStore.getState().cliLoginModalCommandArgs).toEqual([
-      '--config',
-      '/home/ada/.jean/opinionated/cliproxyapi/config.yaml',
-      '-claude-login',
-    ])
-    useUIStore.getState().closeCliLoginModal()
-
-    await user.click(
-      within(card as HTMLElement).getByRole('button', {
-        name: 'Add Codex account',
-      })
-    )
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('prepare_cliproxyapi_account_login', {
-        provider: 'codex',
-      })
-    })
-    expect(useUIStore.getState().cliLoginModalCommandArgs).toEqual([
-      '--config',
-      '/home/ada/.jean/opinionated/cliproxyapi/config.yaml',
-      '-codex-login',
-    ])
-    useUIStore.getState().closeCliLoginModal()
-
-    await user.click(
-      within(card as HTMLElement).getByRole('button', {
-        name: 'Open management',
-      })
-    )
-    await waitFor(() => {
-      expect(openExternal).toHaveBeenCalledWith(
-        'http://127.0.0.1:8317/management.html'
-      )
-    })
-    expect(invoke).toHaveBeenCalledWith('start_opinionated_plugin', {
-      pluginName: 'cliproxyapi',
-    })
-
-    await user.click(
-      within(card as HTMLElement).getByRole('button', { name: 'Start' })
-    )
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('start_opinionated_plugin', {
-        pluginName: 'cliproxyapi',
-      })
-    })
   })
 })

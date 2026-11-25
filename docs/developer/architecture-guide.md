@@ -73,6 +73,131 @@ Rust and React communicate through three patterns:
    (Used by git status polling, PR status updates, worktree events)
 ```
 
+The `chat:backend_retry` event is emitted before each provider backoff wait
+(rate limit, overload) so a long backoff does not look like a hung run.
+OpenCode is the only emitter: it retries internally and reports each wait as
+an SSE `session.status` event with `status.type == "retry"`; the shared SSE
+listener in `jean-core/src/chat/opencode.rs` maps it to `chat:backend_retry`
+(child/subagent retries fan in to the parent run). The frontend shows a
+replaceable toast (one id per session) with the retry number, wait duration,
+and reason; the toast is dismissed when the run ends (`chat:done`,
+`chat:error`, or `chat:cancelled`). The event is registered as replayable in
+the HTTP server so web access clients also receive it after a reconnect.
+
+**User turn outcome.** The backend owns a typed prompt from the moment
+`run_log::start_run` records it. `chat:cancelled` and `chat:error` are stop
+signals: they end the live turn in the UI but never decide what happens to the
+prompt. `send_chat_message` emits one `chat:user-turn` event at every exit after
+`start_run`, after the run log and session state are final, with
+`user_turn: "persisted" | "withdrawn"` derived from
+`RunEntry::user_turn_outcome()` (the same rule history rendering uses) and
+`restore_draft` (true for `withdrawn`). A rejected `send_chat_message` invoke
+means `not_accepted`: the prompt was never recorded. The frontend
+(`useStreamingEvents` `chat:user-turn` handler, `useSendMessage.onError`)
+restores the composer and drops the optimistic user message only on
+`not_accepted` or `withdrawn`; on `persisted` it leaves the composer alone and
+refetches. Internally `send_chat_message_inner` returns `SendError { message,
+user_turn }` so the backend queue drain requeues exactly the prompts the
+composer would restore.
+
+**Chat-to-chat delegation (Jean MCP).** A chat session that calls the Jean MCP
+`send_chat_message` tool gets the end of that run back as a message queued
+into its own session (`jean-core/src/chat/delegation.rs`). The MCP send arms a
+`delegated_by` link on the child (`SessionDelegation`: origin ids, `hop`,
+`armed`) before dispatching. `hop` is the caller's own hop plus one while the
+caller's link is armed (it is working for someone); a caller whose link was
+reported or never armed is a root and the child gets hop 1. A chain deeper
+than `MAX_HOPS` (3) is rejected, so at most three armed links stack at once.
+Ping-pong across turns (A sends to B, B's update makes A send again) is not
+bounded by the hop count; each round needs the model to call the tool again,
+nothing re-sends on its own. A target whose link is armed for a different
+origin refuses the send with a tool error; the same origin may re-arm it.
+`report_run_end` runs from the `send_chat_message` wrapper after every exit,
+from the queue drain after each run it starts, from a drop guard in each
+resume tail, and once at startup for runs that ended while Jean was closed.
+Each path reports before the session's next queued prompt starts, so the
+report sees the run as finished. It disarms under the metadata lock first and
+records a `DelegationOutcome` (status, error plus last reply of 1500 chars,
+`ended_at`, `reported_at`) on the link, so a repeat call records nothing;
+`waiting_plan` and `question` outcomes keep the link armed so the run after
+the user's answer reports too. Runs the user types into the child, and runs
+started by the update message itself, are not armed and never report. If the
+child was busy and the MCP message was rejected or steered, the link stays
+armed and the run already going reports when it ends. Manual MCP clients
+(`manual-dev`, `manual-prod`) and agents (`__agent_*__` worktrees, which use
+`agents::mcp::record_delegation`) never arm a link.
+
+Outcomes reach the lead in batches (`flush_lead`, serialized by one mutex):
+after a child records its outcome, the lead gets one queued message carrying
+every child outcome with no `reported_at` yet, but only when no sibling is
+still working (armed and not waiting for the user) or when this child needs
+the user. Outcomes are marked reported before the push, so a crash in between
+drops that update instead of resending it on every restart; the startup sweep
+also flushes leads whose children hold unreported outcomes. A different lead
+arming a child first flushes the previous lead's pending outcome. The queued
+message carries no recap request (no Jean chat turn does). The text
+is one block per child (`[Jean session update]`, `session`, `worktree`,
+`name` and `status` header lines, `---`, then the error and last reply)
+joined by blank lines, then a footer telling the model to reply briefly. The
+frontend (`session-update.ts`) parses every block; the chat shows the update
+as one muted line, and the lead's sub-sessions (same worktree, read from the
+session list with live store status) live in `SubSessionPanel.tsx`: a column
+docked right of the messages when the chat is at least `@4xl` wide, otherwise
+a strip above the composer.
+
+**Versioned run state.** The backend is the single source of run state. Each
+`SessionMetadata` carries `status_version: u64`, bumped in one place:
+`storage.rs` `save_metadata_internal` compares the on-disk copy's
+`run_state_signature()` (per-run status, cancel and assistant flags, waiting
+flags) with the copy being written and advances the version when they differ,
+never below either side. Every transition path (`start_run`, complete, cancel,
+crash, `finish_orphaned_runs`, `recover_incomplete_runs`, resume, waiting-flag
+updates, session sync) persists through that path, so none can forget to bump
+it, and a stale in-memory copy cannot lower it. `SessionMetadata::run_state()`
+builds the `RunState` snapshot (`status: running | resumable | cancelled |
+error | idle`, `statusVersion`, `runId`, `startedAt`, `executionMode`,
+`waitingForInput`); `get_session_status` and `get_run_states(sessionIds?)`
+share it. With no ids, `get_run_states` repairs orphaned runs
+(`recover_incomplete_runs_for`, idempotent) and returns only live sessions, so
+a client treats every other session it owns as idle; `/api/init` ships the
+same list as `runStates` and `bootstrap_project` as `runStates`. `chat:done`
+(central emit), `chat:cancelled`, and `chat:user-turn` carry `status_version`
+where the emitter can read it. Frontend: `chat-store` keeps
+`runStateVersions`; `acceptRunStateVersion` drops versioned events older than
+what was applied, `applyRunStateSnapshot` reconciles sending, streaming,
+executing-mode, and waiting indicators from a snapshot (a local send that
+started after the snapshot was requested is left to its own events).
+`services/run-states.ts` `refreshRunStates` runs on socket connect and
+reconnect, remote reconnect (that server only), `ws:resync`, window focus and
+visibility (throttled), and session open (that one id). Native desktop asks
+the local core and every online remote and scopes ids per server; Web Access
+asks its origin only.
+
+Three rules keep snapshots honest. `waitingForInput` in `run_state()` uses
+`SessionMetadata::has_pending_approval()` (Codex command, permission,
+user-input, MCP elicitation and dynamic tool requests, OpenCode and ACP
+approvals, permission denials), the same predicate the session payload uses,
+and every count is part of `run_state_signature()`, so a mid-turn approval
+badge survives a snapshot. Only `running` is live on the client; `resumable`
+means nobody is tailing the run yet, so its partial reply stays in the
+transcript. Each server resumes its own resumable runs at startup
+(`initialize_runtime` → `resume_recovered_runs` → `resume_session`), so a
+headless server with no client, or one reached only from a remote native
+desktop, picks up a surviving detached host; `resume_session` holds a
+per-session `ResumeGuard`, and a client's `check_resumable_sessions` call
+no-ops once the tail is registered. A snapshot that ends a run while streamed
+output is still on screen (its `chat:done` was missed) returns that session
+from `applyRunStateSnapshot`, and `refreshRunStates` refetches it so the
+persisted reply replaces the stream. A send this client started
+(`addSendingSession` sets `localSendIds`) is not ended by a snapshot until the
+backend acknowledges it with streamed output or a versioned event, or ten
+seconds pass; the open-session refresh otherwise lands between
+`addSendingSession` and the send invoke. Orphan repair
+(`recover_incomplete_runs_for`) reads, judges and writes each session under
+its metadata lock with the registry re-checked inside it, and resume tails
+finalize the run before they unregister, so a snapshot in that gap never
+marks a finished run crashed.
+
 ### Backend-Owned Long-Running Jobs
 
 Long-running operations that must survive web/mobile WebSocket disconnects
@@ -235,8 +360,10 @@ Duplicate pairs are rejected while running. Job progress emits
 
 Claude and Codex sessions use the CLI's own config home (`~/.claude` and
 `~/.codex`). Jean does not store named subscription logins, does not switch
-`CODEX_HOME`, and does not auto-switch accounts. Multi-account pooling belongs
-in an external CLIProxy sidecar.
+`CODEX_HOME`, does not switch `CLAUDE_CONFIG_DIR` except for the fork's
+explicit account profiles below, and does not auto-switch accounts.
+Jean does not pool accounts or route subscription OAuth through a
+third-party proxy, because that risks account bans.
 
 Fork addition: a custom Claude CLI profile whose `env` sets
 `CLAUDE_CONFIG_DIR` is an **account profile** (an existing login, for example
@@ -308,8 +435,8 @@ Additional systems (no dedicated docs yet):
 - **Agent integrations** - Jean MCP is a mandatory runtime service. Startup
   always enables the Jean MCP socket and repairs the supported CLI config
   entries. Legacy `jean_mcp_enabled: false` values are migrated to `true`.
-  Agent Browser is opt-in through `agent_browser_enabled` (default `false`,
-  Settings → MCP Servers → Agent Browser). When it is on, startup installs
+  Agent Browser is on by default through `agent_browser_enabled` (default
+  `true`; a saved `false` stays off), Settings → MCP Servers → Agent Browser). When it is on, startup installs
   Agent Browser plus Chrome for Testing when they are missing and repairs its
   MCP entries. When it is off, startup removes the Jean-written
   `agent-browser` MCP entries from the CLI configs. Jean identifies its own
@@ -358,7 +485,10 @@ Additional systems (no dedicated docs yet):
   a Jean terminal session running the backend's native resume command. Resumable
   Jean chat sessions can likewise be duplicated into a separate native-client
   terminal session from the session-tab context menu; the original chat session
-  remains unchanged.
+  remains unchanged. When an OpenCode chat run fails with a thread error or panic, the
+  live session id is persisted to metadata before the registry entry that holds
+  it is cleaned up, so the next send resumes the context the server may still be
+  processing instead of starting a fresh conversation.
 
   Native PI terminal sessions receive a generated `--session-id` when created,
   persist that ID as `pi_session_id`, and reconnect with `pi --session <id>`.
@@ -466,10 +596,10 @@ Additional systems (no dedicated docs yet):
   `TERMINAL_SESSIONS`. Don't remove the `uiStateInitialized` guard without
   re-checking the race.
 
-- **Background Tasks** - Git/PR polling with focus-aware intervals (`src-tauri/src/background_tasks/`); Auto Fix (Mr. Robot) issue polling/planning/yolo handoff and scheduler active-hours window via `chrono` local time with midnight-crossing support (`jean-core/src/auto_fix/`). Scans list only issue numbers + labels; worktrees are never auto-archived; closed/ineligible ones stop using capacity, get their queued or running plan-mode investigation stopped, and never go to yolo; failed starts/yolo runs give up after 3 attempts; GitHub rate limits defer the project 15 min. Runtime status (last scan, errors, failed issues) is in memory and exposed via `get_auto_fix_status` / `clear_auto_fix_failures`. See [Mr. Robot workspace](./mr-robot.md) for the canvas controls, preview, activity, and view separation.
+- **Background Tasks** - Git/PR polling with focus-aware intervals (`src-tauri/src/background_tasks/`); Auto Fix (Mr. Robot) issue polling/planning/yolo handoff and scheduler active-hours window via `chrono` local time with midnight-crossing support (`jean-core/src/auto_fix/`). Scans list only issue numbers + labels; worktrees are never auto-deleted; closed/ineligible ones stop using capacity, get their queued or running plan-mode investigation stopped, and never go to yolo; failed starts/yolo runs give up after 3 attempts; GitHub rate limits defer the project 15 min. Runtime status (last scan, errors, failed issues) is in memory and exposed via `get_auto_fix_status` / `clear_auto_fix_failures`. See [Mr. Robot workspace](./mr-robot.md) for the canvas controls, preview, activity, and view separation.
 - **HTTP Server** - Tauri-free Axum server + WebSocket from `jean-core`; `src-server` provides the standalone Tokio adapter. See [server-architecture.md](./server-architecture.md).
 - **Diagnostics** - CPU/memory monitoring panel (`src-tauri/src/diagnostics/`)
-- **MCP** - Model Context Protocol server integration with per-project overrides (`src/services/mcp.ts`). First-party **Jean MCP** (`jean-core/src/jean_mcp_core.rs`) exposes project/worktree/session tools, usage + session model controls (`get_usage`, `set_session_model`), Run-command / panel-command dev environments (`get_run_environments`: running state, worktree/base session, startup command, ports, URL), plus the ship loop: `create_commit`, `push_worktree`, `detect_open_pr`, `link_worktree_pr`, `unlink_worktree_pr`, `create_pull_request`, `merge_pull_request`, `run_review` (thin wrappers over existing project commands). MCP `create_session` reuses an empty, idle chat session in the worktree before it creates another session; terminal, queued, running, archived, or previously used sessions are never reused. PR tools resolve repository paths from Jean's worktree ID; creation and linking persist the PR number and URL on the worktree.
+- **MCP** - Model Context Protocol server integration with per-project overrides (`src/services/mcp.ts`). First-party **Jean MCP** (`jean-core/src/jean_mcp_core.rs`) exposes project/worktree/session tools, usage + session model controls (`get_usage`, `set_session_model`), Run-command / panel-command dev environments (`get_run_environments`: running state, worktree/base session, startup command, ports, URL), plus the ship loop: `create_commit`, `push_worktree`, `detect_open_pr`, `link_worktree_pr`, `unlink_worktree_pr`, `create_pull_request`, `merge_pull_request`, `run_review` (thin wrappers over existing project commands). MCP `create_session` reuses an empty, idle chat session in the worktree before it creates another session; terminal, queued, running, closed, or previously used sessions are never reused. PR tools resolve repository paths from Jean's worktree ID; creation and linking persist the PR number and URL on the worktree. `request_secret` asks the user for a secret in a chat card (`SecretRequestCard.tsx`) without blocking: the tool returns at once, the card sends the value to `save_secret_request`, which writes it to an owner-only file under `<app_data>/secrets/` (`jean-core/src/chat/secrets.rs`, no encryption), and the chat gets only the file path as the next user message. The file name comes from the session and tool call ids, so the card can show (`secret_request_status`) and delete (`forget_secret_request`) it. The user picks the retention on the card: until forgotten (default, for periodic tasks) or 24 hours (`-24h` suffix, removed by the hourly sweep). A `<stem>.json` file beside each value holds its label and ids. `list_secrets` shows every saved secret in a chat card (`SecretListCard.tsx`) with Delete buttons (`delete_secret`); the agent gets labels only, never values or paths. Secrets are scoped to an owner (`ownerId` in the info file): `project:<id>` for worktree sessions, `agent:<id>` for an agent's chat, task sessions, and subagents (their `__agent_*__` worktrees are outside any project). `list_secrets` shows only that owner (the card can switch to all), and `get_secret(label)` returns the path of a saved secret of the same owner, so new sessions and scheduled tasks can reuse it. Scope is not a security wall: all agents run as the same OS user.
 - **Model Catalog** - CDN-driven model lists and reasoning capabilities with bundled offline fallback ([model-catalog.md](./model-catalog.md))
 - **CLI Management** - Claude CLI, Codex CLI, Cursor CLI, OpenCode, PI, Command Code, Grok, Kimi Code, Antigravity, Muse, and gh CLI installation/versioning (backend-specific modules under `src-tauri/src/`)
 
@@ -506,13 +636,13 @@ Kimi Code-specific notes:
 ```
 MainWindow (Top-level orchestrator)
 ├── DevModeBanner (dev-only overlay)
-├── TitleBar (Window controls + toolbar)
+├── TitleBar (Window controls + toolbar, Settings gear on desktop)
 ├── LeftSideBar (Collapsible, pixel-resizable)
-│   └── ProjectsSidebar
-│       └── ProjectTree → WorktreeList per project
+│   ├── SidebarTabs (Projects | Recent | Agents)
+│   └── ProjectsSidebar → ProjectTree → WorktreeList per project, or AgentsSidebar
 ├── MainWindowContent (Primary content area)
 │   ├── ChatWindow (when worktree selected — always shows chat view)
-│   │   ├── Chat view (VirtualizedMessageList + ChatInput + ChatToolbar)
+│   │   ├── Chat view (CompactMessageList + ChatInput + ChatToolbar)
 │   │   ├── Full-screen terminal surface (optional primary worktree surface)
 │   │   ├── TerminalPanel (integrated PTY terminal)
 │   │   └── ReviewResultsPanel (AI code review findings)
@@ -530,7 +660,7 @@ MainWindow (Top-level orchestrator)
     ├── MagicModal / ReleaseNotesDialog / UpdatePrDialog
     ├── NewWorktreeModal / BranchConflictDialog
     ├── AddProjectDialog / GitInitModal
-    ├── ArchivedModal / CloseWorktreeDialog / QuitConfirmationDialog
+    ├── CloseWorktreeDialog / QuitConfirmationDialog
     └── Toaster (Notifications)
 ```
 
@@ -555,19 +685,29 @@ interaction finishes.
 
 Shared infrastructure in `src/components/chat/`:
 
-- `SessionListRow.tsx` - Compact row component for list view
 - `session-card-utils.tsx` - `computeSessionCardData()` and `SessionCardData` type
 - `hooks/useCanvasKeyboardNav.ts` - Arrow key navigation with visual-position neighbor finding
 - `hooks/useCanvasShortcutEvents.ts` - Event handlers for plan/recap/approve shortcuts
 - `hooks/useCanvasStoreState.ts` - Store state subscriptions for card data
+
+### UI Primitives
+
+Use these shared primitives instead of one-off styling:
+
+- **Button sizes.** `size="icon-xs"` (24px) and `size="icon-sm"` (28px) for compact icon buttons. Do not override `size="icon"` with `h-6 w-6` or `h-7 w-7`. Variants are flat; `raised`/`raisedInset` are for a single primary call to action only.
+- **Badge tones.** `Badge` variants `success`, `warning`, `info`, `danger`, and `subtle` replace hand-made `bg-x/10 text-x` pills.
+- **Status colours.** Use only the tokens `success`, `warning`, `info`, `destructive`, and `muted-foreground`. Raw palette colours are for brand conventions only (Linear violet, GitHub merged purple, provider logos).
+- **Small text.** `text-2xs` is the smallest step of the type scale. Do not use `text-[8px]` to `text-[11px]`.
+- **Modifier hints.** `Kbd`/`KbdGroup` with `modHint` (or `data-mod-hint` on a raw `<kbd>`) hides a shortcut hint until the user holds ⌘/Ctrl/Alt. Single-key hints that work without a modifier stay visible and muted.
+- **Empty states.** `Empty`, `EmptyHeader`, `EmptyMedia`, `EmptyTitle`, and `EmptyDescription` from `src/components/ui/empty.tsx`. Inside panels, use compact padding and no dashed border.
+- **Help text.** `HelpTip` (`src/components/ui/help-tip.tsx`) shows help in a tooltip instead of a paragraph.
+- **Relative time.** `formatRelative` (`src/lib/relative-time.ts`) formats unix seconds as "now", "5m ago", or "in 2h".
 
 ### File Organization
 
 ```
 src/
 ├── components/
-│   ├── actions/           # ActionsSidebar
-│   ├── archive/           # ArchivedModal
 │   ├── chat/              # ChatWindow + 50 files, 12 extracted hooks in chat/hooks/
 │   ├── command-palette/   # CommandPalette (cmdk-based)
 │   ├── commit/            # CommitModal
@@ -576,9 +716,9 @@ src/
 │   ├── magic/             # MagicModal, LoadContextModal, ReleaseNotesDialog, UpdatePrDialog
 │   ├── onboarding/        # OnboardingDialog, FeatureTourDialog, JeanConfigWizard
 │   ├── open-in/           # OpenInButton, OpenInModal
-│   ├── preferences/       # PreferencesDialog, DiagnosticsPanel, 8 settings panes
+│   ├── preferences/       # PreferencesDialog, DiagnosticsPanel, settings panes (BackendsPane groups CLI backends)
 │   ├── projects/          # ProjectTree, WorktreeList, AddProjectDialog, ProjectSettingsDialog
-│   ├── shared/            # FailedRunsBadge, GhAuthError, OpenPRsBadge, WorkflowRunsModal
+│   ├── shared/            # GhAuthError, GlabAuthError, LinearAuthError, WorkflowRunsModal
 │   ├── titlebar/          # TitleBar, platform-specific window controls
 │   ├── ui/                # 45+ shadcn/ui primitives
 │   └── worktree/          # NewWorktreeModal, BranchConflictDialog
@@ -586,8 +726,6 @@ src/
 │   ├── useUIStatePersistence.ts      # Persist UI state to disk
 │   ├── useSessionStatePersistence.ts # Persist session state to disk
 │   ├── useMainWindowEventListeners.ts # Global keyboard/event handlers
-│   ├── useArchiveCleanup.ts          # Auto-cleanup old archived items
-│   ├── useAutoArchiveOnMerge.ts      # Archive worktrees when PRs merge
 │   ├── usePrWorktreeSweep.ts         # Sync PR worktrees for polling
 │   ├── useCliVersionCheck.ts         # CLI version monitoring
 │   ├── useTerminal.ts                # PTY terminal lifecycle
@@ -672,6 +810,19 @@ src-tauri/src/
     └── shell.rs           # Default shell detection
 ```
 
+### Session deletion and purge
+
+Closing a session is a soft delete. The session leaves the UI at once, but its
+data stays on disk for 30 days (`DELETED_ITEM_RETENTION_DAYS`, not
+configurable). There is no restore UI. The persisted `archived_at` field on a
+session keeps its old name and now means "deleted at". `cleanup_deleted_items`
+in `jean-core/src/projects/commands.rs` purges expired sessions. The backend
+runs it at startup and every 24 hours from `initialize_runtime` in
+`jean-core/src/lib.rs`. Worktrees archived by an older Jean release are kept
+on disk but stay hidden (fork behavior). Sessions of a base session that an
+older release closed are restored as live sessions. Closing a worktree deletes the git worktree
+and its branch immediately.
+
 ## Performance Patterns
 
 ### The `getState()` Pattern (Critical)
@@ -752,6 +903,19 @@ Images pasted, dropped, or selected from the native file picker into chat are pr
 - **Compress**: Opaque PNGs → JPEG at 85% quality (typically 5-10x smaller)
 - **Skip**: GIFs (may be animated), images < 50KB, already-compressed formats
 - Token cost: `(width × height) / 750` tokens per image
+
+### GitHub API quota for background calls
+
+GitHub gives REST (`core`) and GraphQL (`graphql`) separate hourly quotas. Agents' own `gh pr create/view/checks` calls spend the GraphQL quota too. `jean-core/src/gh_cli/quota.rs` keeps one in-memory quota book for each resource, shared by Jean's background `gh` calls:
+
+- **Reserve**: background calls stop when less than 10% of a quota is left, until the reset. User actions are not gated.
+- **Pause**: a "rate limit" error pauses that resource until the known reset. A secondary limit pauses it for 60 s. Otherwise the pause is 15 min.
+- **REST polling**: `background_rest_get` runs `gh api -i`, reads the `x-ratelimit-*` headers, and sends the cached ETag. A `304` costs no quota.
+- **GraphQL subcommands** (`gh issue list`) do not show headers. Call `quota::refresh` first, which reads `GET /rate_limit` (free).
+
+Background git status (`projects/git_status.rs`) fetches each remote branch at most once per 60 s per repository. The key is the git common dir, so one fetch serves all worktrees of a project. Failed fetches count too. Fetches run with `GIT_TERMINAL_PROMPT=0`, so they never wait for credentials. A fetch that runs longer than 30 s is stopped with its whole process tree (`platform::output_with_timeout`), so a stalled connection cannot block the poll loop. Untracked files larger than 1 MB count as one added line, so polls do not read them again and again.
+
+PR status polling (`projects/pr_status.rs`) uses REST. It does not use `gh pr view`. REST has no `reviewDecision`, so Jean takes the result from each reviewer's latest review. Mr. Robot scans use the GraphQL reserve and pause.
 
 ### Headless Mode
 
@@ -861,7 +1025,7 @@ Claude runs normally use `cat input.jsonl | nohup claude --print --input-format 
 - Socket: `<app_data>/r/c<sid8><run8>.sock`. Request `{"type":"steer","message":...}`; reply `{"ok":true}` or `{"ok":false,"error":...}`. `steer_claude_turn` returns the error and the frontend falls back to the queue.
 - Finish rule (pure `ClaudeHostState`): on `result`, close stdin (CLI exits) unless a steer was written that the CLI has not echoed yet. A safety net closes stdin 30 s after a `result` when a pending steer is never consumed.
 - Echo filter: with `--replay-user-messages` the CLI re-emits each consumed stdin message as `{"type":"user","isReplay":true,...}`. The host drops the first one (the initial prompt) and rewrites each later one as `{"type":"steered_user_message","text":...}`. No parser sees a replayed user line, so the prompt never shows twice. `parse_run_to_message` already maps `steered_user_message` to `ContentBlock::UserInput`.
-- Markers: the host writes `{"type":"jean_claude_host_start"}` first and `{"type":"jean_claude_host_exit","code":N}` last. `tail_claude_output` sees the start marker and then ends only at the exit marker (or on cancel / dead process), not at the first `result`. Usage is summed over all `result` lines. The tailer emits `chat:steered` when it reads `steered_user_message`, so live and history positions match.
+- Markers: the host writes `{"type":"jean_claude_host_start"}` first and `{"type":"jean_claude_host_exit","code":N}` last. `tail_claude_output` sees the start marker and then ends only at the exit marker (or on cancel / dead process), not at the first `result`. Usage is summed over all `result` lines. `steer_claude_turn` emits `chat:steered` when the host accepts the steer, so the prompt shows at once. The tailer emits `chat:steered` on `steered_user_message` only for steers that this Jean process did not announce (for example after a restart). The live position can be earlier than the history position, which is the consumption point.
 - Recovery and cancel are unchanged: `run.pid` is the host PID, `recover_incomplete_runs` uses liveness + `type:"result"`, and `kill_process_tree` reaps the host process group (host + `claude` + MCP children).
 
 Known limitations:
@@ -871,6 +1035,69 @@ Known limitations:
 - Model, execution mode, effort, and thinking cannot change for a steer. They apply from the next normal message.
 - Mid-turn injection is observed CLI behavior (tested with Claude Code 2.1.285+), not a documented contract. This is why the setting is off by default.
 - One extra host process per running Claude session. Windows/WSL, older CLIs, and runs started before the setting was enabled keep the plain pipeline; steering them fails and the prompt is queued.
+
+## OpenCode 1.x and 2.x
+
+OpenCode 2.x (from 2.2.0) replaced the 1.x HTTP API (issue #896). Jean
+supports both. The 1.x code in `jean-core/src/chat/opencode.rs` is unchanged;
+2.x turns run in `jean-core/src/chat/opencode_v2/`.
+
+- **Detection**: `opencode_server::acquire_server` returns
+  `OpenCodeServer { url, api, password }`. A JSON answer on `/global/health`
+  is 1.x. Otherwise `GET /api/info` with HTTP Basic auth (user `opencode`)
+  must report a 2.x version. Branch on `server.api`; do not probe again.
+- **Auth**: 2.x requires a password on every `/api` call. Jean starts a
+  managed 2.x server with a random `OPENCODE_SERVER_PASSWORD`. For an
+  unmanaged 2.x server, Jean reads `OPENCODE_SERVER_PASSWORD` from its own
+  environment.
+- **Responses**: success bodies are `{data: ...}`; errors are
+  `{_tag, message}`. Bare GET paths return the web UI HTML with status 200,
+  so never treat a 200 as proof of the API.
+- **Turns**: `POST /api/session/{id}/prompt {text, files, delivery:"steer"}`
+  returns an inbox id at once. The turn ends with
+  `session.execution.succeeded|failed|interrupted` on the global
+  `GET /api/event` stream, but only after every inbox id Jean sent was
+  delivered (`session.inbox.delivered`). A steer delivered after the end
+  starts a new execution. `turn.rs` holds this as a pure state machine; keep
+  it free of I/O so it stays unit-tested.
+- **Steering** (`steer.rs`): a steer posts only while the turn is
+  registered, and the turn unregisters only when no steer is pending, under
+  one lock. A failed steer is sent as a normal message.
+- **Permissions**: the same action names as 1.x (`read`, `edit`, `glob`,
+  `grep`, `skill`, `question`, `todowrite`, `external_directory`; `shell` and
+  `subagent` replace `bash` and `task`). Jean's rule sets are converted to
+  `{action, resource, effect}`. A rejected permission interrupts the
+  execution; Jean ends the turn normally then, as on 1.x.
+- **Questions**: the `question` tool opens a form (`form.created`). Jean
+  answers it through `/form/{id}/reply`; a `multiselect` field takes an
+  array, other fields a string. Jean cancels other forms.
+- **System prompt**: the experimental instructions entry `jean`; if that
+  fails, Jean puts the system prompt in front of the prompt text.
+- **Magic prompts and naming**: a temporary `plan` session, deleted after
+  use. 2.x has no structured output, so Jean asks for strict JSON text.
+- **MCP config**: 2.x reads `mcp.servers.<name>` with a `disabled` flag;
+  1.x reads `mcp.<name>` with `enabled`. Jean writes the shape of the
+  installed CLI (`opencode_cli::is_opencode_v2`) and reads both.
+- **Restarts** (Unix): a 2.x turn survives Jean quitting or crashing.
+  - When the prompt is queued, the run stores `opencode_turn` (session id
+    and prompt inbox id), and the turn no longer blocks quit
+    (`registry::mark_cancel_flag_survivable`).
+  - The managed 2.x server writes to `opencode-server.log`, not to pipes,
+    and its PID file (mode 0600) holds the password. While unfinished 2.x
+    turns exist, quit and startup cleanup keep the server, and the next
+    `ensure_running` adopts it (`adopt_server`).
+  - Recovery marks such runs `Resumable`. `resume_session` calls
+    `opencode_v2::resume_turn`: it shows pending permissions and question
+    forms again, streams the rest of the turn, and rebuilds the whole reply
+    from `GET /api/session/{id}/message` (at most 200 items, the 2.x page
+    limit). If the server that ran the turn is gone (no running execution,
+    nothing queued, no end in history), the turn ends as interrupted.
+- **Versions**: `opencode_cli` lists and installs 1.x and tested 2.x minors
+  only (`MAX_TESTED_OPENCODE_2_MINOR`). Update checks never move an OpenCode
+  install to another major version, because 1.x and 2.x configs differ.
+  When a new 2.x minor comes out, compare its `/openapi.json` with the
+  tested one, run the ignored live tests `live_v2_turn` and
+  `live_v2_interactions`, then raise the cap.
 
 ## Antigravity CLI backend
 
@@ -922,3 +1149,40 @@ Muse authenticates with `META_API_KEY`, a stored API key, or a stored browser se
 Jean's own MCP server is added per session through `session/start` `config.mcpServers` with `mode: "optional"`. `muse serve` refuses that field unless `initialize` requests the `sessionMcp` capability.
 
 To test without a Meta account, start Jean with `JEAN_MUSE_PROVIDER=echo`. The host then runs `muse serve --provider echo`, which replies `echo: <prompt>`. The echo provider never calls tools, so tool calls, approvals, and structured magic-prompt output need a real Meta account to verify.
+
+## Web access authentication
+
+Browsers do not keep the web access token. Code: `jean-core/src/http_server/session.rs` (session store) and `server.rs` (`authorize`, `require_auth`, `auth_handler`, `logout_handler`).
+
+- **Sign-in:** the browser calls `/api/auth?token=…` once, from a `?token=` link, the sign-in form, or a token that an older version saved in `localStorage`. If the request is same-origin, the server sets a cookie `jean_session_<port>` (`HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days). The client then deletes the token from `localStorage` and from the URL.
+- **No `Secure` flag:** web access also runs on plain `http://` (LAN, Tailscale), where browsers drop `Secure` cookies.
+- **Port in the cookie name:** cookies ignore ports, so two Jean servers on one host would otherwise overwrite each other.
+- **Storage:** `<app_data>/web-sessions.json` keeps only SHA-256 hashes of session IDs, so sessions survive restarts. Each session is bound to a hash of the token. Regenerating the token signs out every browser. Expiry slides: 30 days after last use.
+- **Protected routes** go through the `require_auth` middleware. It accepts the token (`?token=` or `Authorization: Bearer`) or the cookie. Remote connections from the desktop app and `JEAN_TOKEN` scripts keep using the token, because their requests are cross-site and cannot use a `SameSite` cookie.
+- **Origin check:** a cookie is accepted only if `Origin` is missing or matches `Host`, `X-Forwarded-Host`, or `JEAN_ALLOWED_ORIGINS`. This blocks CSRF and cross-site WebSocket hijacking.
+- **Rate limit:** 10 failed tokens per IP per minute, then HTTP 429.
+- **Sign out:** `POST /api/logout` revokes the session and clears the cookie.
+
+### Adding remote MCP endpoints
+
+Settings → MCP Servers accepts an HTTP(S) endpoint and defaults to global
+configuration for installed harnesses with MCP config support. Advanced settings
+allow a custom name, HTTP headers, and harness selection. The
+`add_remote_mcp_server` core dispatch command runs config writes off the async
+runtime and returns a result per harness. Native and Web Access use the same
+core dispatcher; remote settings route the command to the selected server.
+
+The installer in `jean_mcp_config.rs` reuses the config file locks, JSONC source
+patcher, and atomic writes with backups. Duplicate names fail without replacement.
+Authentication stays per harness through the existing MCP sign-in flow. Adding a
+server does not modify running sessions; start a new session to use it.
+
+Endpoint setup also offers browser-free bearer-token and API-key authentication
+under Advanced settings. Users supply credentials issued for that MCP server;
+Jean does not obtain or refresh them. `buildMcpEndpointHeaders` validates the
+header map and rejects authentication headers that conflict (case-insensitively)
+with the selected method. The existing per-harness config writers persist the
+headers. The result panel omits OAuth sign-in buttons for explicit credentials.
+Credential inputs clear after all selected writes succeed; partial failures keep
+them available for retry. OAuth-only servers still need browser authorization.
+See the [MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).

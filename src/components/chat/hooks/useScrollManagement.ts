@@ -7,8 +7,9 @@ import {
   useState,
 } from 'react'
 import type { RefObject } from 'react'
-import type { VirtualizedMessageListHandle } from '../VirtualizedMessageList'
+import type { MessageListHandle } from '../message-list-handle'
 import type { ChatMessage } from '@/types/chat'
+import { isAgentUpdateMessage } from '../message-content-utils'
 import { useIsMobile } from '@/hooks/use-mobile'
 import {
   getDefaultVisibleCount,
@@ -22,7 +23,7 @@ interface UseScrollManagementOptions {
   /** Messages array for finding findings index */
   messages: ChatMessage[] | undefined
   /** Ref to virtualized list for scrolling to specific message index */
-  virtualizedListRef: RefObject<VirtualizedMessageListHandle | null>
+  virtualizedListRef: RefObject<MessageListHandle | null>
   /**
    * Session whose transcript is currently displayed (deferred session id).
    * Used as the key for per-session scroll restoration (issue #594).
@@ -70,6 +71,11 @@ const OPEN_SETTLE_MS = 3000
 const MAX_PENDING_RESTORE_ATTEMPTS = 20
 /** Re-check a still-pending restore when ResizeObserver goes quiet (history trim, etc.). */
 const PENDING_RESTORE_RETRY_MS = 50
+/**
+ * After a run ends, WebKit can report a stale, clamped scroll position some
+ * frames after the tail was pinned. Treat scroll-ups in this window as layout.
+ */
+const RUN_END_SETTLE_MS = 500
 
 function hasScrollableOverflow(viewport: HTMLDivElement) {
   return viewport.scrollHeight - viewport.clientHeight > SCROLL_EPSILON_PX
@@ -155,7 +161,17 @@ export function useScrollManagement({
   // Cooldown: when user scrolls up, block handleScroll from re-setting isAtBottom for a short period
   const userScrollUpUntilRef = useRef(0)
   const lastScrollTopRef = useRef(0)
+  // scrollHeight at the last scroll event. A scrollTop drop that comes with a
+  // height change is layout (clamp on shrink, reflow), not the user.
+  const lastScrollHeightRef = useRef(0)
+  // Until this time, a scroll away from the tail that the user did not start
+  // re-pins the tail (see RUN_END_SETTLE_MS).
+  const runEndSettleUntilRef = useRef(0)
   const touchStartYRef = useRef<number | null>(null)
+  // True while a pointer is down on the viewport (scrollbar drag, text
+  // selection). Only then can a scroll-up without wheel, touch, or key events
+  // come from the user.
+  const isPointerDownRef = useRef(false)
   // Last known good scroll snapshot for the displayed session. Updated on every
   // real scroll; used when leaving a session so Loading placeholders cannot
   // overwrite a real position with scrollTop=0.
@@ -171,9 +187,18 @@ export function useScrollManagement({
   // Bounds deferred restores so an unreachable scrollTop cannot latch forever
   // and permanently disable tail-following (PR #605 review).
   const pendingRestoreAttemptsRef = useRef(0)
-  const pendingRestoreRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  )
+  const pendingRestoreRetryTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null)
+  // Viewport geometry from the last scroll event or resize callback. A commit
+  // that prepends older history reads it to keep the visible messages in place.
+  const lastLayoutRef = useRef({ scrollTop: 0, scrollHeight: 0 })
+  const recordLayout = useCallback((viewport: HTMLDivElement) => {
+    lastLayoutRef.current = {
+      scrollTop: viewport.scrollTop,
+      scrollHeight: viewport.scrollHeight,
+    }
+  }, [])
 
   const clearPendingRestoreRetry = useCallback(() => {
     if (pendingRestoreRetryTimerRef.current != null) {
@@ -242,7 +267,10 @@ export function useScrollManagement({
       isAtBottomRef.current = false
       setIsAtBottom(false)
     }
-    rememberScroll(viewport?.scrollTop ?? lastKnownScrollRef.current.scrollTop, false)
+    rememberScroll(
+      viewport?.scrollTop ?? lastKnownScrollRef.current.scrollTop,
+      false
+    )
   }, [rememberScroll, syncIsAtBottom])
 
   // Cleanup scroll timeout on unmount
@@ -447,6 +475,47 @@ export function useScrollManagement({
     [clearPendingRestoreRetry]
   )
 
+  // Scrollbar drags and keyboard scrolls of the focused viewport emit no wheel
+  // or touch events. Track the pointer so handleScroll can tell a drag from a
+  // layout scroll, and stop following the tail on upward scroll keys.
+  useEffect(() => {
+    const viewport = scrollViewportRef.current
+    if (!viewport) return
+
+    const handlePointerDown = () => {
+      isPointerDownRef.current = true
+    }
+    const handlePointerUp = () => {
+      isPointerDownRef.current = false
+    }
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target
+      if (
+        target instanceof HTMLElement &&
+        target.closest('input, textarea, select, [contenteditable="true"]')
+      ) {
+        return
+      }
+      const scrollsUp =
+        e.key === 'ArrowUp' ||
+        e.key === 'PageUp' ||
+        e.key === 'Home' ||
+        (e.key === ' ' && e.shiftKey)
+      if (scrollsUp && hasScrollableOverflow(viewport)) stopFollowingTail()
+    }
+
+    viewport.addEventListener('pointerdown', handlePointerDown)
+    viewport.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerUp)
+    return () => {
+      viewport.removeEventListener('pointerdown', handlePointerDown)
+      viewport.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerUp)
+    }
+  }, [stopFollowingTail])
+
   // Apply a saved scroll snapshot (or default to bottom) for the given session.
   // Defined before size-sync / session effects so those closures can capture it
   // directly (no render-time ref smuggling — issue #594 review).
@@ -473,6 +542,7 @@ export function useScrollManagement({
         setIsAtBottom(true)
         scrollToTail(viewport)
         lastScrollTopRef.current = viewport.scrollTop
+        lastScrollHeightRef.current = viewport.scrollHeight
         if (sessionId) {
           lastKnownScrollRef.current = {
             sessionId,
@@ -493,10 +563,14 @@ export function useScrollManagement({
       userScrollUpUntilRef.current = Date.now() + 1000
       setIsAtBottom(false)
 
-      const maxScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+      const maxScroll = Math.max(
+        0,
+        viewport.scrollHeight - viewport.clientHeight
+      )
       const targetTop = Math.min(Math.max(0, saved.scrollTop), maxScroll)
       viewport.scrollTop = targetTop
       lastScrollTopRef.current = targetTop
+      lastScrollHeightRef.current = viewport.scrollHeight
       lastKnownScrollRef.current = {
         sessionId: sessionId ?? '',
         scrollTop: targetTop,
@@ -547,7 +621,7 @@ export function useScrollManagement({
   // it is necessarily at the bottom. This clears stale "scrolled away" state
   // without changing behavior for genuinely scrollable chats.
   // Also re-applies a pending non-tail restore once the message list grows tall
-  // enough (e.g. VirtualizedMessageList expands its visible window).
+  // enough (e.g. the message list expands its visible window).
   //
   // Pending restores are bounded: if a saved scrollTop never becomes reachable
   // (history cleared, run trimmed, messages compacted), retry only up to
@@ -642,17 +716,18 @@ export function useScrollManagement({
     const viewport = scrollViewportRef.current
     if (!viewport) return
 
-    let rafId = 0
-    const syncViewportSize = () => {
+    const rafId = requestAnimationFrame(() => {
+      onViewportSizeChange()
+    })
+
+    // Pin inside the observer callback (after layout, before paint). A pin
+    // deferred to rAF paints the old position first, so a collapsible's
+    // expand animation wiggles the chat on every frame.
+    const observer = new ResizeObserver(() => {
       cancelAnimationFrame(rafId)
-      rafId = requestAnimationFrame(() => {
-        onViewportSizeChange()
-      })
-    }
-
-    syncViewportSize()
-
-    const observer = new ResizeObserver(syncViewportSize)
+      onViewportSizeChange()
+      recordLayout(viewport)
+    })
     observer.observe(viewport)
     if (viewport.firstElementChild) {
       observer.observe(viewport.firstElementChild)
@@ -665,10 +740,11 @@ export function useScrollManagement({
     }
     // onViewportSizeChange is an Effect Event — intentionally omitted from deps
     // (identity changes every render; React docs require not listing it).
-  }, [clearPendingRestoreRetry])
+  }, [clearPendingRestoreRetry, recordLayout])
 
   // [Tier 2 + 5] Auto-scroll during streaming using ResizeObserver.
-  // rAF-coalesced: at most one scroll per animation frame.
+  // Pins inside the observer callback (after layout, before paint) so a frame
+  // never paints at the old position. RO already fires at most once per frame.
   // Plan elements use direct scrollTop instead of scrollIntoView on desktop.
   // On mobile, always follow the live tail: pinning a plan to the top reads as
   // a jump away from the streaming response.
@@ -678,99 +754,50 @@ export function useScrollManagement({
     const viewport = scrollViewportRef.current
     if (!viewport || !viewport.firstElementChild) return
 
-    let rafId = 0
-
     const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(rafId)
-      rafId = requestAnimationFrame(() => {
-        // Respect cooldown after user scrolled up
-        if (Date.now() < userScrollUpUntilRef.current) return
-        // Don't scroll if user has intentionally scrolled away from the stream
-        if (!isFollowingTailRef.current) return
+      // Respect cooldown after user scrolled up
+      if (Date.now() < userScrollUpUntilRef.current) return
+      // Don't scroll if user has intentionally scrolled away from the stream
+      if (!isFollowingTailRef.current) return
 
-        // [Tier 5] If a plan is visible on desktop, pin it to the top using
-        // direct scrollTop. Mobile should keep following the streaming tail.
-        const planEl = viewport.querySelector(
-          '[data-plan-display]'
-        ) as HTMLElement | null
-        if (!isMobile && planEl) {
-          // Accumulate offsetTop up the offsetParent chain to the viewport
-          let offset = 0
-          let el: HTMLElement | null = planEl
-          while (el && el !== viewport) {
-            offset += el.offsetTop
-            el = el.offsetParent as HTMLElement | null
-          }
-          viewport.scrollTop = offset
-        } else {
-          scrollToTail(viewport)
+      // [Tier 5] If a plan is visible on desktop, pin it to the top using
+      // direct scrollTop. Mobile should keep following the streaming tail.
+      const planEl = viewport.querySelector(
+        '[data-plan-display]'
+      ) as HTMLElement | null
+      if (!isMobile && planEl) {
+        // Accumulate offsetTop up the offsetParent chain to the viewport
+        let offset = 0
+        let el: HTMLElement | null = planEl
+        while (el && el !== viewport) {
+          offset += el.offsetTop
+          el = el.offsetParent as HTMLElement | null
         }
-      })
+        viewport.scrollTop = offset
+      } else {
+        scrollToTail(viewport)
+      }
     })
 
+    // observe() delivers an initial callback, which pins the tail when
+    // streaming starts. Observe the viewport too: it changes height during a
+    // run (mobile browser bars, keyboard), and the size-sync observer does not
+    // pin while sending, so the chat would stay off the bottom.
     observer.observe(viewport.firstElementChild)
-    return () => {
-      cancelAnimationFrame(rafId)
-      observer.disconnect()
-    }
+    observer.observe(viewport)
+    return () => observer.disconnect()
   }, [isSending, isMobile])
 
-  // [Tier 4] Scroll management on streaming transitions.
-  // - Start: if user was at bottom, smooth-scroll to follow queued/approved execution.
-  //   If user scrolled up, respect their position — ResizeObserver live-tail stays disabled.
-  // - End: pin to actual bottom to catch late layout shifts from
-  //   streaming → final content reflow (double-rAF ≈ 33ms).
+  // [Tier 4] Pin to actual bottom when streaming ends, to catch late layout
+  // shifts from streaming → final content reflow (double-rAF ≈ 33ms).
+  // Streaming start needs no handler: the streaming ResizeObserver above pins
+  // the tail on its initial callback. A smooth scroll here raced those pins,
+  // flickered, and stopped short of the moving bottom.
   const wasSendingRef = useRef(false)
   useEffect(() => {
-    // Streaming just started.
-    if (!wasSendingRef.current && isSending) {
-      const viewport = scrollViewportRef.current
-      // Only follow if user was already at bottom. Otherwise leave them where they are —
-      // The composer's "Bottom" tab is the manual escape hatch.
-      if (
-        viewport &&
-        isFollowingTailRef.current &&
-        !isAutoScrollingRef.current
-      ) {
-        let cancelled = false
-        requestAnimationFrame(() => {
-          if (cancelled || !isFollowingTailRef.current) return
-          isAutoScrollingRef.current = true
-          viewport.scrollTo({
-            top: viewport.scrollHeight,
-            behavior: 'smooth',
-          })
-          const onEnd = () => {
-            isAutoScrollingRef.current = false
-            viewport.removeEventListener('scrollend', onEnd)
-            if (scrollTimeoutRef.current) {
-              clearTimeout(scrollTimeoutRef.current)
-              scrollTimeoutRef.current = null
-            }
-            // Correct any stale-scrollHeight undershoot from DOM changes mid-animation
-            const { scrollTop, scrollHeight, clientHeight } = viewport
-            if (
-              isFollowingTailRef.current &&
-              scrollHeight - scrollTop - clientHeight > 2
-            ) {
-              scrollToTail(viewport)
-            }
-            syncIsAtBottom(viewport)
-          }
-          viewport.addEventListener('scrollend', onEnd, { once: true })
-          scrollTimeoutRef.current = setTimeout(onEnd, 400)
-        })
-        wasSendingRef.current = !!isSending
-        return () => {
-          cancelled = true
-        }
-      }
-      wasSendingRef.current = !!isSending
-      return
-    }
-
     // Streaming just ended — pin to actual bottom
     if (wasSendingRef.current && !isSending && isFollowingTailRef.current) {
+      runEndSettleUntilRef.current = Date.now() + RUN_END_SETTLE_MS
       let cancelled = false
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -790,7 +817,7 @@ export function useScrollManagement({
       }
     }
     wasSendingRef.current = !!isSending
-  }, [isSending, syncIsAtBottom])
+  }, [isSending])
 
   // Persist the previous session and prepare restore when the displayed session
   // changes (covers both tab switches and worktree switches).
@@ -850,23 +877,40 @@ export function useScrollManagement({
     if (!contentReady || !activeSessionId) return
 
     const messagesJustLoaded = prevLength === 0 && currentLength > 0
-    if (
-      becameReady ||
-      messagesJustLoaded ||
-      pendingRestoreRef.current
-    ) {
+    if (becameReady || messagesJustLoaded || pendingRestoreRef.current) {
       applySessionScrollState(activeSessionId)
     }
-  }, [
-    contentReady,
-    messages?.length,
-    activeSessionId,
-    applySessionScrollState,
-  ])
+  }, [contentReady, messages?.length, activeSessionId, applySessionScrollState])
+
+  // A cold session open renders only the latest run, then prepends older
+  // history in the background. Without a correction the viewport keeps its
+  // scrollTop while content grows above it, so a user who already scrolled
+  // up jumps toward the oldest messages. Keep the distance from the bottom.
+  // The target is absolute, so it is also correct when the browser's own
+  // scroll anchoring already moved the viewport.
+  const prevFirstMessageIdRef = useRef(messages?.[0]?.id)
+  useLayoutEffect(() => {
+    const prevFirstId = prevFirstMessageIdRef.current
+    const firstId = messages?.[0]?.id
+    prevFirstMessageIdRef.current = firstId
+    if (!prevFirstId || !firstId || prevFirstId === firstId) return
+    if (!messages?.some(message => message.id === prevFirstId)) return
+
+    const viewport = scrollViewportRef.current
+    if (!viewport) return
+    const { scrollTop, scrollHeight } = lastLayoutRef.current
+    const grownBy = viewport.scrollHeight - scrollHeight
+    if (grownBy <= 0) return
+    viewport.scrollTop = scrollTop + grownBy
+    recordLayout(viewport)
+    lastScrollTopRef.current = viewport.scrollTop
+    lastScrollHeightRef.current = viewport.scrollHeight
+  }, [messages, recordLayout])
 
   // [Tier 1] Handle scroll events — findings visibility removed (handled by IntersectionObserver)
   const handleScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
+      recordLayout(e.target as HTMLDivElement)
       // Skip updating isAtBottom during auto-scroll to avoid race conditions
       // This prevents the smooth scroll animation from incorrectly marking us as "not at bottom"
       if (isAutoScrollingRef.current) {
@@ -880,10 +924,49 @@ export function useScrollManagement({
       }
 
       const target = e.target as HTMLDivElement
-      const previousScrollTop = lastScrollTopRef.current
-      lastScrollTopRef.current = target.scrollTop
 
+      // During a run, and briefly after it ends, WebKit clamps scrollTop while
+      // the content is briefly shorter (tool calls collapse, the streaming
+      // reply is swapped for the saved one), then fires a late scroll event
+      // to that stale position after the stream was pinned. No resize follows
+      // while a tool runs, so nothing else moves the view back. Re-pin here.
+      // Wheel, touch, and keyboard input stop following the stream first, and
+      // a pointer down means a scrollbar drag, so the user can still scroll
+      // away.
+      const now = Date.now()
+      // A desktop plan pinned to the top is not the tail; leave it to the
+      // streaming observer.
       if (
+        (isSending || now < runEndSettleUntilRef.current) &&
+        !isPointerDownRef.current &&
+        now >= userScrollUpUntilRef.current &&
+        isFollowingTailRef.current &&
+        !isViewportAtBottom(target) &&
+        !(isSending && !isMobile && target.querySelector('[data-plan-display]'))
+      ) {
+        scrollToTail(target)
+        lastScrollTopRef.current = target.scrollTop
+        lastScrollHeightRef.current = target.scrollHeight
+        syncIsAtBottom(target)
+        rememberScroll(target.scrollTop, true)
+        return
+      }
+
+      const previousScrollTop = lastScrollTopRef.current
+      const contentHeightChanged =
+        target.scrollHeight !== lastScrollHeightRef.current
+      lastScrollTopRef.current = target.scrollTop
+      lastScrollHeightRef.current = target.scrollHeight
+
+      // Wheel, touch, and keyboard report user scroll-up directly. This check
+      // only catches scrollbar drags, which need a pointer down and do not
+      // resize the content. Any other scroll-up is layout: the browser clamps
+      // scrollTop when content shrinks, and WebKit can report a stale position
+      // after the tail was pinned. Neither may stop following the tail, or the
+      // stream stops scrolling.
+      if (
+        isPointerDownRef.current &&
+        !contentHeightChanged &&
         hasScrollableOverflow(target) &&
         target.scrollTop < previousScrollTop - SCROLL_EPSILON_PX
       ) {
@@ -909,10 +992,17 @@ export function useScrollManagement({
       setIsAtBottom(prev => (prev === atBottom ? prev : atBottom))
       rememberScroll(target.scrollTop, isFollowingTailRef.current)
     },
-    [contentReady, rememberScroll]
+    [
+      contentReady,
+      isMobile,
+      isSending,
+      recordLayout,
+      rememberScroll,
+      syncIsAtBottom,
+    ]
   )
 
-  // Handle scroll-to-bottom completion from VirtualizedMessageList
+  // Handle scroll-to-bottom completion from the message list
   const handleScrollToBottomHandled = useCallback(() => {
     isFollowingTailRef.current = true
     userScrollUpUntilRef.current = 0
@@ -920,7 +1010,10 @@ export function useScrollManagement({
     setIsAtBottom(true)
     pendingRestoreRef.current = false
     const viewport = scrollViewportRef.current
-    rememberScroll(viewport?.scrollTop ?? lastKnownScrollRef.current.scrollTop, true)
+    rememberScroll(
+      viewport?.scrollTop ?? lastKnownScrollRef.current.scrollTop,
+      true
+    )
   }, [rememberScroll])
 
   // [Tier 4] Scroll to bottom helper — uses scrollend event instead of 350ms timeout.
@@ -999,7 +1092,7 @@ export function useScrollManagement({
   )
 
   // Mark scroll state as "at bottom" without performing any physical scroll.
-  // Used when sending a message so VirtualizedMessageList's gentle scrollIntoView
+  // Used when sending a message so the message list's gentle scrollIntoView
   // handles the actual scrolling.
   const markAtBottom = useCallback(() => {
     isFollowingTailRef.current = true
@@ -1008,8 +1101,31 @@ export function useScrollManagement({
     setIsAtBottom(true)
     pendingRestoreRef.current = false
     const viewport = scrollViewportRef.current
-    rememberScroll(viewport?.scrollTop ?? lastKnownScrollRef.current.scrollTop, true)
+    rememberScroll(
+      viewport?.scrollTop ?? lastKnownScrollRef.current.scrollTop,
+      true
+    )
   }, [rememberScroll])
+
+  // Every prompt the user adds appends a user message: composer, Magic menu
+  // commands, approvals, queue drain. Follow the tail for all of them, not
+  // only for composer sends that call markAtBottom first. Child layout effects
+  // run before this one, so pin the viewport here directly.
+  const prevLastMessageIdRef = useRef(messages?.at(-1)?.id)
+  useLayoutEffect(() => {
+    const prevLastId = prevLastMessageIdRef.current
+    const last = messages?.at(-1)
+    prevLastMessageIdRef.current = last?.id
+    if (!last || last.role !== 'user' || last.id === prevLastId) return
+    // Only a real append (previous tail still present), not a session switch
+    // or an optimistic message id swap.
+    if (!prevLastId || !messages?.some(m => m.id === prevLastId)) return
+    // Agent update prompts are hidden from the chat transcript.
+    if (isAgentUpdateMessage(last.content)) return
+    const viewport = scrollViewportRef.current
+    if (viewport) scrollToTail(viewport)
+    markAtBottom()
+  }, [messages, markAtBottom])
 
   // Begin a user-initiated keyboard scroll.
   // Cancels any pending auto-scroll timeout AND keeps isAutoScrollingRef=true
@@ -1048,6 +1164,7 @@ export function useScrollManagement({
   // Scroll to findings helper
   // First scroll to the message containing findings using virtualizer, then to the element.
   const scrollToFindings = useCallback(() => {
+    stopFollowingTail()
     // First try to find the element directly (if already rendered)
     const findingsEl = scrollViewportRef.current?.querySelector(
       '[data-review-findings="unfixed"]'
@@ -1079,7 +1196,7 @@ export function useScrollManagement({
         }
       }, 100)
     }
-  }, [messages, virtualizedListRef])
+  }, [messages, virtualizedListRef, stopFollowingTail])
 
   return {
     scrollViewportRef,

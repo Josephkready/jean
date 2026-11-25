@@ -16,14 +16,14 @@ use super::registry::{
 };
 use super::run_log;
 use super::storage::{
-    cleanup_combined_context_files, delete_session_data, get_base_index_path, get_data_dir,
+    cleanup_combined_context_files, client_session, delete_session_data, get_data_dir,
     get_index_path, get_session_dir, load_index, load_metadata, load_sessions, save_metadata,
     with_existing_metadata_mut, with_index_mut, with_metadata_mut, with_sessions_mut,
 };
 use super::types::{
     AllSessionsEntry, AllSessionsResponse, Backend, ChatMessage, ClaudeContext, EffortLevel,
-    LabelData, MessageRole, RunStatus, Session, SessionUnreadSummary, ThinkingLevel, WorktreeIndex,
-    WorktreeSessions,
+    LabelData, MessageRole, RunState, RunStatus, Session, SessionUnreadSummary, ThinkingLevel,
+    UserTurnOutcome, WorktreeSessions,
 };
 use crate::claude_cli::resolve_cli_binary;
 use crate::http_server::EmitExt;
@@ -50,7 +50,121 @@ fn resumed_tail_error_event(
     )
 }
 
+/// A failed send, tagged with what happened to the user's prompt.
+///
+/// `?` on a `String` error means the prompt was never recorded. Exits after
+/// `run_log::start_run` build this explicitly from the final run state.
+#[derive(Debug)]
+pub(crate) struct SendError {
+    pub message: String,
+    pub user_turn: UserTurnOutcome,
+    /// Another send owns the session. Retrying later can succeed.
+    pub busy: bool,
+}
+
+impl SendError {
+    fn busy() -> Self {
+        Self {
+            message: "Session already has an active request".to_string(),
+            user_turn: UserTurnOutcome::NotAccepted,
+            busy: true,
+        }
+    }
+}
+
+impl From<String> for SendError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            user_turn: UserTurnOutcome::NotAccepted,
+            busy: false,
+        }
+    }
+}
+
+/// Read the run's final state and tell every client what happened to the
+/// prompt. Called once per send, after the run log and session are final.
+fn emit_user_turn_outcome(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: &str,
+) -> UserTurnOutcome {
+    let metadata = load_metadata(app, session_id).ok().flatten();
+    let run = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.find_run(run_id));
+    if run.is_none() {
+        log::warn!(
+            "[SendChat] run {run_id} missing when reporting user turn; treating as withdrawn"
+        );
+    }
+    let user_turn = run.map_or(
+        UserTurnOutcome::Withdrawn,
+        super::types::RunEntry::user_turn_outcome,
+    );
+    let event = super::claude::UserTurnEvent {
+        session_id: session_id.to_string(),
+        worktree_id: worktree_id.to_string(),
+        run_id: run_id.to_string(),
+        user_message_id: run
+            .map(|run| run.user_message_id.clone())
+            .unwrap_or_default(),
+        user_turn,
+        restore_draft: user_turn.restore_draft(),
+        failed: run.is_some_and(super::types::RunEntry::user_turn_failed),
+        emitted_at_ms: now_ms(),
+        status_version: metadata
+            .as_ref()
+            .map_or(0, |metadata| metadata.status_version),
+    };
+    log::info!(
+        "[SendChat] user turn session={session_id} run={run_id} outcome={user_turn:?} failed={}",
+        event.failed
+    );
+    if let Err(e) = app.emit_all("chat:user-turn", &event) {
+        log::error!("Failed to emit chat:user-turn event: {e}");
+    }
+    user_turn
+}
+
+/// The run is recorded but nothing ran. Hide it and hand the prompt back.
+fn withdraw_unstarted_run(
+    app: &AppHandle,
+    writer: &mut run_log::RunLogWriter,
+    session_id: &str,
+    worktree_id: &str,
+    error: String,
+) -> SendError {
+    log::error!("[SendChat] EXIT session={session_id} reason=run_setup_failed error={error}");
+    if let Err(e) = writer.cancel(None, None) {
+        log::warn!("Failed to withdraw unstarted run: {e}");
+    }
+    if let Err(e) = run_log::delete_input_file(app, session_id, writer.run_id()) {
+        log::trace!("Could not delete input file of unstarted run: {e}");
+    }
+    let user_turn = emit_user_turn_outcome(app, session_id, worktree_id, writer.run_id());
+    SendError {
+        message: error,
+        user_turn,
+        busy: false,
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 const CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT: &str = "\
+## Not Plan Mode
+
+- When multiple independent operations are needed, batch them into parallel tool calls.";
+/// Codex build-mode block before its rules that repeat the global prompt
+/// were removed. Kept so a stored copy still counts as a default.
+const LEGACY_CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT: &str = "\
 ## Not Plan Mode
 
 - **VERY IMPORTANT: Keep Code Simple**: Do not over-engineer. Always implement the simplest maintainable solution. Avoid extra abstractions, frameworks, configuration, or future-proofing unless clearly required.
@@ -185,6 +299,7 @@ fn is_codex_default_global_system_prompt(prompt: &str) -> bool {
         || crate::is_legacy_default_global_system_prompt(trimmed)
         || trimmed == CODEX_DEFAULT_PLAN_MODE_PROMPT.trim()
         || trimmed == CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT.trim()
+        || trimmed == LEGACY_CODEX_DEFAULT_NOT_PLAN_MODE_PROMPT.trim()
         || (trimmed.contains("### 1. Plan Mode Default")
             && trimmed.contains("Every Codex plan-mode response")
             && trimmed.contains("Jean Worktree Policy"))
@@ -422,11 +537,72 @@ pub(crate) fn default_model_for_backend(
     }
 }
 
+/// Validate inherited defaults for the CLI account, including empty sessions
+/// reused by MCP that have no persisted model yet.
+async fn resolve_default_model_for_backend(
+    app: &AppHandle,
+    backend: &Backend,
+    preferences: Option<&crate::AppPreferences>,
+) -> Option<String> {
+    let preferred = preferences.and_then(|prefs| default_model_for_backend(backend, prefs));
+    if *backend != Backend::Codex {
+        return preferred;
+    }
+    let app = app.clone();
+    let fallback = preferred.clone();
+    let custom_provider = preferences.and_then(|prefs| prefs.default_codex_provider.clone());
+    match tauri::async_runtime::spawn_blocking(move || {
+        super::codex::resolve_inherited_model(&app, preferred, custom_provider.as_deref())
+    })
+    .await
+    {
+        Ok(model) => model,
+        Err(error) => {
+            log::warn!("Could not resolve inherited Codex model: {error}");
+            fallback
+        }
+    }
+}
+
 /// Trim and drop empty optional strings (MCP/UI may send `""` or whitespace).
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Provider for a send: the explicit value, else the session choice, else the
+/// backend default. The sentinels `__anthropic__` / `__default__` mean the user
+/// picked the built-in provider, so they resolve to no custom profile.
+fn resolve_send_provider(
+    explicit: Option<String>,
+    session: Option<String>,
+    backend_default: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    normalize_optional_string(explicit)
+        .or_else(|| normalize_optional_string(session))
+        .or_else(|| normalize_optional_string(backend_default()))
+        .filter(|provider| provider != "__anthropic__" && provider != "__default__")
+}
+
+/// Default provider for a backend: project then global for Claude, global for Codex.
+fn default_provider_for_backend(
+    app: &AppHandle,
+    worktree_id: &str,
+    backend: &Backend,
+    prefs: Option<&crate::AppPreferences>,
+) -> Option<String> {
+    match backend {
+        Backend::Claude => load_projects_data(app)
+            .ok()
+            .and_then(|data| {
+                let project_id = data.find_worktree(worktree_id)?.project_id.clone();
+                data.find_project(&project_id)?.default_provider.clone()
+            })
+            .or_else(|| prefs.and_then(|p| p.default_provider.clone())),
+        Backend::Codex => prefs.and_then(|p| p.default_codex_provider.clone()),
+        _ => None,
+    }
 }
 
 fn resolve_global_system_prompt(preferences_prompt: Option<&str>) -> String {
@@ -509,6 +685,29 @@ fn resolve_send_model(
     normalize_optional_string(explicit_model)
         .or_else(|| normalize_optional_string(session_selected_model))
         .or_else(|| normalize_optional_string(backend_default_model))
+}
+
+/// Resolve the reasoning levels used for a send.
+///
+/// Claude uses the effort level when one is present and ignores the thinking
+/// level. A Claude send that carries only a thinking level (a thinking model
+/// such as Sonnet) must not take the session's saved effort level, or the CLI
+/// gets `--effort` and no thinking. So Claude falls back to the session levels
+/// only when the send carries neither. Other backends fall back per field.
+fn resolve_send_reasoning(
+    backend: &Backend,
+    thinking_level: Option<ThinkingLevel>,
+    effort_level: Option<EffortLevel>,
+    session_thinking_level: Option<ThinkingLevel>,
+    session_effort_level: Option<EffortLevel>,
+) -> (Option<ThinkingLevel>, Option<EffortLevel>) {
+    if *backend == Backend::Claude && (thinking_level.is_some() || effort_level.is_some()) {
+        return (thinking_level, effort_level);
+    }
+    (
+        thinking_level.or(session_thinking_level),
+        effort_level.or(session_effort_level),
+    )
 }
 
 fn validate_execution_policy(mode: &str, backend: &Backend) -> Result<(), String> {
@@ -651,22 +850,17 @@ fn finish_bulk_update<T, E>(
 // Session Management Commands
 // ============================================================================
 
-/// Get all sessions for a worktree (for tab bar display)
-/// By default, archived sessions are filtered out
+/// Get all sessions for a worktree (for tab bar display).
+/// Deleted sessions (`archived_at` set) are never returned.
 pub async fn get_sessions(
     app: AppHandle,
     worktree_id: String,
     worktree_path: String,
-    include_archived: Option<bool>,
     include_message_counts: Option<bool>,
 ) -> Result<WorktreeSessions, String> {
     log::trace!("Getting sessions for worktree: {worktree_id}");
     let mut sessions = load_sessions(&app, &worktree_path, &worktree_id)?;
-
-    // Filter out archived sessions unless explicitly requested
-    if !include_archived.unwrap_or(false) {
-        sessions.sessions.retain(|s| s.archived_at.is_none());
-    }
+    sessions.sessions.retain(|s| s.archived_at.is_none());
 
     // Optionally populate message counts from metadata (efficient alternative to loading full messages)
     if include_message_counts.unwrap_or(false) {
@@ -708,14 +902,12 @@ pub async fn list_sessions_summary(
     app: AppHandle,
     worktree_id: String,
     worktree_path: String,
-    include_archived: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let sessions = load_sessions(&app, &worktree_path, &worktree_id)?;
-    let include_archived = include_archived.unwrap_or(false);
     let session_summaries: Vec<serde_json::Value> = sessions
         .sessions
         .into_iter()
-        .filter(|session| include_archived || session.archived_at.is_none())
+        .filter(|session| session.archived_at.is_none())
         .map(|session| {
             serde_json::json!({
                 "id": session.id,
@@ -735,6 +927,7 @@ pub async fn list_sessions_summary(
                 "lastRunStartedAt": session.last_run_started_at,
                 "waitingForInput": session.waiting_for_input,
                 "waitingForInputType": session.waiting_for_input_type,
+                "delegatedBy": session.delegated_by,
             })
         })
         .collect();
@@ -754,23 +947,16 @@ pub async fn get_session_status(
     let metadata = load_metadata(&app, &session_id)?
         .ok_or_else(|| format!("Unknown sessionId: {session_id}"))?;
     let latest_run = metadata.runs.last();
-    let actively_managed = crate::chat::registry::is_session_actively_managed(&session_id);
-    let status = if actively_managed {
-        "running"
-    } else {
-        match latest_run.map(|run| &run.status) {
-            Some(RunStatus::Running) | Some(RunStatus::Resumable) => "resumable",
-            Some(RunStatus::Cancelled) => "cancelled",
-            Some(RunStatus::Crashed) => "error",
-            Some(RunStatus::Completed) | None => "idle",
-        }
-    };
+    let state = metadata.run_state(crate::chat::registry::is_session_actively_managed(
+        &session_id,
+    ));
 
     Ok(serde_json::json!({
         "sessionId": session_id,
         "worktreeId": metadata.worktree_id,
-        "status": status,
-        "activelyManaged": actively_managed,
+        "status": state.status,
+        "statusVersion": state.status_version,
+        "activelyManaged": state.actively_managed,
         "backend": metadata.backend,
         "selectedModel": metadata.selected_model,
         "selectedProvider": metadata.selected_provider,
@@ -789,6 +975,64 @@ pub async fn get_session_status(
             "recovered": run.recovered,
         })),
     }))
+}
+
+/// Versioned run-state snapshot clients reconcile their running/waiting
+/// indicators from. `None` returns every session whose last run is unfinished
+/// plus every session the registry manages; a client treats any other session
+/// as idle. Orphaned runs are repaired before reading so a crashed run never
+/// reports as running.
+pub async fn get_run_states(
+    app: AppHandle,
+    session_ids: Option<Vec<String>>,
+) -> Result<Vec<RunState>, String> {
+    let explicit = session_ids.is_some();
+    let session_ids = match session_ids {
+        Some(ids) => ids,
+        None => super::storage::list_all_session_ids(&app)?,
+    };
+    let managed = super::registry::get_actively_managed_sessions();
+    let mut loaded = Vec::with_capacity(session_ids.len());
+    let mut to_repair = Vec::new();
+    for session_id in session_ids {
+        match load_metadata(&app, &session_id) {
+            Ok(Some(metadata)) => {
+                // Only an unmanaged session with an unfinished run can be an
+                // orphan; everything else is already in its final state.
+                let unfinished = metadata
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run.status, RunStatus::Running | RunStatus::Resumable));
+                if unfinished && !managed.contains(&session_id) {
+                    to_repair.push(session_id.clone());
+                }
+                loaded.push(metadata);
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("get_run_states: skipping {session_id}: {e}"),
+        }
+    }
+    if !to_repair.is_empty() {
+        if let Err(e) = super::run_log::recover_incomplete_runs_for(&app, to_repair.clone()) {
+            log::warn!("get_run_states: orphan repair failed: {e}");
+        }
+        for metadata in &mut loaded {
+            if !to_repair.contains(&metadata.id) {
+                continue;
+            }
+            if let Ok(Some(repaired)) = load_metadata(&app, &metadata.id) {
+                *metadata = repaired;
+            }
+        }
+    }
+    Ok(loaded
+        .into_iter()
+        .map(|metadata| {
+            let actively_managed = managed.contains(&metadata.id);
+            metadata.run_state(actively_managed)
+        })
+        .filter(|state| explicit || state.status.is_live())
+        .collect())
 }
 
 /// List all sessions across all worktrees and projects
@@ -880,7 +1124,7 @@ pub async fn list_unread_sessions(app: AppHandle) -> Result<AllSessionsResponse,
             let sessions: Vec<Session> = unread_session_ids_for_worktree(&app, &worktree.id)?
                 .iter()
                 .filter_map(|session_id| match load_metadata(&app, session_id) {
-                    Ok(Some(metadata)) => Some(metadata.to_session()),
+                    Ok(Some(metadata)) => Some(client_session(&app, &metadata)),
                     Ok(None) => None,
                     Err(error) => {
                         log::warn!("Failed to load unread session {session_id}: {error}");
@@ -1083,7 +1327,6 @@ pub async fn create_session(
         return Err("Native session IDs are only valid for terminal sessions".to_string());
     }
 
-    // Archived worktrees must be restored before creating new sessions.
     ensure_worktree_not_archived(&worktree_id, worktree_archived_at(&app, &worktree_id))?;
 
     let preferences = crate::load_preferences(app.clone()).await.ok();
@@ -1160,6 +1403,12 @@ pub async fn create_session(
         }
     };
 
+    let inherited_model = if primary_surface.as_deref() == Some("terminal") {
+        None
+    } else {
+        resolve_default_model_for_backend(&app, &backend_enum, preferences.as_ref()).await
+    };
+
     let session = with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
         // Generate name if not provided
         let session_number = sessions.next_session_number();
@@ -1190,9 +1439,7 @@ pub async fn create_session(
             persist_salvaged_resume_id(&mut session, &backend_enum, native_session_id);
         }
         if primary_surface.as_deref() != Some("terminal") {
-            session.selected_model = preferences
-                .as_ref()
-                .and_then(|prefs| default_model_for_backend(&backend_enum, prefs));
+            session.selected_model = inherited_model;
         }
         let session_id = session.id.clone();
 
@@ -1207,12 +1454,59 @@ pub async fn create_session(
     Ok(session)
 }
 
+/// A provider rejection (usage limit, auth, API error) means the next queued
+/// prompt would hit the same wall. Hold the queue instead of draining it, and
+/// let the user retry the stopped turn explicitly (auto-continue banner or a
+/// manual send) before the rest of the queue is released.
+fn run_holds_queue(run: Option<&super::types::RunEntry>) -> bool {
+    run.is_some_and(|run| run.provider_rejected)
+}
+
+fn queue_held_by_provider_rejection(app: &AppHandle, session_id: &str) -> bool {
+    load_metadata(app, session_id)
+        .ok()
+        .flatten()
+        .is_some_and(|metadata| {
+            !metadata.queued_messages.is_empty() && run_holds_queue(metadata.runs.last())
+        })
+}
+
+fn emit_queue_held(app: &AppHandle, session_id: &str, worktree_id: &str) {
+    app.emit_all(
+        "queue:held",
+        &serde_json::json!({
+            "sessionId": session_id,
+            "worktreeId": worktree_id,
+            "reason": "provider_rejected",
+        }),
+    )
+    .ok();
+}
+
 fn trigger_backend_queue_drain(
     app: AppHandle,
     worktree_id: String,
     worktree_path: String,
     session_id: String,
 ) {
+    start_backend_queue_drain(app, worktree_id, worktree_path, session_id, false);
+}
+
+/// `release_hold`: an explicit user action ("Send now") retries the queue head
+/// even after a provider rejection. If that send is rejected too, the drain
+/// holds the queue again.
+fn start_backend_queue_drain(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+    release_hold: bool,
+) {
+    if !release_hold && queue_held_by_provider_rejection(&app, &session_id) {
+        log::info!("[QueueDrain] holding queue after provider rejection session={session_id}");
+        emit_queue_held(&app, &session_id, &worktree_id);
+        return;
+    }
     {
         let mut draining = BACKEND_QUEUE_DRAINING.lock().unwrap();
         if !draining.insert(session_id.clone()) {
@@ -1220,9 +1514,22 @@ fn trigger_backend_queue_drain(
             return;
         }
     }
+    // A successful turn cleared the provider rejection: the queue is running.
+    app.emit_all(
+        "queue:released",
+        &serde_json::json!({ "sessionId": session_id }),
+    )
+    .ok();
 
     tauri::async_runtime::spawn(async move {
-        drain_backend_queue(app, worktree_id, worktree_path, session_id.clone()).await;
+        drain_backend_queue(
+            app,
+            worktree_id,
+            worktree_path,
+            session_id.clone(),
+            release_hold,
+        )
+        .await;
         BACKEND_QUEUE_DRAINING.lock().unwrap().remove(&session_id);
     });
 }
@@ -1232,8 +1539,17 @@ async fn drain_backend_queue(
     worktree_id: String,
     worktree_path: String,
     session_id: String,
+    mut release_hold: bool,
 ) {
     loop {
+        // A queued prompt that just failed with a provider rejection (limit,
+        // auth, API error) leaves the rest of the queue untouched.
+        if !std::mem::take(&mut release_hold) && queue_held_by_provider_rejection(&app, &session_id)
+        {
+            log::info!("[QueueDrain] holding queue mid-drain session={session_id}");
+            emit_queue_held(&app, &session_id, &worktree_id);
+            return;
+        }
         if super::registry::is_session_actively_managed(&session_id) {
             // A Codex turn may be running — steer queued messages into it
             // instead of waiting for the run to finish (preference-gated).
@@ -1303,7 +1619,7 @@ async fn drain_backend_queue(
             "[QueueDrain] processing queued message session={session_id} message_id={queued_id}"
         );
 
-        if let Err(e) = send_chat_message(
+        let result = send_chat_message_inner(
             app.clone(),
             session_id.clone(),
             worktree_id.clone(),
@@ -1321,14 +1637,22 @@ async fn drain_backend_queue(
             request.custom_profile_name,
             request.backend,
         )
-        .await
-        {
-            // Lost a send race against a direct client send. Re-insert at the queue front so
-            // the message is NOT lost — the active run's completion re-triggers
-            // the drain and retries it.
-            if e.contains("already has an active request") {
+        .await;
+        // The wrapper reports runs it started; this loop started this one.
+        // Report before dequeuing the next prompt, which would otherwise make
+        // the session live again before the report looks at it.
+        super::delegation::report_run_end(
+            &app,
+            &session_id,
+            result.as_ref().err().map(|e| e.message.as_str()),
+        );
+
+        let user_turn = match result {
+            Err(e) if e.busy => {
+                // Lost the send race. Put it back; the next run's completion
+                // re-triggers the drain.
                 log::warn!(
-                    "[QueueDrain] send race lost, requeueing at front session={session_id} message_id={queued_id}"
+                    "[QueueDrain] session busy, requeueing at front session={session_id} message_id={queued_id}"
                 );
                 let requeued = with_existing_metadata_mut(&app, &session_id, |metadata| {
                     metadata.queued_messages.insert(0, queued.clone());
@@ -1343,14 +1667,50 @@ async fn drain_backend_queue(
                 }
                 return;
             }
-            log::error!(
-                "[QueueDrain] queued message failed session={session_id} message_id={queued_id}: {e}"
-            );
+            Err(e) => {
+                log::error!(
+                    "[QueueDrain] queued message failed session={session_id} message_id={queued_id} outcome={:?}: {}",
+                    e.user_turn,
+                    e.message
+                );
+                e.user_turn
+            }
+            Ok(_) => latest_run_user_turn(&app, &session_id),
+        };
+
+        // The prompt is not in history (rejected, setup failed, or stopped
+        // before output). Hand it back to the composer instead of dropping it
+        // or retrying it forever.
+        if user_turn.restore_draft() {
+            app.emit_all(
+                "queue:returned",
+                &serde_json::json!({
+                    "sessionId": session_id,
+                    "worktreeId": worktree_id,
+                    "message": queued,
+                }),
+            )
+            .ok();
         }
     }
 }
 
-struct QueuedSendRequest {
+/// Outcome of the session's newest run. The drain holds the queue slot, so the
+/// newest run is the one it just sent.
+fn latest_run_user_turn(app: &AppHandle, session_id: &str) -> UserTurnOutcome {
+    load_metadata(app, session_id)
+        .ok()
+        .flatten()
+        .and_then(|metadata| {
+            metadata
+                .runs
+                .last()
+                .map(super::types::RunEntry::user_turn_outcome)
+        })
+        .unwrap_or(UserTurnOutcome::Persisted)
+}
+
+pub(crate) struct QueuedSendRequest {
     message: String,
     model: Option<String>,
     execution_mode: Option<String>,
@@ -1365,7 +1725,7 @@ struct QueuedSendRequest {
     backend: Option<String>,
 }
 
-async fn queued_message_to_send_request(
+pub(crate) async fn queued_message_to_send_request(
     app: &AppHandle,
     queued: &Value,
 ) -> Result<QueuedSendRequest, String> {
@@ -1474,6 +1834,11 @@ fn build_queued_message_with_refs(queued: &Value) -> Result<String, String> {
         .unwrap_or_default()
         .to_string();
 
+    let mention_refs = queued_mention_refs(queued);
+    if !mention_refs.is_empty() {
+        message = append_refs(message, mention_refs);
+    }
+
     let pending_files = queued
         .get("pendingFiles")
         .and_then(Value::as_array)
@@ -1576,6 +1941,48 @@ fn build_queued_message_with_refs(queued: &Value) -> Result<String, String> {
     Ok(message)
 }
 
+/// Context lines for `@` mentions in agent chats (`mentions` on a queued
+/// message). Keep in sync with `mentionRef` in
+/// src/components/chat/agent-mentions.ts.
+fn queued_mention_refs(queued: &Value) -> String {
+    queued
+        .get("mentions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(mention_ref)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn mention_ref(mention: &Value) -> Option<String> {
+    let text = |key: &str| {
+        mention
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let (label, id_label) = match text("type")? {
+        "agent" => ("agent", "agentId"),
+        "project" => ("project", "projectId"),
+        "remote_jean" => ("remote Jean", "serverId"),
+        _ => return None,
+    };
+    let mut details = vec![format!("{id_label}: {}", text("id")?)];
+    if let Some(server) = text("serverName") {
+        details.push(format!("on remote Jean: {server}"));
+    }
+    if let Some(url) = text("url") {
+        details.push(format!("url: {url}"));
+    }
+    let name = text("name")?;
+    Some(format!(
+        "[Mentioned {label}: {name} ({})]",
+        details.join(", ")
+    ))
+}
+
 fn queued_file_path(file: &Value) -> Result<String, String> {
     let relative_path = file
         .get("relativePath")
@@ -1620,7 +2027,11 @@ fn queued_message_base_prompt(queued: &Value) -> String {
 
 fn codex_steer_input_from_queued_message(queued: &Value) -> Result<Vec<Value>, String> {
     let mut input = Vec::new();
-    let message = queued_message_base_prompt(queued);
+    let mut message = queued_message_base_prompt(queued);
+    let mention_refs = queued_mention_refs(queued);
+    if !mention_refs.is_empty() {
+        message = append_refs(message, mention_refs);
+    }
     if !message.trim().is_empty() {
         input.push(serde_json::json!({
             "type": "text",
@@ -2087,9 +2498,14 @@ fn is_pending_plan_tool_call(tc: &crate::chat::types::ToolCall) -> bool {
         && !is_unavailable_tool_error(tc.output.as_deref())
 }
 
-/// Close/delete a session tab
-/// Returns the new active session ID (if any)
-/// Also cleans up any pasted images and text files associated with the session
+/// Close a session tab. This is a soft delete.
+///
+/// The session disappears from the UI immediately. Its history stays on disk
+/// with `archived_at` set to now (the field name is historical; it holds the
+/// deletion time) and `cleanup_deleted_items` purges it after
+/// `DELETED_ITEM_RETENTION_DAYS`. A session with no messages is removed from
+/// the index and from disk right away.
+/// Returns the new active session ID (if any).
 pub async fn close_session(
     app: AppHandle,
     worktree_id: String,
@@ -2098,44 +2514,39 @@ pub async fn close_session(
 ) -> Result<Option<String>, String> {
     log::trace!("Closing session: {session_id}");
 
-    let sessions = load_sessions(&app, &worktree_path, &worktree_id)?;
-    if sessions.find_session(&session_id).is_none() {
-        return Err(format!("Session not found: {session_id}"));
-    }
-
     // Cancel only if a process is actively running — avoids spurious chat:cancelled events
     // for idle sessions (e.g. those waiting for plan approval during clear-context flows).
     let _ = cancel_process_if_running(&app, &session_id, &worktree_id);
 
-    // Delete session data (outside lock - separate directory)
-    if let Err(e) = delete_session_data(&app, &session_id) {
-        log::warn!("Failed to delete session data: {e}");
-    }
+    // Load messages from NDJSON to check if session has content (outside lock - read-only)
+    let messages = run_log::load_session_messages(&app, &session_id).unwrap_or_default();
+    let should_delete = messages.is_empty();
 
-    // Clean up context references for this session
-    if let Err(e) =
-        crate::projects::github_issues::cleanup_issue_contexts_for_session(&app, &session_id)
-    {
-        log::warn!("Failed to cleanup issue/PR contexts for session: {e}");
-    }
-    if let Err(e) =
-        crate::projects::saved_contexts::cleanup_saved_contexts_for_session(&app, &session_id)
-    {
-        log::warn!("Failed to cleanup saved contexts for session: {e}");
-    }
-
-    // Clean up combined-context files for this session
-    cleanup_combined_context_files(&app, &session_id);
-
-    // Now atomically modify the sessions file
     let new_active = with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
-        // Find index before removal to support deterministic neighbor selection.
         let session_index = sessions.sessions.iter().position(|s| s.id == session_id);
 
-        // Remove the session
-        sessions.sessions.retain(|s| s.id != session_id);
+        let session = sessions
+            .find_session(&session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+
+        if session.archived_at.is_some() {
+            return Err("Session is already deleted".to_string());
+        }
+
+        if should_delete {
+            log::trace!("Session has 0 messages, removing it outright: {session_id}");
+            if let Some(idx) = session_index {
+                sessions.sessions.remove(idx);
+            }
+        } else {
+            let session = sessions
+                .find_session_mut(&session_id)
+                .ok_or_else(|| format!("Session not found: {session_id}"))?;
+            session.archived_at = Some(now());
+        }
 
         // If we closed the active session, select nearest visible tab: left then right.
+        // A soft-deleted session stays at its index but is skipped by the neighbor search.
         if sessions.active_session_id.as_deref() == Some(&session_id) {
             sessions.active_session_id = match session_index {
                 Some(idx) => find_neighbor_non_archived_session_id(&sessions.sessions, idx),
@@ -2147,17 +2558,17 @@ pub async fn close_session(
             };
         }
 
-        // If non-archived sessions remain but active is unset, pick the first.
+        // If live sessions remain but active is unset, pick the first.
         // The command creates a new empty session after this write when none remain.
-        let first_non_archived = sessions
+        let first_live = sessions
             .sessions
             .iter()
             .find(|s| s.archived_at.is_none())
             .map(|s| s.id.clone());
-        if first_non_archived.is_none() {
+        if first_live.is_none() {
             sessions.active_session_id = None;
         } else if sessions.active_session_id.is_none() {
-            sessions.active_session_id = first_non_archived;
+            sessions.active_session_id = first_live;
         }
 
         log::trace!(
@@ -2167,6 +2578,10 @@ pub async fn close_session(
         Ok(sessions.active_session_id.clone())
     })?;
 
+    if should_delete {
+        purge_session_files(&app, &session_id);
+    }
+
     if new_active.is_none() {
         let session = create_session(
             app.clone(),
@@ -2188,175 +2603,49 @@ pub async fn close_session(
     Ok(new_active)
 }
 
-/// Archive a session tab (hide from UI but keep messages)
-/// Sessions with 0 messages are deleted instead of archived.
-/// Returns the new active session ID (if any)
-pub async fn archive_session(
-    app: AppHandle,
-    worktree_id: String,
-    worktree_path: String,
-    session_id: String,
-) -> Result<Option<String>, String> {
-    log::trace!("Archiving session: {session_id}");
+/// Remove a session from its worktree index and delete its data on disk.
+///
+/// Used by the retention purge and by the agents engine. Safe to repeat: a
+/// session already gone from the index still has its files removed.
+pub(crate) fn purge_session(
+    app: &AppHandle,
+    worktree_id: &str,
+    worktree_path: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    log::trace!("Purging deleted session: {session_id}");
 
-    // Cancel only if a process is actively running — avoids spurious chat:cancelled events
-    // for idle sessions (e.g. those waiting for plan approval during clear-context flows).
-    let _ = cancel_process_if_running(&app, &session_id, &worktree_id);
-
-    // Load messages from NDJSON to check if session has content (outside lock - read-only)
-    let messages = run_log::load_session_messages(&app, &session_id).unwrap_or_default();
-    let should_delete = messages.is_empty();
-
-    let new_active = with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
-        // Find the index before archiving/deleting
-        let session_index = sessions.sessions.iter().position(|s| s.id == session_id);
-
-        // Find the session
-        let session = sessions
-            .find_session(&session_id)
-            .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-        // Check if already archived
-        if session.archived_at.is_some() {
-            return Err("Session is already archived".to_string());
-        }
-
-        if should_delete {
-            log::trace!("Session has 0 messages, deleting instead of archiving: {session_id}");
-            if let Some(idx) = session_index {
-                sessions.sessions.remove(idx);
-            }
-        } else {
-            // Set archived timestamp
-            let session = sessions
-                .find_session_mut(&session_id)
-                .ok_or_else(|| format!("Session not found: {session_id}"))?;
-            session.archived_at = Some(now());
-        }
-
-        // Determine new active session if the archived/deleted one was active
-        let new_active = if sessions.active_session_id.as_deref() == Some(&session_id) {
-            if let Some(idx) = session_index {
-                let mut candidate = None;
-                let search_idx = if should_delete {
-                    idx.saturating_sub(1)
-                } else {
-                    idx
-                };
-                for i in (0..=search_idx).rev() {
-                    if sessions
-                        .sessions
-                        .get(i)
-                        .is_some_and(|s| s.archived_at.is_none())
-                    {
-                        candidate = sessions.sessions.get(i).map(|s| s.id.clone());
-                        break;
-                    }
-                }
-                if candidate.is_none() {
-                    let start_idx = if should_delete { idx } else { idx + 1 };
-                    for i in start_idx..sessions.sessions.len() {
-                        if sessions
-                            .sessions
-                            .get(i)
-                            .is_some_and(|s| s.archived_at.is_none())
-                        {
-                            candidate = sessions.sessions.get(i).map(|s| s.id.clone());
-                            break;
-                        }
-                    }
-                }
-                candidate
-            } else {
-                sessions
-                    .sessions
-                    .iter()
-                    .find(|s| s.archived_at.is_none())
-                    .map(|s| s.id.clone())
-            }
-        } else {
-            sessions.active_session_id.clone()
-        };
-        sessions.active_session_id = new_active;
-
-        // If non-archived sessions remain but active is unset, pick the first.
-        // The command creates a new empty session after this write when none remain.
-        let first_non_archived = sessions
-            .sessions
-            .iter()
-            .find(|s| s.archived_at.is_none())
-            .map(|s| s.id.clone());
-        if first_non_archived.is_none() {
-            sessions.active_session_id = None;
-        } else if sessions.active_session_id.is_none() {
-            sessions.active_session_id = first_non_archived;
-        }
-
-        if should_delete {
-            log::trace!(
-                "Session deleted (0 messages), new active: {:?}",
-                sessions.active_session_id
-            );
-        } else {
-            log::trace!(
-                "Session archived, new active: {:?}",
-                sessions.active_session_id
-            );
-        }
-        Ok(sessions.active_session_id.clone())
+    with_sessions_mut(app, worktree_path, worktree_id, |sessions| {
+        sessions.sessions.retain(|s| s.id != session_id);
+        Ok(())
     })?;
 
-    if new_active.is_none() {
-        let session = create_session(
-            app.clone(),
-            worktree_id,
-            worktree_path,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-        return Ok(Some(session.id));
+    purge_session_files(app, session_id);
+    Ok(())
+}
+
+/// Delete a session's data directory and every context file that references it.
+fn purge_session_files(app: &AppHandle, session_id: &str) {
+    if let Err(e) = delete_session_data(app, session_id) {
+        log::warn!("Failed to delete session data: {e}");
     }
-
-    emit_sessions_cache_invalidation(&app);
-    Ok(new_active)
+    if let Err(e) =
+        crate::projects::github_issues::cleanup_issue_contexts_for_session(app, session_id)
+    {
+        log::warn!("Failed to cleanup issue/PR contexts for session: {e}");
+    }
+    if let Err(e) =
+        crate::projects::saved_contexts::cleanup_saved_contexts_for_session(app, session_id)
+    {
+        log::warn!("Failed to cleanup saved contexts for session: {e}");
+    }
+    cleanup_combined_context_files(app, session_id);
 }
 
-/// Unarchive a session (restore it to the session list)
-pub async fn unarchive_session(
-    app: AppHandle,
-    worktree_id: String,
-    worktree_path: String,
-    session_id: String,
-) -> Result<Session, String> {
-    log::trace!("Unarchiving session: {session_id}");
-
-    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
-        let session = sessions
-            .find_session_mut(&session_id)
-            .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-        if session.archived_at.is_none() {
-            return Err("Session is not archived".to_string());
-        }
-
-        session.archived_at = None;
-        let restored_session = session.clone();
-
-        log::trace!("Session unarchived: {session_id}");
-        Ok(restored_session)
-    })
-}
-
-/// Reject execution against an archived session or its parent worktree.
+/// Reject execution against a deleted session or an inactive worktree.
 ///
-/// Archived workspaces may have incomplete post-cleanup state (missing scripts,
-/// removed paths), so agents/UI must unarchive explicitly before running again.
+/// Deleted sessions wait on disk for the retention purge; worktrees with
+/// `archived_at` set were archived by an older Jean and are no longer active.
 pub fn ensure_session_can_run(
     session_id: &str,
     session_archived_at: Option<u64>,
@@ -2365,25 +2654,25 @@ pub fn ensure_session_can_run(
 ) -> Result<(), String> {
     if session_archived_at.is_some() {
         return Err(format!(
-            "Session is archived and cannot run. Unarchive the session first (sessionId: {session_id})."
+            "Session was deleted and cannot run (sessionId: {session_id})."
         ));
     }
     if worktree_archived_at.is_some() {
         return Err(format!(
-            "Worktree is archived and cannot run sessions. Unarchive the worktree first (worktreeId: {worktree_id})."
+            "Worktree is no longer active and cannot run sessions (worktreeId: {worktree_id})."
         ));
     }
     Ok(())
 }
 
-/// Reject mutations that require an active (non-archived) worktree.
+/// Reject mutations that require an active worktree.
 pub fn ensure_worktree_not_archived(
     worktree_id: &str,
     worktree_archived_at: Option<u64>,
 ) -> Result<(), String> {
     if worktree_archived_at.is_some() {
         return Err(format!(
-            "Worktree is archived. Unarchive it first (worktreeId: {worktree_id})."
+            "Worktree is no longer active (worktreeId: {worktree_id})."
         ));
     }
     Ok(())
@@ -2394,318 +2683,6 @@ pub fn worktree_archived_at(app: &AppHandle, worktree_id: &str) -> Option<u64> {
     load_projects_data(app)
         .ok()
         .and_then(|data| data.find_worktree(worktree_id).and_then(|w| w.archived_at))
-}
-
-/// Response from restoring a session with base session recreation
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RestoreSessionWithBaseResponse {
-    /// The restored session
-    pub session: Session,
-    /// The worktree (either existing or newly created base session)
-    pub worktree: crate::projects::types::Worktree,
-}
-
-/// Restore an archived session, recreating the base session if needed
-///
-/// This command handles the case where:
-/// 1. The session belongs to a base session that was closed (worktree record removed)
-/// 2. We need to recreate the base session and migrate the sessions to it
-pub async fn restore_session_with_base(
-    app: AppHandle,
-    worktree_id: String,
-    worktree_path: String,
-    session_id: String,
-    project_id: String,
-) -> Result<RestoreSessionWithBaseResponse, String> {
-    log::trace!("Restoring session with base session check: {session_id}");
-
-    // Load projects data to check if worktree exists
-    let mut projects_data = load_projects_data(&app)?;
-
-    // Check if the worktree exists
-    if let Some(existing) = projects_data.find_worktree(&worktree_id) {
-        // Worktree exists - just unarchive the session
-        log::trace!("Worktree exists, unarchiving session normally");
-        let existing_worktree = existing.clone();
-
-        let restored_session = with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
-            let session = sessions
-                .find_session_mut(&session_id)
-                .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-            if session.archived_at.is_none() {
-                return Err("Session is not archived".to_string());
-            }
-
-            session.archived_at = None;
-            Ok(session.clone())
-        })?;
-
-        return Ok(RestoreSessionWithBaseResponse {
-            session: restored_session,
-            worktree: existing_worktree,
-        });
-    }
-
-    // Worktree doesn't exist - check if this is a base session path
-    let project = projects_data
-        .find_project(&project_id)
-        .ok_or_else(|| format!("Project not found: {project_id}"))?
-        .clone();
-
-    if worktree_path != project.path {
-        return Err(
-            "Worktree not found and path doesn't match project (not a base session)".to_string(),
-        );
-    }
-
-    log::trace!("Recreating base session for project: {}", project.name);
-
-    // Create new base session
-    let new_worktree = crate::projects::types::Worktree {
-        id: uuid::Uuid::new_v4().to_string(),
-        project_id: project_id.clone(),
-        name: project.default_branch.clone(),
-        path: project.path.clone(),
-        branch: project.default_branch.clone(),
-        base_branch: None,
-        base_remote: None,
-        created_at: now(),
-        setup_output: None,
-        setup_script: None,
-        setup_success: None,
-        session_type: SessionType::Base,
-        pr_number: None,
-        pr_url: None,
-        issue_number: None,
-        linear_issue_identifier: None,
-        security_alert_number: None,
-        security_alert_url: None,
-        advisory_ghsa_id: None,
-        advisory_url: None,
-        cached_pr_status: None,
-        cached_check_status: None,
-        cached_behind_count: None,
-        cached_ahead_count: None,
-        cached_status_at: None,
-        cached_uncommitted_added: None,
-        cached_uncommitted_removed: None,
-        cached_branch_diff_added: None,
-        cached_branch_diff_removed: None,
-        cached_base_branch_ahead_count: None,
-        cached_base_branch_behind_count: None,
-        cached_worktree_ahead_count: None,
-        cached_unpushed_count: None,
-        pr_push_remote: None,
-        pr_push_branch: None,
-        order: 0,
-        origin: None,
-        labels: Vec::new(),
-        label: None,
-        archived_at: None,
-        last_opened_at: None,
-    };
-
-    projects_data.add_worktree(new_worktree.clone());
-    crate::projects::storage::save_projects_data(&app, &projects_data)?;
-
-    // Restore preserved base sessions file (base-{project_id}.json -> {new_worktree_id}.json)
-    // This is needed because close_base_session_archive renamed the index file
-    let _restored_index =
-        crate::chat::storage::restore_base_sessions(&app, &project_id, &new_worktree.id)?;
-
-    // Atomically unarchive the target session within the restored sessions
-    let restored_session = with_sessions_mut(&app, &worktree_path, &new_worktree.id, |sessions| {
-        let session = sessions
-            .find_session_mut(&session_id)
-            .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-        if session.archived_at.is_none() {
-            return Err("Session is not archived".to_string());
-        }
-
-        session.archived_at = None;
-        Ok(session.clone())
-    })?;
-
-    log::trace!("Base session recreated and sessions migrated");
-
-    Ok(RestoreSessionWithBaseResponse {
-        session: restored_session,
-        worktree: new_worktree,
-    })
-}
-
-/// Permanently delete an archived session
-pub async fn delete_archived_session(
-    app: AppHandle,
-    worktree_id: String,
-    worktree_path: String,
-    session_id: String,
-) -> Result<(), String> {
-    log::trace!("Permanently deleting archived session: {session_id}");
-
-    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
-        let session_idx = sessions
-            .sessions
-            .iter()
-            .position(|s| s.id == session_id)
-            .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-        if sessions.sessions[session_idx].archived_at.is_none() {
-            return Err("Cannot delete non-archived session. Archive it first.".to_string());
-        }
-
-        sessions.sessions.remove(session_idx);
-        Ok(())
-    })?;
-
-    // Delete session data directory (outside lock - separate directory)
-    if let Err(e) = delete_session_data(&app, &session_id) {
-        log::warn!("Failed to delete session data: {e}");
-    }
-
-    // Clean up context references
-    if let Err(e) =
-        crate::projects::github_issues::cleanup_issue_contexts_for_session(&app, &session_id)
-    {
-        log::warn!("Failed to cleanup issue/PR contexts for session: {e}");
-    }
-    if let Err(e) =
-        crate::projects::saved_contexts::cleanup_saved_contexts_for_session(&app, &session_id)
-    {
-        log::warn!("Failed to cleanup saved contexts for session: {e}");
-    }
-
-    // Clean up combined-context files for this session
-    cleanup_combined_context_files(&app, &session_id);
-
-    log::trace!("Archived session permanently deleted: {session_id}");
-    Ok(())
-}
-
-/// List archived sessions for a worktree
-pub async fn list_archived_sessions(
-    app: AppHandle,
-    worktree_id: String,
-    worktree_path: String,
-) -> Result<Vec<Session>, String> {
-    log::trace!("Listing archived sessions for worktree: {worktree_id}");
-
-    let sessions = load_sessions(&app, &worktree_path, &worktree_id)?;
-
-    let archived: Vec<Session> = sessions
-        .sessions
-        .into_iter()
-        .filter(|s| s.archived_at.is_some())
-        .collect();
-
-    log::trace!("Found {} archived sessions", archived.len());
-    Ok(archived)
-}
-
-/// An archived session with its worktree context
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ArchivedSessionEntry {
-    pub session: Session,
-    pub worktree_id: String,
-    pub worktree_name: String,
-    pub worktree_path: String,
-    pub project_id: String,
-    pub project_name: String,
-}
-
-/// List all archived sessions across all worktrees (including archived worktrees)
-pub async fn list_all_archived_sessions(
-    app: AppHandle,
-) -> Result<Vec<ArchivedSessionEntry>, String> {
-    log::trace!("Listing all archived sessions across all worktrees");
-
-    let projects_data = load_projects_data(&app)?;
-    let mut entries = Vec::new();
-
-    for project in &projects_data.projects {
-        // Get ALL worktrees (including archived) to find their archived sessions
-        let worktrees: Vec<_> = projects_data
-            .worktrees_for_project(&project.id)
-            .into_iter()
-            .collect();
-
-        for worktree in worktrees {
-            match load_sessions(&app, &worktree.path, &worktree.id) {
-                Ok(sessions_data) => {
-                    // Filter to archived sessions only
-                    for session in sessions_data.sessions {
-                        if session.archived_at.is_some() {
-                            entries.push(ArchivedSessionEntry {
-                                session,
-                                worktree_id: worktree.id.clone(),
-                                worktree_name: worktree.name.clone(),
-                                worktree_path: worktree.path.clone(),
-                                project_id: project.id.clone(),
-                                project_name: project.name.clone(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to load sessions for worktree {}: {}",
-                        worktree.id,
-                        e
-                    );
-                }
-            }
-        }
-
-        // Also check preserved base session files (base-{project_id}.json)
-        // These are created when a base session is closed with archiving
-        if let Ok(base_path) = get_base_index_path(&app, &project.id) {
-            if base_path.exists() {
-                if let Ok(contents) = std::fs::read_to_string(&base_path) {
-                    if let Ok(index) = serde_json::from_str::<WorktreeIndex>(&contents) {
-                        for entry in &index.sessions {
-                            if entry.archived_at.is_some() {
-                                // Load full session metadata
-                                let session =
-                                    if let Ok(Some(metadata)) = load_metadata(&app, &entry.id) {
-                                        let mut s = metadata.to_session();
-                                        // Ensure archived_at from index is preserved
-                                        if s.archived_at.is_none() {
-                                            s.archived_at = entry.archived_at;
-                                        }
-                                        s
-                                    } else {
-                                        // No metadata — build a minimal Session from index entry
-                                        let mut s = Session::new(
-                                            entry.name.clone(),
-                                            entry.order,
-                                            Backend::default(),
-                                        );
-                                        s.id = entry.id.clone();
-                                        s.message_count = Some(entry.message_count);
-                                        s.archived_at = entry.archived_at;
-                                        s
-                                    };
-
-                                entries.push(ArchivedSessionEntry {
-                                    session,
-                                    worktree_id: index.worktree_id.clone(),
-                                    worktree_name: format!("{} (base)", project.name),
-                                    worktree_path: project.path.clone(),
-                                    project_id: project.id.clone(),
-                                    project_name: project.name.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    log::trace!("Found {} archived sessions total", entries.len());
-    Ok(entries)
 }
 
 /// Reorder session tabs
@@ -2922,6 +2899,27 @@ pub async fn trigger_terminal_session_naming(
 // Chat Commands (now session-based)
 // ============================================================================
 
+/// Keeps the live OpenCode session id of a run that failed: the server may
+/// still finish the turn, and the next send must resume that context.
+fn persist_opencode_session_id_after_error(
+    app: &tauri::AppHandle,
+    worktree_path: &str,
+    worktree_id: &str,
+    session_id: &str,
+) {
+    let Some(sid) = super::registry::get_opencode_session_id(session_id) else {
+        return;
+    };
+    if let Err(save_err) = with_sessions_mut(app, worktree_path, worktree_id, |sessions| {
+        if let Some(session) = sessions.find_session_mut(session_id) {
+            persist_salvaged_resume_id(session, &Backend::Opencode, &sid);
+        }
+        Ok(())
+    }) {
+        log::warn!("Failed to persist OpenCode session id after error: {save_err}");
+    }
+}
+
 // Persist a salvaged resume/session ID onto the correct backend field.
 // Used by the thread-error/thread-panic recovery paths so the next send can
 // resume the conversation instead of starting fresh.
@@ -2972,16 +2970,75 @@ pub async fn send_chat_message(
     custom_profile_name: Option<String>,
     backend: Option<String>,
 ) -> Result<ChatMessage, String> {
+    let drain_target = (
+        app.clone(),
+        worktree_id.clone(),
+        worktree_path.clone(),
+        session_id.clone(),
+    );
+    let result = send_chat_message_inner(
+        app,
+        session_id,
+        worktree_id,
+        worktree_path,
+        message,
+        model,
+        execution_mode,
+        thinking_level,
+        effort_level,
+        parallel_execution_prompt,
+        ai_language,
+        allowed_tools,
+        mcp_config,
+        chrome_enabled,
+        custom_profile_name,
+        backend,
+    )
+    .await
+    .map_err(|e| e.message);
+    // Start the queue drain only after the inner call returned and released
+    // its send claim. A drain started while the claim is held sees the
+    // session as busy and stops, so queued prompts waited until the session
+    // was opened again.
+    let (app, worktree_id, worktree_path, session_id) = drain_target;
+    // Report before the drain: a queued prompt would otherwise start the next
+    // run first and the report would see the session as live.
+    super::delegation::report_run_end(&app, &session_id, result.as_ref().err().map(String::as_str));
+    trigger_backend_queue_drain(app, worktree_id, worktree_path, session_id);
+    result
+}
+
+/// Every exit before `run_log::start_run` returns `NotAccepted`; every exit
+/// after it emits `chat:user-turn` from the run's final state.
+#[allow(clippy::too_many_arguments)]
+async fn send_chat_message_inner(
+    app: tauri::AppHandle,
+    session_id: String,
+    worktree_id: String,
+    worktree_path: String,
+    message: String,
+    model: Option<String>,
+    execution_mode: Option<String>,
+    thinking_level: Option<ThinkingLevel>,
+    effort_level: Option<EffortLevel>,
+    parallel_execution_prompt: Option<String>,
+    ai_language: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    mcp_config: Option<String>,
+    chrome_enabled: Option<bool>,
+    custom_profile_name: Option<String>,
+    backend: Option<String>,
+) -> Result<ChatMessage, SendError> {
     log::info!("[SendChat] ENTRY session={session_id} worktree={worktree_id} model={model:?} execution_mode={execution_mode:?}");
     log::trace!("Sending chat message for session: {session_id}, worktree: {worktree_id}, model: {model:?}, execution_mode: {execution_mode:?}, thinking: {thinking_level:?}, effort: {effort_level:?}, allowed_tools: {allowed_tools:?}");
 
     // Validate inputs
     if message.trim().is_empty() {
-        return Err("Message cannot be empty".to_string());
+        return Err("Message cannot be empty".to_string().into());
     }
 
     if worktree_path.is_empty() {
-        return Err("Worktree path cannot be empty".to_string());
+        return Err("Worktree path cannot be empty".to_string().into());
     }
 
     clear_stale_pending_cancel_before_send(&session_id);
@@ -2993,7 +3050,7 @@ pub async fn send_chat_message(
         log::warn!(
             "[SendChat] REJECTED session={session_id} — already actively managed (duplicate send)"
         );
-        return Err("Session already has an active request".to_string());
+        return Err(SendError::busy());
     }
 
     // Drops after the claim below, so agent lists see the run end.
@@ -3006,7 +3063,7 @@ pub async fn send_chat_message(
         log::warn!(
             "[SendChat] REJECTED session={session_id} — concurrent send in flight (duplicate send)"
         );
-        return Err("Session already has an active request".to_string());
+        return Err(SendError::busy());
     };
 
     // Load sessions
@@ -3021,7 +3078,7 @@ pub async fn send_chat_message(
         sessions.sessions.iter().map(|s| &s.id).collect::<Vec<_>>()
     );
 
-    // Guard: never execute against archived sessions/worktrees (MCP, UI, queue).
+    // Guard: never execute against deleted sessions or inactive worktrees (MCP, UI, queue).
     // Check before any side effects (naming tasks, chat:sending events).
     if let Some(session) = sessions.find_session(&session_id) {
         if let Err(e) = ensure_session_can_run(
@@ -3039,7 +3096,7 @@ pub async fn send_chat_message(
             if let Err(emit_err) = app.emit_all("chat:error", &error_event) {
                 log::error!("Failed to emit chat:error event: {emit_err}");
             }
-            return Err(e);
+            return Err(e.into());
         }
     }
 
@@ -3174,7 +3231,7 @@ pub async fn send_chat_message(
                 log::error!("Failed to emit chat:error event: {e}");
             }
 
-            return Err(error_msg);
+            return Err(error_msg.into());
         }
     };
 
@@ -3209,14 +3266,6 @@ pub async fn send_chat_message(
             prefs.as_ref().map(|p| p.default_execution_mode.clone()),
         ),
     );
-    let thinking_level = thinking_level.or(session_selected_thinking_level);
-    let effort_level = effort_level.or(session_selected_effort_level);
-    // selected_provider may be a sentinel (__anthropic__/__default__) rather than
-    // a real custom profile name — only use it when it looks like a profile id.
-    let custom_profile_name = normalize_optional_string(custom_profile_name).or_else(|| {
-        normalize_optional_string(session_selected_provider)
-            .filter(|provider| provider != "__anthropic__" && provider != "__default__")
-    });
 
     // Determine backend from session (or explicit param, or default to claude)
     let effective_backend = match backend.as_deref() {
@@ -3240,16 +3289,43 @@ pub async fn send_chat_message(
         effective_backend
     };
 
+    let (thinking_level, effort_level) = resolve_send_reasoning(
+        &effective_backend,
+        thinking_level,
+        effort_level,
+        session_selected_thinking_level,
+        session_selected_effort_level,
+    );
+
     if let Some(mode) = execution_mode.as_deref() {
         validate_execution_policy(mode, &effective_backend)?;
     }
+
+    let custom_profile_name =
+        resolve_send_provider(custom_profile_name, session_selected_provider, || {
+            default_provider_for_backend(&app, &worktree_id, &effective_backend, prefs.as_ref())
+        });
 
     // Final model fallback: preferences default for the resolved backend.
     // Covers sessions created before selected_model was persisted, or when
     // create_session could not load preferences.
     if model.is_none() {
-        if let Some(prefs) = prefs.as_ref() {
-            model = default_model_for_backend(&effective_backend, prefs);
+        model = if effective_backend == Backend::Codex && custom_profile_name.is_some() {
+            prefs
+                .as_ref()
+                .and_then(|prefs| default_model_for_backend(&effective_backend, prefs))
+        } else {
+            resolve_default_model_for_backend(&app, &effective_backend, prefs.as_ref()).await
+        };
+        if effective_backend == Backend::Codex {
+            if let Some(resolved) = model.as_ref() {
+                with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+                    if let Some(session) = sessions.find_session_mut(&session_id) {
+                        session.selected_model = Some(resolved.clone());
+                    }
+                    Ok(())
+                })?;
+            }
         }
     }
     if effective_backend == Backend::Devin
@@ -3270,6 +3346,7 @@ pub async fn send_chat_message(
             "session_id": session_id,
             "worktree_id": worktree_id,
             "user_message": message,
+            "user_message_id": user_message_id,
             "execution_mode": execution_mode,
         }),
     ) {
@@ -3563,10 +3640,28 @@ pub async fn send_chat_message(
         log::error!("Failed to emit cache:invalidate for recent sessions: {e}");
     }
 
+    // Drop an auth failure left over from an earlier turn of this session.
+    super::auth_failure::take_auth_failure(&session_id);
+
     // Get file paths for detached execution
-    let input_file = run_log_writer.input_file_path()?;
-    let output_file = run_log_writer.output_file_path()?;
     let run_id = run_log_writer.run_id().to_string();
+    let run_files = run_log_writer.input_file_path().and_then(|input| {
+        run_log_writer
+            .output_file_path()
+            .map(|output| (input, output))
+    });
+    let (input_file, output_file) = match run_files {
+        Ok(files) => files,
+        Err(e) => {
+            return Err(withdraw_unstarted_run(
+                &app,
+                &mut run_log_writer,
+                &session_id,
+                &worktree_id,
+                e,
+            ))
+        }
+    };
 
     // Snapshot the worktree before the agent can modify files so the user can
     // review AI changes and restore individual files or the whole tree later.
@@ -3629,7 +3724,15 @@ pub async fn send_chat_message(
 
     // Write input file with the effective backend prompt. Hidden handoff context
     // is intentionally not stored as the visible user message in metadata.
-    run_log::write_input_file(&app, &session_id, &run_id, &message_for_backend)?;
+    if let Err(e) = run_log::write_input_file(&app, &session_id, &run_id, &message_for_backend) {
+        return Err(withdraw_unstarted_run(
+            &app,
+            &mut run_log_writer,
+            &session_id,
+            &worktree_id,
+            e,
+        ));
+    }
 
     // Use passed parameter for parallel execution prompt (None = disabled).
     // The agent prompt stays separate so turning fan-out off still injects the
@@ -3784,14 +3887,13 @@ pub async fn send_chat_message(
         if !super::registry::register_cancel_flag(session_id.clone(), flag.clone()) {
             // Already cancelled before we even started — bail out cleanly
             log::info!("[SendChat] EXIT session={session_id} reason=pre_cancelled_opencode");
-            if let Err(e) = run_log_writer.cancel(None, None) {
-                log::warn!("Failed to cancel run log for pre-cancelled OpenCode session: {e}");
-            }
-            // Remove the input file so the hidden handoff/history payload isn't retained on disk.
-            if let Err(e) = run_log::delete_input_file(&app, &session_id, &run_id) {
-                log::warn!("Failed to delete input file for pre-cancelled OpenCode session: {e}");
-            }
-            return Err("Request cancelled".to_string());
+            return Err(withdraw_unstarted_run(
+                &app,
+                &mut run_log_writer,
+                &session_id,
+                &worktree_id,
+                "Request cancelled".to_string(),
+            ));
         }
         Some(flag)
     } else {
@@ -4145,24 +4247,7 @@ pub async fn send_chat_message(
                         &mut system_prompt_parts,
                         &thread_app,
                     );
-                    if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
-                        if claude_binary.exists() {
-                            system_prompt_parts.push(format!(
-                                "When running Claude CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `claude` — always use the full path above.",
-                                claude_binary.display()
-                            ));
-                        }
-                    }
-                    if let Ok(codex_binary) = crate::codex_cli::get_cli_binary_path(&thread_app) {
-                        if codex_binary.exists() {
-                            system_prompt_parts.push(format!(
-                                "When running Codex CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `codex` — always use the full path above.",
-                                codex_binary.display()
-                            ));
-                        }
-                    }
+                    super::push_embedded_cli_paths(&mut system_prompt_parts, &thread_app);
 
                     // Keep the current Codex execution mode as the final authoritative
                     // instruction so persisted/global plan-mode defaults cannot pull an
@@ -4534,24 +4619,7 @@ pub async fn send_chat_message(
                         &mut system_prompt_parts,
                         &thread_app,
                     );
-                    if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
-                        if claude_binary.exists() {
-                            system_prompt_parts.push(format!(
-                                "When running Claude CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `claude` — always use the full path above.",
-                                claude_binary.display()
-                            ));
-                        }
-                    }
-                    if let Ok(codex_binary) = crate::codex_cli::get_cli_binary_path(&thread_app) {
-                        if codex_binary.exists() {
-                            system_prompt_parts.push(format!(
-                                "When running Codex CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `codex` — always use the full path above.",
-                                codex_binary.display()
-                            ));
-                        }
-                    }
+                    super::push_embedded_cli_paths(&mut system_prompt_parts, &thread_app);
 
                     // Collect and inline context files (issues, PRs, saved contexts)
                     let mut context_content = String::new();
@@ -4859,24 +4927,7 @@ pub async fn send_chat_message(
                     }
 
                     crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, &thread_app);
-                    if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
-                        if claude_binary.exists() {
-                            parts.push(format!(
-                                "When running Claude CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `claude` — always use the full path above.",
-                                claude_binary.display()
-                            ));
-                        }
-                    }
-                    if let Ok(codex_binary) = crate::codex_cli::get_cli_binary_path(&thread_app) {
-                        if codex_binary.exists() {
-                            parts.push(format!(
-                                "When running Codex CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `codex` — always use the full path above.",
-                                codex_binary.display()
-                            ));
-                        }
-                    }
+                    super::push_embedded_cli_paths(&mut parts, &thread_app);
 
                     if parts.is_empty() {
                         None
@@ -4926,6 +4977,12 @@ pub async fn send_chat_message(
                         &thread_session_id,
                         &thread_worktree_id,
                     );
+                let max_turns = crate::load_preferences_sync(&thread_app)
+                    .ok()
+                    .map(|prefs| prefs.commandcode_max_turns)
+                    .unwrap_or(super::commandcode::DEFAULT_MAX_TURNS)
+                    // Same bounds as the Settings input; prefs can also be patched via web access.
+                    .clamp(1, 200);
                 match super::commandcode::execute_commandcode_headless(
                     &thread_app,
                     &thread_session_id,
@@ -4937,6 +4994,7 @@ pub async fn send_chat_message(
                     &thread_message,
                     Some(&system_context),
                     thread_commandcode_resume_id.as_deref(),
+                    max_turns,
                     Some(make_pid_callback()),
                 ) {
                     Ok((_pid, response)) => Ok((
@@ -5023,24 +5081,7 @@ pub async fn send_chat_message(
                     }
 
                     crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, &thread_app);
-                    if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
-                        if claude_binary.exists() {
-                            parts.push(format!(
-                                "When running Claude CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `claude` — always use the full path above.",
-                                claude_binary.display()
-                            ));
-                        }
-                    }
-                    if let Ok(codex_binary) = crate::codex_cli::get_cli_binary_path(&thread_app) {
-                        if codex_binary.exists() {
-                            parts.push(format!(
-                                "When running Codex CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `codex` — always use the full path above.",
-                                codex_binary.display()
-                            ));
-                        }
-                    }
+                    super::push_embedded_cli_paths(&mut parts, &thread_app);
 
                     if parts.is_empty() {
                         None
@@ -5143,24 +5184,7 @@ pub async fn send_chat_message(
                     }
 
                     crate::gh_cli::config::append_gh_cli_system_prompt(&mut parts, &thread_app);
-                    if let Ok(claude_binary) = crate::claude_cli::get_cli_binary_path(&thread_app) {
-                        if claude_binary.exists() {
-                            parts.push(format!(
-                                "When running Claude CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `claude` — always use the full path above.",
-                                claude_binary.display()
-                            ));
-                        }
-                    }
-                    if let Ok(codex_binary) = crate::codex_cli::get_cli_binary_path(&thread_app) {
-                        if codex_binary.exists() {
-                            parts.push(format!(
-                                "When running Codex CLI commands, use the full path to the embedded binary: {}\n\
-                                 Do NOT use bare `codex` — always use the full path above.",
-                                codex_binary.display()
-                            ));
-                        }
-                    }
+                    super::push_embedded_cli_paths(&mut parts, &thread_app);
 
                     let loaded_context = super::context_instructions::build_loaded_context_content(
                         &thread_app,
@@ -5427,6 +5451,15 @@ pub async fn send_chat_message(
             // this send. Prefer ownership-aware cleanup so a follow-up send that
             // started after cancel is not clobbered (#329).
             log::info!("[SendChat] EXIT session={session_id} reason=thread_error error={e}");
+            // Before the cleanup below, which drops the registry entry it reads.
+            if opencode_cancel_flag.is_some() {
+                persist_opencode_session_id_after_error(
+                    &app,
+                    &worktree_path,
+                    &worktree_id,
+                    &session_id,
+                );
+            }
             super::registry::cleanup_owned_session_registrations(
                 &session_id,
                 None,
@@ -5493,16 +5526,24 @@ pub async fn send_chat_message(
             if let Err(del_err) = run_log::delete_input_file(&app, &session_id, &run_id) {
                 log::warn!("Failed to delete input file after thread error: {del_err}");
             }
-            trigger_backend_queue_drain(
-                app.clone(),
-                worktree_id.clone(),
-                worktree_path.clone(),
-                session_id.clone(),
-            );
-            return Err(e);
+            let user_turn = emit_user_turn_outcome(&app, &session_id, &worktree_id, &run_id);
+            return Err(SendError {
+                message: e,
+                user_turn,
+                busy: false,
+            });
         }
         Err(_) => {
             log::info!("[SendChat] EXIT session={session_id} reason=thread_panic");
+            // Before the cleanup below, which drops the registry entry it reads.
+            if opencode_cancel_flag.is_some() {
+                persist_opencode_session_id_after_error(
+                    &app,
+                    &worktree_path,
+                    &worktree_id,
+                    &session_id,
+                );
+            }
             super::registry::cleanup_owned_session_registrations(
                 &session_id,
                 None,
@@ -5539,15 +5580,13 @@ pub async fn send_chat_message(
             if let Err(del_err) = run_log::delete_input_file(&app, &session_id, &run_id) {
                 log::warn!("Failed to delete input file after thread panic: {del_err}");
             }
-            trigger_backend_queue_drain(
-                app.clone(),
-                worktree_id.clone(),
-                worktree_path.clone(),
-                session_id.clone(),
-            );
-            return Err(
-                "CLI execution thread closed unexpectedly (possible crash or panic)".to_string(),
-            );
+            let user_turn = emit_user_turn_outcome(&app, &session_id, &worktree_id, &run_id);
+            return Err(SendError {
+                message: "CLI execution thread closed unexpectedly (possible crash or panic)"
+                    .to_string(),
+                user_turn,
+                busy: false,
+            });
         }
     };
 
@@ -5571,13 +5610,13 @@ pub async fn send_chat_message(
     // reconstruct content after the live stream completes.
     // Skip when cancelled: cancelled turns stay in run metadata/logs for diagnostics
     // but are intentionally excluded from visible chat history on reload.
-    // Unix Grok/Kimi hosts already write ACP stream JSONL + a result marker — synthetic
-    // assistant lines would double content when parse_grok_run_to_message reloads.
+    // Unix Grok/Kimi/Muse/PI hosts already write their stream JSONL + a result marker —
+    // synthetic assistant lines would double content when the run log is parsed again.
     let skip_synthetic_history = unified_response.backend == Backend::Devin
         || (cfg!(unix)
             && matches!(
                 unified_response.backend,
-                Backend::Grok | Backend::Kimi | Backend::Muse
+                Backend::Grok | Backend::Kimi | Backend::Muse | Backend::Pi
             ));
     if matches!(
         unified_response.backend,
@@ -5592,92 +5631,20 @@ pub async fn send_chat_message(
     ) && !unified_response.cancelled
         && !skip_synthetic_history
     {
-        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(&output_file) {
-            if !unified_response.content_blocks.is_empty() {
-                // Filter out echoed user prompt: OpenCode includes the user
-                // message as the first text block in its response.
-                // Compare against the *effective* prompt (message_for_backend),
-                // not the raw message — when a hidden provider-switch handoff is
-                // prepended, the backend echoes the submitted prompt including the
-                // handoff. Matching the raw message would let that injected history
-                // leak into the visible assistant transcript/NDJSON.
-                let trimmed_prompt = message_for_backend.trim();
-                let blocks_to_write: Vec<&super::types::ContentBlock> = {
-                    let mut iter = unified_response.content_blocks.iter().peekable();
-                    let first = iter.peek();
-                    let skip_first = matches!(first,
-                        Some(super::types::ContentBlock::Text { text }) if text.trim() == trimmed_prompt
-                    );
-                    if skip_first {
-                        iter.next();
-                    }
-                    iter.collect()
-                };
-                let blocks: Vec<serde_json::Value> = blocks_to_write
-                    .iter()
-                    .map(|cb| match cb {
-                        super::types::ContentBlock::Text { text } => {
-                            serde_json::json!({"type": "text", "text": text})
-                        }
-                        super::types::ContentBlock::ToolUse { tool_call_id } => {
-                            if let Some(tc) = unified_response
-                                .tool_calls
-                                .iter()
-                                .find(|t| t.id == *tool_call_id)
-                            {
-                                serde_json::json!({
-                                    "type": "tool_use",
-                                    "id": tc.id,
-                                    "name": tc.name,
-                                    "input": tc.input
-                                })
-                            } else {
-                                serde_json::json!({
-                                    "type": "tool_use",
-                                    "id": tool_call_id,
-                                    "name": "",
-                                    "input": null
-                                })
-                            }
-                        }
-                        super::types::ContentBlock::Thinking { thinking } => {
-                            serde_json::json!({"type": "thinking", "thinking": thinking})
-                        }
-                        super::types::ContentBlock::UserInput { text } => {
-                            serde_json::json!({"type": "user_input", "text": text})
-                        }
-                    })
-                    .collect();
-                let synthetic =
-                    serde_json::json!({"type": "assistant", "message": {"content": blocks}});
-                let _ = writeln!(file, "{synthetic}");
-
-                for tc in &unified_response.tool_calls {
-                    if let Some(output) = &tc.output {
-                        let tool_result = serde_json::json!({
-                            "type": "user",
-                            "message": {
-                                "content": [{
-                                    "type": "tool_result",
-                                    "tool_use_id": tc.id,
-                                    "content": output
-                                }]
-                            }
-                        });
-                        let _ = writeln!(file, "{tool_result}");
-                    }
-                }
-            } else {
-                let synthetic = serde_json::json!({
-                    "type": "assistant",
-                    "message": {
-                        "content": [{"type": "text", "text": unified_response.content}]
-                    }
-                });
-                let _ = writeln!(file, "{synthetic}");
-            }
-            let _ = file.flush();
-        }
+        // Filter out echoed user prompt: OpenCode includes the user message
+        // as the first text block in its response. Compare against the
+        // *effective* prompt (message_for_backend), not the raw message —
+        // when a hidden provider-switch handoff is prepended, the backend
+        // echoes the submitted prompt including the handoff. Matching the raw
+        // message would let that injected history leak into the visible
+        // assistant transcript/NDJSON.
+        append_synthetic_reply(
+            &output_file,
+            &unified_response.content,
+            &unified_response.content_blocks,
+            &unified_response.tool_calls,
+            message_for_backend.trim(),
+        );
     }
 
     // Clean up input file (no longer needed)
@@ -5717,16 +5684,18 @@ pub async fn send_chat_message(
         unified_response.cancelled = true;
     }
     if unified_response.error_emitted && !has_assistant_payload && !unified_response.cancelled {
-        if let Err(e) = run_log_writer.reject_without_output() {
+        // Not logged in: the user must log in and resend, so withdraw the
+        // prompt (back to the composer) instead of keeping a failed attempt.
+        let finish = if super::auth_failure::take_auth_failure(&session_id) {
+            run_log_writer.cancel(None, None)
+        } else {
+            run_log_writer.reject_without_output()
+        };
+        if let Err(e) = finish {
             log::warn!("Failed to record provider rejection: {e}");
         }
         log::info!("[SendChat] EXIT session={session_id} reason=error_emitted");
-        trigger_backend_queue_drain(
-            app.clone(),
-            worktree_id.clone(),
-            worktree_path.clone(),
-            session_id.clone(),
-        );
+        emit_user_turn_outcome(&app, &session_id, &worktree_id, &run_id);
         return Ok(ChatMessage {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.clone(),
@@ -5766,7 +5735,7 @@ pub async fn send_chat_message(
         }
 
         // Atomically update session: persist resume ID and remove user message for undo send
-        with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+        if let Err(e) = with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
             if let Some(session) = sessions.find_session_mut(&session_id) {
                 // Persist resume ID so next run can resume context even after cancellation
                 if !resume_id_for_log.is_empty()
@@ -5814,15 +5783,14 @@ pub async fn send_chat_message(
                 }
             }
             Ok(())
-        })?;
+        }) {
+            log::error!(
+                "[SendChat] Failed to save session state after cancel session={session_id} (non-fatal): {e}"
+            );
+        }
 
         log::info!("[SendChat] EXIT session={session_id} reason=cancelled_no_content");
-        trigger_backend_queue_drain(
-            app.clone(),
-            worktree_id.clone(),
-            worktree_path.clone(),
-            session_id.clone(),
-        );
+        emit_user_turn_outcome(&app, &session_id, &worktree_id, &run_id);
         // Return a minimal cancelled message (not persisted, just for UI)
         return Ok(ChatMessage {
             id: Uuid::new_v4().to_string(),
@@ -6036,27 +6004,28 @@ pub async fn send_chat_message(
         Backend::Claude | Backend::Codex | Backend::Devin
     ) && !was_cancelled
     {
+        let status_version = load_metadata(&app, &session_id)
+            .ok()
+            .flatten()
+            .map(|metadata| metadata.status_version);
         let _ = app.emit_all(
             "chat:done",
             &serde_json::json!({
                 "session_id": session_id,
                 "worktree_id": worktree_id,
                 "waiting_for_plan": is_plan_mode_with_content,
+                "run_id": run_id,
+                "status_version": status_version,
             }),
         );
     }
 
     if was_cancelled {
         log::info!("[SendChat] EXIT session={session_id} reason=cancelled_with_content");
+        emit_user_turn_outcome(&app, &session_id, &worktree_id, &run_id);
     } else {
         log::info!("[SendChat] EXIT session={session_id} reason=success");
     }
-    trigger_backend_queue_drain(
-        app.clone(),
-        worktree_id.clone(),
-        worktree_path.clone(),
-        session_id.clone(),
-    );
     Ok(assistant_msg)
 }
 
@@ -6590,9 +6559,7 @@ pub async fn cancel_chat_message(
         // No live process, but metadata may still say Running/Resumable after a
         // Jean crash. Finish those runs so the session stops showing as busy.
         match super::run_log::finish_orphaned_runs(&app, &session_id) {
-            Ok(true) => {
-                super::registry::emit_cancelled_event(&app, &session_id, &worktree_id, false)
-            }
+            Ok(true) => super::registry::emit_cancelled_event(&app, &session_id, &worktree_id),
             Ok(false) => {}
             Err(e) => log::warn!("Failed to finish orphaned runs for {session_id}: {e}"),
         }
@@ -8682,6 +8649,9 @@ pub async fn get_session_debug_info(
             acc.output_tokens += u.output_tokens;
             acc.cache_read_input_tokens += u.cache_read_input_tokens;
             acc.cache_creation_input_tokens += u.cache_creation_input_tokens;
+            if let Some(cost) = u.cost_usd {
+                acc.cost_usd = Some(acc.cost_usd.unwrap_or(0.0) + cost);
+            }
             acc
         },
     );
@@ -8719,11 +8689,248 @@ pub struct ResumeSessionResponse {
     pub run_count: usize,
 }
 
+/// Resume every run the startup repair found still alive. Runs on the shared
+/// runtime so startup is not blocked; a client's own `resume_session` call for
+/// the same session no-ops once the tail is registered.
+pub fn resume_recovered_runs(app: AppHandle, recovered: Vec<super::run_log::RecoveredRun>) {
+    let resumable = resumable_sessions(recovered);
+    if resumable.is_empty() {
+        return;
+    }
+    log::info!(
+        "Resuming {} session(s) with live detached runs after restart",
+        resumable.len()
+    );
+    tauri::async_runtime::spawn(async move {
+        for run in resumable {
+            match resume_session(app.clone(), run.session_id.clone(), run.worktree_id.clone()).await
+            {
+                Ok(response) if response.resumed => {
+                    log::info!(
+                        "Resumed session {} ({} run(s)) after restart",
+                        run.session_id,
+                        response.run_count
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!(
+                        "Failed to resume session {} after restart: {error}",
+                        run.session_id
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// One entry per session with a run worth resuming; `resume_session` handles
+/// every run of that session itself.
+fn resumable_sessions(
+    recovered: Vec<super::run_log::RecoveredRun>,
+) -> Vec<super::run_log::RecoveredRun> {
+    let mut seen = std::collections::HashSet::new();
+    recovered
+        .into_iter()
+        .filter(|run| run.resumable && seen.insert(run.session_id.clone()))
+        .collect()
+}
+
+/// Sessions whose resume is between "metadata loaded" and "tail registered".
+/// The registry only knows a session once its tail registers, so two callers
+/// (startup resume and a client's `check_resumable_sessions`) need this to not
+/// both start a tail.
+static RESUMING_SESSIONS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+struct ResumeGuard(String);
+
+impl ResumeGuard {
+    fn acquire(session_id: &str) -> Option<Self> {
+        RESUMING_SESSIONS
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string())
+            .then(|| Self(session_id.to_string()))
+    }
+}
+
+impl Drop for ResumeGuard {
+    fn drop(&mut self) {
+        RESUMING_SESSIONS.lock().unwrap().remove(&self.0);
+    }
+}
+
+/// Re-attach to an OpenCode 2.x turn that ran while Jean was closed, then
+/// save its reply like a normal turn and emit `chat:done` / `chat:error`.
+#[allow(clippy::too_many_arguments)]
+fn resume_opencode_turn(
+    app: &AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+    run_id: &str,
+    turn: &super::types::OpenCodeTurnRef,
+    execution_mode: Option<&str>,
+    output_file: &std::path::Path,
+    cancelled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use super::run_log::RunLogWriter;
+    let working_dir = crate::projects::storage::load_projects_data(app)
+        .ok()
+        .and_then(|data| data.find_worktree(worktree_id).map(|w| w.path.clone()))
+        .unwrap_or_default();
+    let result = crate::opencode_server::acquire_server(app).and_then(|server| {
+        let result = super::opencode_v2::resume_turn(
+            app,
+            &server,
+            super::opencode_v2::TurnRequest {
+                session_id,
+                worktree_id,
+                run_id,
+                working_dir: std::path::Path::new(&working_dir),
+                existing_opencode_session_id: Some(&turn.session_id),
+                model: None,
+                execution_mode,
+                reasoning_effort: None,
+                prompt: "",
+                system_prompt: None,
+            },
+            turn,
+            cancelled,
+        );
+        crate::opencode_server::release();
+        result
+    });
+    let mut writer = match RunLogWriter::resume(app, session_id, run_id) {
+        Ok(writer) => writer,
+        Err(e) => {
+            log::error!("Resume OpenCode: run log unavailable for run {run_id}: {e}");
+            return;
+        }
+    };
+    let response = match result {
+        Ok(response) => response,
+        Err(e) => {
+            log::error!("Resume OpenCode turn failed for run {run_id}: {e}");
+            if let Err(e) = writer.crash() {
+                log::error!("Failed to mark OpenCode run as crashed: {e}");
+            }
+            super::opencode::emit_chat_error(app, session_id, worktree_id, &e);
+            return;
+        }
+    };
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    if response.cancelled {
+        let _ = writer.cancel(Some(&assistant_message_id), None);
+    } else {
+        append_synthetic_reply(
+            output_file,
+            &response.content,
+            &response.content_blocks,
+            &response.tool_calls,
+            "",
+        );
+        if let Err(e) = writer.complete(&assistant_message_id, None, response.usage.clone()) {
+            log::error!("Failed to mark resumed OpenCode run completed: {e}");
+        }
+    }
+    if let Err(e) = with_existing_metadata_mut(app, session_id, |metadata| {
+        metadata.opencode_session_id = Some(response.session_id.clone());
+    }) {
+        log::warn!("Failed to persist the recovered OpenCode session id: {e}");
+    }
+    super::opencode::emit_chat_done(
+        app,
+        session_id,
+        worktree_id,
+        !response.cancelled && execution_mode == Some("plan") && !response.content.is_empty(),
+    );
+}
+
+/// Append a reply as synthetic history lines (an assistant line plus tool
+/// results), so history reload rebuilds it for backends that are not tailed
+/// from a JSONL stream. A first text block equal to `echoed_prompt` is
+/// dropped (OpenCode echoes the prompt).
+pub(super) fn append_synthetic_reply(
+    output_file: &std::path::Path,
+    content: &str,
+    content_blocks: &[super::types::ContentBlock],
+    tool_calls: &[super::types::ToolCall],
+    echoed_prompt: &str,
+) {
+    let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(output_file) else {
+        return;
+    };
+    if content_blocks.is_empty() {
+        let synthetic = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{"type": "text", "text": content}] }
+        });
+        let _ = writeln!(file, "{synthetic}");
+        let _ = file.flush();
+        return;
+    }
+    let skip_first = matches!(
+        content_blocks.first(),
+        Some(super::types::ContentBlock::Text { text }) if text.trim() == echoed_prompt
+    );
+    let blocks: Vec<serde_json::Value> = content_blocks
+        .iter()
+        .skip(usize::from(skip_first))
+        .map(|cb| match cb {
+            super::types::ContentBlock::Text { text } => {
+                serde_json::json!({"type": "text", "text": text})
+            }
+            super::types::ContentBlock::ToolUse { tool_call_id } => {
+                match tool_calls.iter().find(|t| t.id == *tool_call_id) {
+                    Some(tc) => serde_json::json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.input
+                    }),
+                    None => serde_json::json!({
+                        "type": "tool_use",
+                        "id": tool_call_id,
+                        "name": "",
+                        "input": null
+                    }),
+                }
+            }
+            super::types::ContentBlock::Thinking { thinking } => {
+                serde_json::json!({"type": "thinking", "thinking": thinking})
+            }
+            super::types::ContentBlock::UserInput { text } => {
+                serde_json::json!({"type": "user_input", "text": text})
+            }
+        })
+        .collect();
+    let synthetic = serde_json::json!({"type": "assistant", "message": {"content": blocks}});
+    let _ = writeln!(file, "{synthetic}");
+    for tc in tool_calls {
+        if let Some(output) = &tc.output {
+            let tool_result = serde_json::json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": output
+                    }]
+                }
+            });
+            let _ = writeln!(file, "{tool_result}");
+        }
+    }
+    let _ = file.flush();
+}
+
 /// Resume a session that has resumable runs (detached processes still running).
 ///
-/// This is called when the frontend detects that a session has a "Resumable" run
-/// (process still running after app restart). It starts tailing the output file
-/// to continue receiving events.
+/// Called by the backend at startup for its own runs, and by a native client
+/// after `check_resumable_sessions`. It starts tailing the output file to
+/// continue receiving events.
 pub async fn resume_session(
     app: AppHandle,
     session_id: String,
@@ -8733,6 +8940,14 @@ pub async fn resume_session(
     use super::storage::save_metadata;
 
     log::trace!("Attempting to resume session: {session_id}");
+
+    let Some(_resume_guard) = ResumeGuard::acquire(&session_id) else {
+        log::trace!("Session {session_id} is already being resumed, skipping");
+        return Ok(ResumeSessionResponse {
+            resumed: false,
+            run_count: 0,
+        });
+    };
 
     // If this session is already being actively managed (tailed by send_chat_message),
     // skip resuming to avoid starting a duplicate tail that re-emits all events
@@ -8762,7 +8977,8 @@ pub async fn resume_session(
         .runs
         .iter()
         .filter(|r| {
-            r.status == RunStatus::Resumable && (r.pid.is_some() || r.codex_thread_id.is_some())
+            r.status == RunStatus::Resumable
+                && (r.pid.is_some() || r.codex_thread_id.is_some() || r.opencode_turn.is_some())
         })
         .cloned()
         .collect();
@@ -8788,6 +9004,49 @@ pub async fn resume_session(
     for run in resumable_runs {
         let run_id = run.run_id.clone();
 
+        // === OpenCode 2.x re-attach path ===
+        if let Some(turn) = run.opencode_turn.clone() {
+            if let Some(metadata_run) = metadata.find_run_mut(&run_id) {
+                metadata_run.status = RunStatus::Running;
+            }
+            save_metadata(&app, &metadata)?;
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            if !super::registry::register_cancel_flag(session_id.clone(), flag.clone()) {
+                log::warn!("Resume OpenCode session {session_id} was cancelled before re-attach");
+                if let Ok(mut writer) = RunLogWriter::resume(&app, &session_id, &run_id) {
+                    let _ = writer.cancel(None, None);
+                }
+                return Ok(ResumeSessionResponse {
+                    resumed: false,
+                    run_count: 0,
+                });
+            }
+            let output_file = session_dir.join(format!("{run_id}.jsonl"));
+            let execution_mode = run.execution_mode.clone();
+            let (app, session_id, worktree_id) =
+                (app.clone(), session_id.clone(), worktree_id.clone());
+            // Blocking HTTP and event-stream reads: not on a tokio worker.
+            std::thread::spawn(move || {
+                let _report = super::delegation::ReportRunEnd::new(app.clone(), session_id.clone());
+                resume_opencode_turn(
+                    &app,
+                    &session_id,
+                    &worktree_id,
+                    &run_id,
+                    &turn,
+                    execution_mode.as_deref(),
+                    &output_file,
+                    &flag,
+                );
+                super::registry::cleanup_owned_session_registrations(
+                    &session_id,
+                    None,
+                    Some(&flag),
+                );
+            });
+            continue;
+        }
+
         // === Codex crash recovery path ===
         if let Some(ref codex_tid) = run.codex_thread_id {
             let codex_turn_id = run.codex_turn_id.clone();
@@ -8812,6 +9071,10 @@ pub async fn resume_session(
             // resume_codex_after_crash blocks on sync mpsc — blocking a tokio
             // worker would starve the async runtime.
             std::thread::spawn(move || {
+                let _report = super::delegation::ReportRunEnd::new(
+                    app_clone.clone(),
+                    session_id_clone.clone(),
+                );
                 let emit_done = |app: &tauri::AppHandle, sid: &str, wid: &str| {
                     let _ = app.emit_all(
                         "chat:done",
@@ -8899,6 +9162,10 @@ pub async fn resume_session(
             let run_id_clone = run_id.clone();
 
             tauri::async_runtime::spawn(async move {
+                let _report = super::delegation::ReportRunEnd::new(
+                    app_clone.clone(),
+                    session_id_clone.clone(),
+                );
                 let emit_done = |app: &tauri::AppHandle, sid: &str, wid: &str| {
                     let _ = app.emit_all(
                         "chat:done",
@@ -8916,7 +9183,6 @@ pub async fn resume_session(
                     Ok(response) => (response.session_id, response.usage, response.cancelled),
                     Err(e) => {
                         log::error!("Resume Pi tail failed for run: {run_id_clone}, error: {e}");
-                        super::registry::unregister_process(&session_id_clone);
                         if let Ok(mut writer) =
                             RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
                         {
@@ -8924,15 +9190,11 @@ pub async fn resume_session(
                                 log::error!("Failed to mark Pi run as crashed: {e}");
                             }
                         }
+                        super::registry::unregister_process(&session_id_clone);
                         emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
                         return;
                     }
                 };
-
-                super::registry::unregister_process(&session_id_clone);
-                if cancelled {
-                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
-                }
 
                 if let Ok(mut writer) =
                     RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
@@ -8941,6 +9203,10 @@ pub async fn resume_session(
                     if let Err(e) = writer.complete(&assistant_message_id, None, usage.clone()) {
                         log::error!("Failed to mark resumed Pi run completed: {e}");
                     }
+                }
+                super::registry::unregister_process(&session_id_clone);
+                if cancelled {
+                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
                 }
 
                 if !pi_session_id.is_empty() {
@@ -8985,6 +9251,10 @@ pub async fn resume_session(
             let run_id_clone = run_id.clone();
             let execution_mode = run.execution_mode.clone();
             tauri::async_runtime::spawn(async move {
+                let _report = super::delegation::ReportRunEnd::new(
+                    app_clone.clone(),
+                    session_id_clone.clone(),
+                );
                 let response = super::antigravity::tail_antigravity_output(
                     &app_clone,
                     &session_id_clone,
@@ -8992,7 +9262,6 @@ pub async fn resume_session(
                     &output_file,
                     pid,
                 );
-                super::registry::unregister_process(&session_id_clone);
                 match response {
                     Ok(response) => {
                         let response = super::antigravity::finish_antigravity_response(
@@ -9042,6 +9311,7 @@ pub async fn resume_session(
                         let _ = app_clone.emit_all(event_name, &event);
                     }
                 }
+                super::registry::unregister_process(&session_id_clone);
             });
             continue;
         }
@@ -9074,6 +9344,10 @@ pub async fn resume_session(
             let execution_mode = run.execution_mode.clone();
 
             tauri::async_runtime::spawn(async move {
+                let _report = super::delegation::ReportRunEnd::new(
+                    app_clone.clone(),
+                    session_id_clone.clone(),
+                );
                 let emit_done = |app: &tauri::AppHandle, sid: &str, wid: &str| {
                     let _ = app.emit_all(
                         "chat:done",
@@ -9095,17 +9369,16 @@ pub async fn resume_session(
                     Ok(response) => response,
                     Err(error) => {
                         log::error!("Resume Kimi tail failed for run {run_id_clone}: {error}");
-                        super::registry::unregister_process(&session_id_clone);
                         if let Ok(mut writer) =
                             RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
                         {
                             let _ = writer.crash();
                         }
+                        super::registry::unregister_process(&session_id_clone);
                         emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
                         return;
                     }
                 };
-                super::registry::unregister_process(&session_id_clone);
                 let response = super::kimi::finish_kimi_response(
                     &app_clone,
                     &session_id_clone,
@@ -9113,10 +9386,6 @@ pub async fn resume_session(
                     execution_mode.as_deref(),
                     response,
                 );
-                if response.cancelled {
-                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
-                }
-
                 if let Ok(mut writer) =
                     RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
                 {
@@ -9126,6 +9395,10 @@ pub async fn resume_session(
                     {
                         log::error!("Failed to mark resumed Kimi run completed: {error}");
                     }
+                }
+                super::registry::unregister_process(&session_id_clone);
+                if response.cancelled {
+                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
                 }
 
                 if !response.session_id.is_empty() {
@@ -9173,6 +9446,10 @@ pub async fn resume_session(
             let execution_mode = run.execution_mode.clone();
 
             tauri::async_runtime::spawn(async move {
+                let _report = super::delegation::ReportRunEnd::new(
+                    app_clone.clone(),
+                    session_id_clone.clone(),
+                );
                 let emit_done = |app: &tauri::AppHandle, sid: &str, wid: &str| {
                     let _ = app.emit_all(
                         "chat:done",
@@ -9194,17 +9471,16 @@ pub async fn resume_session(
                     Ok(response) => response,
                     Err(error) => {
                         log::error!("Resume Muse tail failed for run {run_id_clone}: {error}");
-                        super::registry::unregister_process(&session_id_clone);
                         if let Ok(mut writer) =
                             RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
                         {
                             let _ = writer.crash();
                         }
+                        super::registry::unregister_process(&session_id_clone);
                         emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
                         return;
                     }
                 };
-                super::registry::unregister_process(&session_id_clone);
                 let response = super::muse::finish_muse_response(
                     &app_clone,
                     &session_id_clone,
@@ -9212,10 +9488,6 @@ pub async fn resume_session(
                     execution_mode.as_deref(),
                     response,
                 );
-                if response.cancelled {
-                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
-                }
-
                 if let Ok(mut writer) =
                     RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
                 {
@@ -9225,6 +9497,10 @@ pub async fn resume_session(
                     {
                         log::error!("Failed to mark resumed Muse run completed: {error}");
                     }
+                }
+                super::registry::unregister_process(&session_id_clone);
+                if response.cancelled {
+                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
                 }
 
                 if !response.session_id.is_empty() {
@@ -9276,6 +9552,10 @@ pub async fn resume_session(
             let run_id_clone = run_id.clone();
 
             tauri::async_runtime::spawn(async move {
+                let _report = super::delegation::ReportRunEnd::new(
+                    app_clone.clone(),
+                    session_id_clone.clone(),
+                );
                 let (grok_session_id, usage, cancelled, final_content) =
                     match super::grok::tail_grok_output(
                         &app_clone,
@@ -9294,7 +9574,6 @@ pub async fn resume_session(
                             log::error!(
                                 "Resume Grok tail failed for run: {run_id_clone}, error: {e}"
                             );
-                            super::registry::unregister_process(&session_id_clone);
                             if let Ok(mut writer) =
                                 RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
                             {
@@ -9302,6 +9581,7 @@ pub async fn resume_session(
                                     log::error!("Failed to mark Grok run as crashed: {e}");
                                 }
                             }
+                            super::registry::unregister_process(&session_id_clone);
                             let (event_name, event) =
                                 resumed_tail_error_event(&session_id_clone, &worktree_id_clone, &e);
                             let _ = app_clone.emit_all(event_name, &event);
@@ -9309,7 +9589,6 @@ pub async fn resume_session(
                         }
                     };
 
-                super::registry::unregister_process(&session_id_clone);
                 if cancelled {
                     // tail_grok_output does not emit chat:done for a cancel.
                     // Send the text already on disk so a client that missed the
@@ -9340,6 +9619,7 @@ pub async fn resume_session(
                         log::error!("Failed to finish resumed Grok run: {e}");
                     }
                 }
+                super::registry::unregister_process(&session_id_clone);
 
                 if !grok_session_id.is_empty() {
                     if let Err(e) =
@@ -9401,6 +9681,8 @@ pub async fn resume_session(
         // tail_claude_output is a blocking poll loop (std::thread::sleep), so run
         // it on its own OS thread instead of starving an async runtime worker.
         std::thread::spawn(move || {
+            let _report =
+                super::delegation::ReportRunEnd::new(app_clone.clone(), session_id_clone.clone());
             log::trace!("Starting tail task for run: {run_id_clone}, session: {session_id_clone}");
 
             // Helper: emit chat:done so frontend clears sending state
@@ -9425,9 +9707,6 @@ pub async fn resume_session(
                 pid,
                 custom_profile_name.as_deref(),
             );
-            // PID-scoped: never remove a newer run's registration.
-            super::registry::unregister_process_if_owned(&session_id_clone, pid);
-
             let response = match tail_result {
                 Ok(response) => response,
                 Err(e) => {
@@ -9439,6 +9718,8 @@ pub async fn resume_session(
                             log::error!("Failed to mark run as crashed: {e}");
                         }
                     }
+                    // PID-scoped: never remove a newer run's registration.
+                    super::registry::unregister_process_if_owned(&session_id_clone, pid);
                     // tail_claude_output already emitted chat:error for this.
                     return;
                 }
@@ -9476,9 +9757,14 @@ pub async fn resume_session(
                         resume_sid.filter(|_| has_payload),
                         response.usage.clone(),
                     )
-                } else if response.error_emitted && !has_payload && !response.cancelled {
+                } else if response.error_emitted
+                    && !has_payload
+                    && !response.cancelled
+                    && !super::auth_failure::take_auth_failure(&session_id_clone)
+                {
                     // Same as send: a provider rejection before output keeps the
-                    // user request. User cancel still goes through cancel().
+                    // user request (auth failures are withdrawn below). User
+                    // cancel still goes through cancel().
                     writer.reject_without_output()
                 } else {
                     // Process died or the user cancelled. Keep partial output
@@ -9499,6 +9785,10 @@ pub async fn resume_session(
                     log::trace!("Could not delete input file (may not exist): {e}");
                 }
             }
+            // The run is final on disk before the registry lets orphan repair
+            // look at it, so a snapshot in between never marks it crashed.
+            // PID-scoped: never remove a newer run's registration.
+            super::registry::unregister_process_if_owned(&session_id_clone, pid);
 
             // Exactly one terminal event: chat:error was already emitted for a
             // failed turn; otherwise chat:done (tail never emits it itself).
@@ -10057,7 +10347,19 @@ pub async fn enqueue_message(
     session_id: String,
     message: serde_json::Value,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let queue = with_existing_metadata_mut(&app, &session_id, |metadata| {
+    push_queued_message(&app, worktree_id, worktree_path, session_id, message)
+}
+
+/// Append to a session's queue and start its drain. Sync so run-end paths
+/// without an executor (resume tails, drop guards) can call it.
+pub(crate) fn push_queued_message(
+    app: &AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+    message: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    let queue = with_existing_metadata_mut(app, &session_id, |metadata| {
         metadata.queued_messages.push(message);
         metadata.queued_messages.clone()
     })?;
@@ -10126,42 +10428,69 @@ pub async fn remove_queued_message(
     Ok(())
 }
 
-/// Update a specific queued message's text by its `id` field.
+/// Edited composer content for a queued message: text plus every attachment kind.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedMessageEdit {
+    pub message: String,
+    pub pending_images: Vec<Value>,
+    pub pending_files: Vec<Value>,
+    pub pending_skills: Vec<Value>,
+    pub pending_text_files: Vec<Value>,
+    /// Agent chat `@` mentions. `None` leaves the queued mentions unchanged.
+    #[serde(default)]
+    pub mentions: Option<Vec<Value>>,
+}
+
+/// Replace a queued message's text and attachments by its `id` field.
 /// Returns `false` when the message is no longer queued.
-/// Holds the metadata lock across the entire read-modify-write to prevent TOCTOU races.
-fn update_queued_message_text(
-    queued_messages: &mut [serde_json::Value],
+fn apply_queued_message_edit(
+    queued_messages: &mut [Value],
     message_id: &str,
-    message: &str,
+    edit: &QueuedMessageEdit,
 ) -> bool {
     let Some(queued) = queued_messages
         .iter_mut()
         .find(|queued| queued.get("id").and_then(|value| value.as_str()) == Some(message_id))
+        .and_then(Value::as_object_mut)
     else {
         return false;
     };
 
-    let Some(queued) = queued.as_object_mut() else {
-        return false;
-    };
+    queued.insert("message".to_string(), Value::String(edit.message.clone()));
     queued.insert(
-        "message".to_string(),
-        serde_json::Value::String(message.to_string()),
+        "pendingImages".to_string(),
+        Value::Array(edit.pending_images.clone()),
     );
+    queued.insert(
+        "pendingFiles".to_string(),
+        Value::Array(edit.pending_files.clone()),
+    );
+    queued.insert(
+        "pendingSkills".to_string(),
+        Value::Array(edit.pending_skills.clone()),
+    );
+    queued.insert(
+        "pendingTextFiles".to_string(),
+        Value::Array(edit.pending_text_files.clone()),
+    );
+    if let Some(mentions) = &edit.mentions {
+        queued.insert("mentions".to_string(), Value::Array(mentions.clone()));
+    }
     true
 }
 
+/// Holds the metadata lock across the entire read-modify-write to prevent TOCTOU races.
 pub async fn update_queued_message(
     app: AppHandle,
     _worktree_id: String,
     _worktree_path: String,
     session_id: String,
     message_id: String,
-    message: String,
+    edit: QueuedMessageEdit,
 ) -> Result<bool, String> {
     let (updated, queue) = with_existing_metadata_mut(&app, &session_id, |metadata| {
-        let updated =
-            update_queued_message_text(&mut metadata.queued_messages, &message_id, &message);
+        let updated = apply_queued_message_edit(&mut metadata.queued_messages, &message_id, &edit);
         (updated, metadata.queued_messages.clone())
     })?;
 
@@ -10231,8 +10560,10 @@ pub async fn move_queued_message_front(
         )
         .ok();
 
-        // A session that went idle mid-click should still pick up the promoted message.
-        trigger_backend_queue_drain(app.clone(), worktree_id, worktree_path, session_id);
+        // A session that went idle mid-click should still pick up the promoted
+        // message. "Send now" is an explicit retry, so it releases a queue held
+        // after a provider rejection.
+        start_backend_queue_drain(app.clone(), worktree_id, worktree_path, session_id, true);
     }
 
     Ok(moved)
@@ -10307,21 +10638,13 @@ async fn steer_text_into_opencode_turn(
         .map(|r| r.run_id.clone())
         .ok_or_else(|| format!("No running OpenCode run for session: {session_id}"))?;
 
-    // Wait until the main `/message` turn is actively streaming before injecting.
-    // A `prompt_async` sent before the turn is live starts a SECOND concurrent
-    // turn on the same OpenCode session, which resets the in-flight `/message`
-    // connection (the "error sending request for url" failure). If the turn never
-    // starts within the window, bail so the caller requeues instead of colliding.
-    if !crate::chat::opencode::wait_opencode_turn_started(
-        &opencode_session_id,
-        std::time::Duration::from_secs(15),
-    ) {
-        return Err(format!(
-            "OpenCode turn not yet active for session {session_id}; cannot steer"
-        ));
-    }
-
-    let base_url = crate::opencode_server::acquire(app)?;
+    // Server probes use blocking HTTP, which must not run on the async runtime.
+    let acquire_app = app.clone();
+    let server = tauri::async_runtime::spawn_blocking(move || {
+        crate::opencode_server::acquire_server(&acquire_app)
+    })
+    .await
+    .map_err(|e| format!("OpenCode server task failed: {e}"))??;
 
     struct ServerReleaseGuard;
     impl Drop for ServerReleaseGuard {
@@ -10331,39 +10654,63 @@ async fn steer_text_into_opencode_turn(
     }
     let _server_guard = ServerReleaseGuard;
 
-    let prompt_url = format!("{base_url}/session/{opencode_session_id}/prompt_async");
-    let directory = worktree_path.to_string();
-    let payload = opencode_text_prompt_payload(message);
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("Failed to build OpenCode steer client: {e}"))?;
-
-        let response = client
-            .post(&prompt_url)
-            .query(&[("directory", directory)])
-            .json(&payload)
-            .send()
-            .map_err(|e| format!("Failed to steer OpenCode session: {e}"))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            Err(format!(
-                "OpenCode steer failed: status={status}, body={body}"
-            ))
+    if server.api == crate::opencode_server::OpenCodeApi::V2 {
+        let text = message.to_string();
+        let target = opencode_session_id.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::chat::opencode_v2::steer(&server, &target, &text)
+        })
+        .await
+        .map_err(|e| format!("OpenCode steer task failed: {e}"))??;
+    } else {
+        // Wait until the main `/message` turn is actively streaming before injecting.
+        // A `prompt_async` sent before the turn is live starts a SECOND concurrent
+        // turn on the same OpenCode session, which resets the in-flight `/message`
+        // connection (the "error sending request for url" failure). If the turn never
+        // starts within the window, bail so the caller requeues instead of colliding.
+        if !crate::chat::opencode::wait_opencode_turn_started(
+            &opencode_session_id,
+            std::time::Duration::from_secs(15),
+        ) {
+            return Err(format!(
+                "OpenCode turn not yet active for session {session_id}; cannot steer"
+            ));
         }
-    })
-    .await
-    .map_err(|e| format!("OpenCode steer task failed: {e}"))??;
 
-    // Tell the running OpenCode turn to wait for `session.idle` before finalizing,
-    // so this injected prompt's streamed output is captured into the run.
-    crate::chat::opencode::mark_opencode_steered(&opencode_session_id);
+        let prompt_url = format!("{}/session/{opencode_session_id}/prompt_async", server.url);
+        let directory = worktree_path.to_string();
+        let payload = opencode_text_prompt_payload(message);
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("Failed to build OpenCode steer client: {e}"))?;
+
+            let response = client
+                .post(&prompt_url)
+                .query(&[("directory", directory)])
+                .json(&payload)
+                .send()
+                .map_err(|e| format!("Failed to steer OpenCode session: {e}"))?;
+
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                let status = response.status();
+                let body = response.text().unwrap_or_default();
+                Err(format!(
+                    "OpenCode steer failed: status={status}, body={body}"
+                ))
+            }
+        })
+        .await
+        .map_err(|e| format!("OpenCode steer task failed: {e}"))??;
+
+        // Tell the running OpenCode turn to wait for `session.idle` before finalizing,
+        // so this injected prompt's streamed output is captured into the run.
+        crate::chat::opencode::mark_opencode_steered(&opencode_session_id);
+    }
 
     match run_log::RunLogWriter::resume(app, session_id, &run_id) {
         Ok(mut writer) => {
@@ -10487,7 +10834,9 @@ fn queued_message_is_steerable(msg: &serde_json::Value) -> bool {
 
 fn queued_message_is_steerable_for_backend(msg: &serde_json::Value, backend: &str) -> bool {
     let backend_matches = msg.get("backend").and_then(Value::as_str) == Some(backend);
-    if !backend_matches {
+    // `noSteer`: the user explicitly queued it (primary modifier + Enter).
+    let no_steer = msg.get("noSteer").and_then(Value::as_bool) == Some(true);
+    if !backend_matches || no_steer {
         return false;
     }
 
@@ -10508,8 +10857,9 @@ fn queued_message_supports_any_steering(msg: &serde_json::Value) -> bool {
 
 /// Inject a user message into a running Claude turn via the detached Claude
 /// host. Errors when the run is not host-backed or the turn already finished;
-/// callers fall back to the queue. The host writes `steered_user_message`
-/// and the tailer emits `chat:steered` when the CLI consumes the steer.
+/// callers fall back to the queue. `chat:steered` is emitted when the host
+/// accepts the steer; the host writes `steered_user_message` to the run log
+/// when the CLI consumes it.
 pub async fn steer_claude_turn(
     app: AppHandle,
     worktree_id: String,
@@ -10521,13 +10871,13 @@ pub async fn steer_claude_turn(
 
 async fn steer_text_into_claude_turn(
     app: &AppHandle,
-    _worktree_id: &str,
+    worktree_id: &str,
     session_id: &str,
     message: &str,
 ) -> Result<(), String> {
     #[cfg(not(unix))]
     {
-        let _ = (app, session_id, message);
+        let _ = (app, worktree_id, session_id, message);
         Err("Claude steering is only available on macOS/Linux".to_string())
     }
 
@@ -10548,12 +10898,31 @@ async fn steer_text_into_claude_turn(
             .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
         let socket_path =
             super::claude_host::claude_host_socket_path(&app_data, session_id, &run_id);
-        let message = message.to_string();
-        tokio::task::spawn_blocking(move || {
-            super::claude_host::send_claude_host_steer(&socket_path, &message)
+        // The CLI consumes the steer only at its next turn boundary, which can
+        // take seconds. Show the prompt now; mark it first so the tailer does
+        // not emit it a second time on consumption (even when that is fast).
+        super::claude_host::mark_steer_announced(session_id, message);
+        let text = message.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            super::claude_host::send_claude_host_steer(&socket_path, &text)
         })
         .await
-        .map_err(|e| format!("Claude steer task failed: {e}"))?
+        .map_err(|e| format!("Claude steer task failed: {e}"))
+        .and_then(|r| r);
+        if let Err(e) = result {
+            super::claude_host::take_announced_steer(session_id, message);
+            return Err(e);
+        }
+        app.emit_all(
+            "chat:steered",
+            &serde_json::json!({
+                "session_id": session_id,
+                "worktree_id": worktree_id,
+                "text": message,
+            }),
+        )
+        .ok();
+        Ok(())
     }
 }
 
@@ -11186,6 +11555,376 @@ pub async fn respond_opencode_permission(
 mod tests {
     use super::*;
 
+    fn run_state_session(
+        app: &AppHandle,
+        session_id: &str,
+        status: RunStatus,
+        codex_thread_id: Option<&str>,
+    ) {
+        let mut metadata = super::super::types::SessionMetadata::new(
+            session_id.to_string(),
+            "wt".to_string(),
+            "Session".to_string(),
+            0,
+        );
+        metadata.runs.push(super::super::types::RunEntry {
+            run_id: format!("{session_id}-run"),
+            user_message_id: format!("{session_id}-user"),
+            user_message: "hi".to_string(),
+            model: None,
+            execution_mode: Some("build".to_string()),
+            thinking_level: None,
+            effort_level: None,
+            backend: None,
+            custom_profile_name: None,
+            started_at: 10,
+            ended_at: None,
+            status,
+            assistant_message_id: None,
+            cancelled: false,
+            provider_rejected: false,
+            recovered: false,
+            claude_session_id: None,
+            pid: None,
+            usage: None,
+            codex_thread_id: codex_thread_id.map(str::to_string),
+            codex_turn_id: None,
+            opencode_turn: None,
+            cursor_chat_id: None,
+            grok_session_id: None,
+            kimi_session_id: None,
+            devin_session_id: None,
+            antigravity_session_id: None,
+            muse_session_id: None,
+            checkpoint_id: None,
+        });
+        super::super::storage::save_metadata(app, &metadata).unwrap();
+    }
+
+    fn held_queue_session(app: &AppHandle, session_id: &str) {
+        run_state_session(app, session_id, RunStatus::Cancelled, None);
+        with_existing_metadata_mut(app, session_id, |metadata| {
+            if let Some(run) = metadata.runs.last_mut() {
+                run.provider_rejected = true;
+            }
+            metadata
+                .queued_messages
+                .push(serde_json::json!({ "id": "q1", "message": "queued prompt" }));
+        })
+        .unwrap();
+    }
+
+    fn queue_len(app: &AppHandle, session_id: &str) -> usize {
+        load_metadata(app, session_id)
+            .unwrap()
+            .unwrap()
+            .queued_messages
+            .len()
+    }
+
+    #[test]
+    fn provider_rejection_holds_the_queued_prompts() {
+        let _registry = super::super::registry::TEST_LOCK.lock().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+        held_queue_session(&app, "held");
+        let path = temp.path().to_string_lossy().to_string();
+
+        // Awaiting the drain directly: without the hold it would dequeue q1.
+        runtime.block_on(drain_backend_queue(
+            app.clone(),
+            "wt".to_string(),
+            path.clone(),
+            "held".to_string(),
+            false,
+        ));
+        assert_eq!(
+            queue_len(&app, "held"),
+            1,
+            "a provider rejection must leave the queued prompts untouched"
+        );
+
+        trigger_backend_queue_drain(app.clone(), "wt".to_string(), path, "held".to_string());
+        assert!(
+            !BACKEND_QUEUE_DRAINING.lock().unwrap().contains("held"),
+            "a held queue must not start a drain"
+        );
+        assert_eq!(queue_len(&app, "held"), 1);
+    }
+
+    #[test]
+    fn send_now_releases_a_held_queue() {
+        let _registry = super::super::registry::TEST_LOCK.lock().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let app = AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+            held_queue_session(&app, "held-send-now");
+
+            let moved = move_queued_message_front(
+                app.clone(),
+                "wt-missing".to_string(),
+                temp.path().to_string_lossy().to_string(),
+                "held-send-now".to_string(),
+                "q1".to_string(),
+            )
+            .await
+            .unwrap();
+            assert!(moved);
+
+            let mut len = usize::MAX;
+            for _ in 0..100 {
+                len = queue_len(&app, "held-send-now");
+                if len == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert_eq!(len, 0, "Send now must retry the head of a held queue");
+        });
+    }
+
+    #[test]
+    fn queue_drains_after_a_send_returns() {
+        let _registry = super::super::registry::TEST_LOCK.lock().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(queue_drains_after_a_send_returns_body());
+    }
+
+    async fn queue_drains_after_a_send_returns_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+        run_state_session(&app, "queued", RunStatus::Completed, None);
+        with_existing_metadata_mut(&app, "queued", |metadata| {
+            metadata
+                .queued_messages
+                .push(serde_json::json!({ "id": "q1", "message": "queued prompt" }));
+        })
+        .unwrap();
+
+        // Fails after taking the send claim (no session index for this worktree).
+        let sent = send_chat_message(
+            app.clone(),
+            "queued".to_string(),
+            "wt-missing".to_string(),
+            temp.path().to_string_lossy().to_string(),
+            "hello".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(sent.is_err());
+
+        let mut queue_len = usize::MAX;
+        for _ in 0..100 {
+            queue_len = load_metadata(&app, "queued")
+                .unwrap()
+                .unwrap()
+                .queued_messages
+                .len();
+            if queue_len == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(queue_len, 0, "queued prompt was not taken by the drain");
+    }
+
+    #[test]
+    fn get_run_states_without_ids_returns_only_live_sessions_after_repair() {
+        // Sync test: the registry lock must not be held across a real await.
+        let _registry = super::super::registry::TEST_LOCK.lock().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(get_run_states_without_ids_body());
+    }
+
+    async fn get_run_states_without_ids_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+        run_state_session(&app, "managed", RunStatus::Running, None);
+        run_state_session(&app, "orphaned", RunStatus::Running, None);
+        run_state_session(&app, "resumable", RunStatus::Running, Some("thread-1"));
+        run_state_session(&app, "finished", RunStatus::Completed, None);
+        assert!(super::super::registry::register_process(
+            "managed".to_string(),
+            u32::MAX
+        ));
+
+        let states = get_run_states(app.clone(), None).await.unwrap();
+        super::super::registry::cleanup_session_registrations("managed");
+
+        let mut listed: Vec<(&str, super::super::types::RunStateStatus)> = states
+            .iter()
+            .map(|state| (state.session_id.as_str(), state.status))
+            .collect();
+        listed.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(
+            listed,
+            vec![
+                ("managed", super::super::types::RunStateStatus::Running),
+                ("resumable", super::super::types::RunStateStatus::Resumable),
+            ]
+        );
+        let managed = states.iter().find(|s| s.session_id == "managed").unwrap();
+        assert_eq!(managed.run_id.as_deref(), Some("managed-run"));
+        assert_eq!(managed.started_at, Some(10));
+        assert_eq!(managed.execution_mode.as_deref(), Some("build"));
+
+        // The orphan was repaired on read: crashed, version bumped, reported
+        // as an error only when asked for explicitly.
+        let orphan = load_metadata(&app, "orphaned").unwrap().unwrap();
+        assert_eq!(orphan.runs[0].status, RunStatus::Crashed);
+        assert_eq!(orphan.status_version, 1);
+        let explicit = get_run_states(
+            app.clone(),
+            Some(vec!["orphaned".to_string(), "finished".to_string()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(explicit.len(), 2);
+        assert_eq!(
+            explicit[0].status,
+            super::super::types::RunStateStatus::Error
+        );
+        assert_eq!(explicit[0].status_version, 1);
+        assert_eq!(
+            explicit[1].status,
+            super::super::types::RunStateStatus::Idle
+        );
+
+        // Idempotent: a second read repairs nothing further.
+        let _ = get_run_states(app.clone(), None).await.unwrap();
+        assert_eq!(
+            load_metadata(&app, "orphaned")
+                .unwrap()
+                .unwrap()
+                .status_version,
+            1
+        );
+    }
+
+    #[test]
+    fn orphan_repair_never_overwrites_a_run_a_tail_completed() {
+        let _registry = super::super::registry::TEST_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+        run_state_session(&app, "tailed", RunStatus::Running, None);
+
+        // A live tail owns the session: repair must leave it alone.
+        assert!(super::super::registry::register_process(
+            "tailed".to_string(),
+            u32::MAX
+        ));
+        let recovered =
+            super::super::run_log::recover_incomplete_runs_for(&app, vec!["tailed".to_string()])
+                .unwrap();
+        assert!(recovered.is_empty());
+        assert_eq!(
+            load_metadata(&app, "tailed").unwrap().unwrap().runs[0].status,
+            RunStatus::Running
+        );
+
+        // The tail finalizes the run before it unregisters.
+        with_existing_metadata_mut(&app, "tailed", |metadata| {
+            metadata.runs[0].status = RunStatus::Completed;
+            metadata.runs[0].assistant_message_id = Some("reply".to_string());
+        })
+        .unwrap();
+        super::super::registry::cleanup_session_registrations("tailed");
+        let version_after_tail = load_metadata(&app, "tailed")
+            .unwrap()
+            .unwrap()
+            .status_version;
+
+        // Repair after the tail finished changes nothing, twice.
+        for _ in 0..2 {
+            let recovered = super::super::run_log::recover_incomplete_runs_for(
+                &app,
+                vec!["tailed".to_string()],
+            )
+            .unwrap();
+            assert!(recovered.is_empty());
+            let metadata = load_metadata(&app, "tailed").unwrap().unwrap();
+            assert_eq!(metadata.runs[0].status, RunStatus::Completed);
+            assert_eq!(
+                metadata.runs[0].assistant_message_id.as_deref(),
+                Some("reply")
+            );
+            assert_eq!(metadata.status_version, version_after_tail);
+        }
+    }
+
+    #[test]
+    fn startup_resume_targets_each_resumable_session_once() {
+        let recovered = vec![
+            recovered_run("a", true),
+            recovered_run("a", true),
+            recovered_run("b", false),
+            recovered_run("c", true),
+        ];
+        let targets: Vec<String> = resumable_sessions(recovered)
+            .into_iter()
+            .map(|run| run.session_id)
+            .collect();
+        assert_eq!(targets, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn resume_session_is_skipped_while_another_resume_holds_the_session() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let app = AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+            run_state_session(&app, "guarded", RunStatus::Resumable, Some("thread-1"));
+            let guard = ResumeGuard::acquire("guarded").unwrap();
+            let response = resume_session(app.clone(), "guarded".to_string(), "wt".to_string())
+                .await
+                .unwrap();
+            assert!(!response.resumed);
+            assert_eq!(
+                load_metadata(&app, "guarded").unwrap().unwrap().runs[0].status,
+                RunStatus::Resumable
+            );
+            drop(guard);
+            assert!(ResumeGuard::acquire("guarded").is_some());
+        });
+    }
+
+    fn recovered_run(session_id: &str, resumable: bool) -> super::super::run_log::RecoveredRun {
+        super::super::run_log::RecoveredRun {
+            session_id: session_id.to_string(),
+            worktree_id: "wt".to_string(),
+            run_id: format!("{session_id}-run"),
+            user_message: "hi".to_string(),
+            resumable,
+            execution_mode: None,
+            started_at: 1,
+        }
+    }
+
     #[test]
     fn permission_policy_capabilities_never_escalate_unknown_modes() {
         for backend in [
@@ -11700,6 +12439,18 @@ mod tests {
     }
 
     #[test]
+    fn queued_message_with_no_steer_is_never_steerable() {
+        let claude = serde_json::json!({
+            "id": "m1",
+            "message": "run after this turn",
+            "backend": "claude",
+            "noSteer": true,
+        });
+        assert!(!queued_message_is_steerable_for_backend(&claude, "claude"));
+        assert!(!queued_message_supports_any_steering(&claude));
+    }
+
+    #[test]
     fn queued_message_steerable_for_backend_accepts_grok_with_attachments() {
         let grok_plain = serde_json::json!({
             "id": "m1",
@@ -11743,15 +12494,32 @@ mod tests {
     }
 
     #[test]
-    fn queued_message_text_edit_updates_steerable_backends() {
+    fn queued_message_edit_replaces_text_and_attachments() {
         let mut queue = vec![serde_json::json!({
             "id": "m1",
             "message": "original",
             "backend": "codex",
+            "pendingImages": [{ "id": "img-1", "path": "/tmp/a.png" }],
+            "pendingFiles": [],
+            "pendingSkills": [],
+            "pendingTextFiles": [],
         })];
+        let edit: QueuedMessageEdit = serde_json::from_value(serde_json::json!({
+            "message": "edited",
+            "pendingImages": [],
+            "pendingFiles": [{ "id": "f-1", "relativePath": "src/a.ts" }],
+            "pendingSkills": [],
+            "pendingTextFiles": [{ "id": "t-1", "path": "/tmp/t.txt" }],
+        }))
+        .unwrap();
 
-        assert!(update_queued_message_text(&mut queue, "m1", "edited"));
+        assert!(apply_queued_message_edit(&mut queue, "m1", &edit));
         assert_eq!(queue[0]["message"], "edited");
+        assert_eq!(queue[0]["backend"], "codex");
+        assert_eq!(queue[0]["pendingImages"], serde_json::json!([]));
+        assert_eq!(queue[0]["pendingFiles"][0]["id"], "f-1");
+        assert_eq!(queue[0]["pendingTextFiles"][0]["id"], "t-1");
+        assert!(!apply_queued_message_edit(&mut queue, "missing", &edit));
     }
 
     #[test]
@@ -11898,6 +12666,26 @@ mod tests {
         assert!(!has_active_send("race-session"));
     }
 
+    #[tokio::test]
+    async fn inherited_defaults_preserve_custom_provider_and_other_backends() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+        let prefs = crate::AppPreferences {
+            selected_codex_model: "provider-only-model".into(),
+            default_codex_provider: Some("work".into()),
+            selected_model: "claude-sonnet-4-6[1m]".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_default_model_for_backend(&app, &Backend::Codex, Some(&prefs)).await,
+            Some("provider-only-model".into())
+        );
+        assert_eq!(
+            resolve_default_model_for_backend(&app, &Backend::Claude, Some(&prefs)).await,
+            Some("claude-sonnet-4-6[1m]".into())
+        );
+    }
+
     #[test]
     fn default_model_for_commandcode_backend_uses_commandcode_preference() {
         let prefs = crate::AppPreferences {
@@ -11909,6 +12697,82 @@ mod tests {
         assert_eq!(
             default_model_for_backend(&Backend::Commandcode, &prefs),
             Some("commandcode/deepseek/deepseek-v4-flash".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_send_provider_uses_default_only_when_nothing_was_chosen() {
+        let some = |s: &str| Some(s.to_string());
+        let default = || some("OpenRouter");
+        // New session: no explicit or saved choice, so the default applies.
+        assert_eq!(
+            resolve_send_provider(None, None, default),
+            some("OpenRouter")
+        );
+        assert_eq!(
+            resolve_send_provider(None, some("  "), default),
+            some("OpenRouter")
+        );
+        // Saved built-in choice blocks the default.
+        assert_eq!(
+            resolve_send_provider(None, some("__anthropic__"), default),
+            None
+        );
+        assert_eq!(
+            resolve_send_provider(some("__default__"), None, default),
+            None
+        );
+        // Explicit value wins over the saved choice.
+        assert_eq!(
+            resolve_send_provider(some("MiniMax"), some("__anthropic__"), default),
+            some("MiniMax")
+        );
+        assert_eq!(
+            resolve_send_provider(None, some("MiniMax"), default),
+            some("MiniMax")
+        );
+        // Default set to the built-in provider.
+        assert_eq!(
+            resolve_send_provider(None, None, || some("__anthropic__")),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_send_reasoning_claude_thinking_send_ignores_saved_effort() {
+        assert_eq!(
+            resolve_send_reasoning(
+                &Backend::Claude,
+                Some(ThinkingLevel::Ultrathink),
+                None,
+                None,
+                Some(EffortLevel::Medium),
+            ),
+            (Some(ThinkingLevel::Ultrathink), None)
+        );
+    }
+
+    #[test]
+    fn resolve_send_reasoning_falls_back_when_send_has_no_levels() {
+        assert_eq!(
+            resolve_send_reasoning(
+                &Backend::Claude,
+                None,
+                None,
+                Some(ThinkingLevel::Think),
+                Some(EffortLevel::High),
+            ),
+            (Some(ThinkingLevel::Think), Some(EffortLevel::High))
+        );
+        assert_eq!(
+            resolve_send_reasoning(
+                &Backend::Codex,
+                Some(ThinkingLevel::Off),
+                None,
+                None,
+                Some(EffortLevel::High),
+            ),
+            (Some(ThinkingLevel::Off), Some(EffortLevel::High))
         );
     }
 
@@ -12000,21 +12864,17 @@ mod tests {
         assert!(!build_prompt.contains("<proposed_plan>"));
         assert!(!build_prompt.contains("CodexPlan"));
         assert!(build_prompt.contains("## Not Plan Mode"));
-        assert!(build_prompt.contains("Jean Worktree Policy"));
-        assert!(build_prompt.contains("Do NOT create git worktrees manually"));
-        assert!(build_prompt.contains("Jean MCP/tools"));
-        assert!(build_prompt.contains("VERY IMPORTANT: Keep Code Simple"));
-        assert!(build_prompt.contains("Always implement the simplest maintainable solution"));
-        assert!(build_prompt.contains("Clickable References"));
-        assert!(build_prompt.contains("include clickable links when available"));
+        // Shared rules come once, from the global default prompt.
+        let resolved = resolve_codex_global_system_prompt(None, Some("build"));
+        assert!(resolved.contains("## Not Plan Mode"));
+        assert_eq!(resolved.matches("Jean Worktree Policy").count(), 1);
+        assert_eq!(resolved.matches("Keep Code Simple").count(), 1);
 
         let yolo_prompt = codex_default_global_system_prompt(Some("yolo"));
         assert!(!yolo_prompt.contains("## Plan Mode"));
         assert!(!yolo_prompt.contains("<proposed_plan>"));
         assert!(!yolo_prompt.contains("CodexPlan"));
         assert!(yolo_prompt.contains("## Not Plan Mode"));
-        assert!(yolo_prompt.contains("VERY IMPORTANT: Keep Code Simple"));
-        assert!(yolo_prompt.contains("Clickable References"));
     }
 
     #[test]
@@ -12279,6 +13139,35 @@ mod tests {
     }
 
     #[test]
+    fn test_build_queued_message_with_mentions_matches_frontend_format() {
+        // Same input and output as message-with-refs.test.ts
+        let queued = serde_json::json!({
+            "message": "Ask @Reviewer about @coolify on @home",
+            "mentions": [
+                { "type": "agent", "id": "reviewer-1", "name": "Reviewer" },
+                {
+                    "type": "project",
+                    "id": "p-9",
+                    "name": "coolify",
+                    "serverName": "Home"
+                },
+                {
+                    "type": "remote_jean",
+                    "id": "srv-1",
+                    "name": "home",
+                    "url": "https://home.example"
+                },
+                { "type": "unknown", "id": "x", "name": "x" }
+            ]
+        });
+
+        assert_eq!(
+            build_queued_message_with_refs(&queued).unwrap(),
+            "Ask @Reviewer about @coolify on @home\n\n[Mentioned agent: Reviewer (agentId: reviewer-1)]\n[Mentioned project: coolify (projectId: p-9, on remote Jean: Home)]\n[Mentioned remote Jean: home (serverId: srv-1, url: https://home.example)]"
+        );
+    }
+
+    #[test]
     fn test_build_queued_message_with_image_only_default_prompt() {
         let queued = serde_json::json!({
             "message": "",
@@ -12530,35 +13419,36 @@ plugin:tools:search: npx -y search-mcp - ✘ Failed to connect";
     }
 
     #[test]
-    fn ensure_session_can_run_rejects_archived_session() {
+    fn ensure_session_can_run_rejects_deleted_session() {
         let err = ensure_session_can_run("sess-1", Some(123), "wt-1", None).unwrap_err();
-        assert!(err.contains("Session is archived"));
-        assert!(err.contains("sess-1"));
-        assert!(err.contains("Unarchive"));
+        assert_eq!(
+            err,
+            "Session was deleted and cannot run (sessionId: sess-1)."
+        );
     }
 
     #[test]
-    fn ensure_session_can_run_rejects_archived_worktree() {
+    fn ensure_session_can_run_rejects_inactive_worktree() {
         let err = ensure_session_can_run("sess-1", None, "wt-1", Some(456)).unwrap_err();
-        assert!(err.contains("Worktree is archived"));
-        assert!(err.contains("wt-1"));
-        assert!(err.contains("Unarchive"));
+        assert_eq!(
+            err,
+            "Worktree is no longer active and cannot run sessions (worktreeId: wt-1)."
+        );
     }
 
     #[test]
-    fn ensure_session_can_run_prefers_session_archive_error() {
-        // When both are archived, surface the session-level error first so the
-        // caller knows which unarchive tool to use.
+    fn ensure_session_can_run_prefers_session_error() {
         let err = ensure_session_can_run("sess-1", Some(1), "wt-1", Some(2)).unwrap_err();
-        assert!(err.contains("Session is archived"));
-        assert!(!err.contains("Worktree is archived"));
+        assert_eq!(
+            err,
+            "Session was deleted and cannot run (sessionId: sess-1)."
+        );
     }
 
     #[test]
-    fn ensure_worktree_not_archived_rejects_archived() {
+    fn ensure_worktree_not_archived_rejects_inactive() {
         let err = ensure_worktree_not_archived("wt-1", Some(99)).unwrap_err();
-        assert!(err.contains("Worktree is archived"));
-        assert!(err.contains("wt-1"));
+        assert_eq!(err, "Worktree is no longer active (worktreeId: wt-1).");
         assert!(ensure_worktree_not_archived("wt-1", None).is_ok());
     }
 
@@ -12611,5 +13501,53 @@ plugin:tools:search: npx -y search-mcp - ✘ Failed to connect";
         let text = "a".repeat(250);
         let preview = truncate_error_preview(&text, 200);
         assert_eq!(preview, format!("{}...", "a".repeat(200)));
+    }
+
+    #[test]
+    fn failed_opencode_run_keeps_its_live_session_id() {
+        let _guard = super::super::registry::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let app =
+            tauri::AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+        let worktree_id = "wt-opencode-error";
+        let index = crate::chat::storage::load_index(&app, worktree_id).unwrap();
+        let session_id = index.sessions[0].id.clone();
+        super::super::registry::register_cancel_flag(
+            session_id.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        super::super::registry::update_cancel_flag_context(
+            &session_id,
+            "ses_live".to_string(),
+            "/tmp/wt".to_string(),
+        );
+
+        persist_opencode_session_id_after_error(&app, "/tmp/wt", worktree_id, &session_id);
+        super::super::registry::cleanup_session_registrations(&session_id);
+
+        let metadata = crate::chat::storage::load_metadata(&app, &session_id)
+            .unwrap()
+            .expect("metadata saved");
+        assert_eq!(metadata.opencode_session_id.as_deref(), Some("ses_live"));
+    }
+
+    #[test]
+    fn persist_opencode_session_id_is_noop_without_registry_entry() {
+        let _guard = super::super::registry::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let app =
+            tauri::AppHandle::new(temp.path().to_path_buf(), temp.path().to_path_buf()).unwrap();
+        let worktree_id = "wt-opencode-no-registry";
+        let index = crate::chat::storage::load_index(&app, worktree_id).unwrap();
+        let session_id = index.sessions[0].id.clone();
+
+        persist_opencode_session_id_after_error(&app, "/tmp/wt", worktree_id, &session_id);
+
+        let metadata = crate::chat::storage::load_metadata(&app, &session_id).unwrap();
+        assert!(metadata.and_then(|m| m.opencode_session_id).is_none());
     }
 }

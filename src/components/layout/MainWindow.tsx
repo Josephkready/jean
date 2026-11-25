@@ -5,11 +5,11 @@ import {
   useRef,
   useEffect,
   useState,
-  lazy,
   Suspense,
   type CSSProperties,
 } from 'react'
 import { cn } from '@/lib/utils'
+import { lazyWithPreload, preloadWhenIdle } from '@/lib/lazy-preload'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useIsTouchDevice } from '@/hooks/use-touch-device'
@@ -26,159 +26,192 @@ import { TeardownOutputDialog } from '@/components/worktree/TeardownOutputDialog
 import { WindowResizeHandles } from './WindowResizeHandles'
 
 // Lazy-loaded heavy modals (code splitting)
-const LeftSideBar = lazy(() =>
+const LeftSideBar = lazyWithPreload(() =>
   import('./LeftSideBar').then(mod => ({
     default: mod.LeftSideBar,
   }))
 )
-const FileBrowserSidebar = lazy(() =>
+const FileBrowserSidebar = lazyWithPreload(() =>
   import('@/components/file-browser').then(mod => ({
     default: mod.FileBrowserSidebar,
   }))
 )
-const MobileFileBrowser = lazy(() =>
+const MobileFileBrowser = lazyWithPreload(() =>
   import('@/components/file-browser').then(mod => ({
     default: mod.MobileFileBrowser,
   }))
 )
-const FileContentModal = lazy(() =>
+const FileContentModal = lazyWithPreload(() =>
   import('@/components/chat/FileContentModal').then(mod => ({
     default: mod.FileContentModal,
   }))
 )
-const PreferencesDialog = lazy(() =>
+const PreferencesDialog = lazyWithPreload(() =>
   import('@/components/preferences/PreferencesDialog').then(mod => ({
     default: mod.PreferencesDialog,
   }))
 )
-const ProjectSettingsDialog = lazy(() =>
+const ProjectSettingsDialog = lazyWithPreload(() =>
   import('@/components/projects/ProjectSettingsDialog').then(mod => ({
     default: mod.ProjectSettingsDialog,
   }))
 )
-const CommitModal = lazy(() =>
+const CommitModal = lazyWithPreload(() =>
   import('@/components/commit/CommitModal').then(mod => ({
     default: mod.CommitModal,
   }))
 )
-const OnboardingDialog = lazy(() =>
+const OnboardingDialog = lazyWithPreload(() =>
   import('@/components/onboarding/OnboardingDialog').then(mod => ({
     default: mod.OnboardingDialog,
   }))
 )
-const FeatureTourDialog = lazy(() =>
+const FeatureTourDialog = lazyWithPreload(() =>
   import('@/components/onboarding/FeatureTourDialog').then(mod => ({
     default: mod.FeatureTourDialog,
   }))
 )
-const BugReportDialog = lazy(() =>
+const BugReportDialog = lazyWithPreload(() =>
   import('@/components/bug-report/BugReportDialog').then(mod => ({
     default: mod.BugReportDialog,
   }))
 )
-const JeanConfigWizard = lazy(() =>
+const JeanConfigWizard = lazyWithPreload(() =>
   import('@/components/onboarding/JeanConfigWizard').then(mod => ({
     default: mod.JeanConfigWizard,
   }))
 )
-const CliUpdateModal = lazy(() =>
+const CliUpdateModal = lazyWithPreload(() =>
   import('@/components/layout/CliUpdateModal').then(mod => ({
     default: mod.CliUpdateModal,
   }))
 )
-const UpdateAvailableModal = lazy(() =>
+const UpdateAvailableModal = lazyWithPreload(() =>
   import('@/components/layout/UpdateAvailableModal').then(mod => ({
     default: mod.UpdateAvailableModal,
   }))
 )
-const CliLoginModal = lazy(() =>
+const CliLoginModal = lazyWithPreload(() =>
   import('@/components/preferences/CliLoginModal').then(mod => ({
     default: mod.CliLoginModal,
   }))
 )
-const OpenInModal = lazy(() =>
+const McpServersModal = lazyWithPreload(() =>
+  import('@/components/mcp/McpServersModal').then(mod => ({
+    default: mod.McpServersModal,
+  }))
+)
+const OpenInModal = lazyWithPreload(() =>
   import('@/components/open-in/OpenInModal').then(mod => ({
     default: mod.OpenInModal,
   }))
 )
-const RemotePickerModal = lazy(() =>
+const RemotePickerModal = lazyWithPreload(() =>
   import('@/components/magic/RemotePickerModal').then(mod => ({
     default: mod.RemotePickerModal,
   }))
 )
-const UpdatePrDialog = lazy(() =>
+const UpdatePrDialog = lazyWithPreload(() =>
   import('@/components/magic/UpdatePrDialog').then(mod => ({
     default: mod.UpdatePrDialog,
   }))
 )
-const ReviewCommentsDialog = lazy(() =>
+const ReviewCommentsDialog = lazyWithPreload(() =>
   import('@/components/magic/ReviewCommentsDialog').then(mod => ({
     default: mod.ReviewCommentsDialog,
   }))
 )
-const NewWorktreeModal = lazy(() =>
+const NewWorktreeModal = lazyWithPreload(() =>
   import('@/components/worktree/NewWorktreeModal').then(mod => ({
     default: mod.NewWorktreeModal,
   }))
 )
-const AddProjectDialog = lazy(() =>
+const AddProjectDialog = lazyWithPreload(() =>
   import('@/components/projects/AddProjectDialog').then(mod => ({
     default: mod.AddProjectDialog,
   }))
 )
-const GlobalServerDialog = lazy(() =>
+const GlobalServerDialog = lazyWithPreload(() =>
   import('@/components/projects/servers/ServerDialog').then(mod => ({
     default: mod.GlobalServerDialog,
   }))
 )
-const GitInitModal = lazy(() =>
+const GitInitModal = lazyWithPreload(() =>
   import('@/components/projects/GitInitModal').then(mod => ({
     default: mod.GitInitModal,
   }))
 )
-const CloneProjectModal = lazy(() =>
+const CloneProjectModal = lazyWithPreload(() =>
   import('@/components/projects/CloneProjectModal').then(mod => ({
     default: mod.CloneProjectModal,
   }))
 )
-const ArchivedModal = lazy(() =>
-  import('@/components/archive/ArchivedModal').then(mod => ({
-    default: mod.ArchivedModal,
-  }))
-)
-const ReleaseNotesDialog = lazy(() =>
+const ReleaseNotesDialog = lazyWithPreload(() =>
   import('@/components/magic/ReleaseNotesDialog').then(mod => ({
     default: mod.ReleaseNotesDialog,
   }))
 )
-const WorkflowRunsModal = lazy(() =>
+const WorkflowRunsModal = lazyWithPreload(() =>
   import('@/components/shared/WorkflowRunsModal').then(mod => ({
     default: mod.WorkflowRunsModal,
   }))
 )
-const MagicModal = lazy(() =>
+const MagicModal = lazyWithPreload(() =>
   import('@/components/magic/MagicModal').then(mod => ({
     default: mod.MagicModal,
   }))
 )
-const ResolveConflictsDialog = lazy(() =>
+const ResolveConflictsDialog = lazyWithPreload(() =>
   import('@/components/magic/ResolveConflictsDialog').then(mod => ({
     default: mod.ResolveConflictsDialog,
   }))
 )
-const NewSessionModeModal = lazy(() =>
+const NewSessionModeModal = lazyWithPreload(() =>
   import('@/components/chat/NewSessionModeModal').then(mod => ({
     default: mod.NewSessionModeModal,
   }))
 )
-const CloseWorktreeDialog = lazy(() =>
+const CloseWorktreeDialog = lazyWithPreload(() =>
   import('@/components/chat/CloseWorktreeDialog').then(mod => ({
     default: mod.CloseWorktreeDialog,
   }))
 )
+// Most-used chunks first. Shared modules (e.g. the file browser, the left
+// sidebar) also cover their mobile and agent copies.
+const IDLE_PRELOADS = [
+  LeftSideBar,
+  NewSessionModeModal,
+  MagicModal,
+  CommitModal,
+  NewWorktreeModal,
+  FileContentModal,
+  PreferencesDialog,
+  ProjectSettingsDialog,
+  OpenInModal,
+  CloseWorktreeDialog,
+  McpServersModal,
+  WorkflowRunsModal,
+  ResolveConflictsDialog,
+  RemotePickerModal,
+  UpdatePrDialog,
+  ReviewCommentsDialog,
+  ReleaseNotesDialog,
+  AddProjectDialog,
+  CloneProjectModal,
+  GitInitModal,
+  GlobalServerDialog,
+  CliLoginModal,
+  CliUpdateModal,
+  UpdateAvailableModal,
+  OnboardingDialog,
+  FeatureTourDialog,
+  JeanConfigWizard,
+  FileBrowserSidebar,
+  MobileFileBrowser,
+]
 import { Toaster } from '@/components/ui/sonner'
+import { PreviewDialogHost } from '@/components/ui/preview-dialog-host'
 import { MobileLeftSidebar } from './MobileLeftSidebar'
-import { SidebarTabRail } from '@/components/projects/SidebarTabRail'
 import { useShowAgents } from '@/components/agents/agents-feature'
 import { AgentsTitleSync, resolveWindowTitle } from './window-title'
 import { BrowserSidePane } from '@/components/browser/BrowserSidePane'
@@ -198,8 +231,6 @@ import { useCloseSessionOrWorktreeKeybinding } from '@/services/chat'
 import { useUIStatePersistence } from '@/hooks/useUIStatePersistence'
 import { useClientViewStatePersistence } from '@/hooks/useClientViewStatePersistence'
 import { useSessionStatePersistence } from '@/hooks/useSessionStatePersistence'
-import { useRestoreLastArchived } from '@/hooks/useRestoreLastArchived'
-import { useArchiveCleanup } from '@/hooks/useArchiveCleanup'
 import { usePrWorktreeSweep } from '@/hooks/usePrWorktreeSweep'
 import {
   useAppFocusTracking,
@@ -219,8 +250,6 @@ import { usePreferences } from '@/services/preferences'
 
 // Left sidebar resize constraints (pixels)
 const MIN_SIDEBAR_WIDTH = 150
-// Agents sidebar can shrink to an icon column, as wide as the tab rail
-const MIN_AGENTS_SIDEBAR_WIDTH = 72
 const MAX_SIDEBAR_WIDTH = 500
 // File browser sidebar resize constraints (pixels)
 const MIN_FILE_BROWSER_WIDTH = 180
@@ -251,6 +280,7 @@ const UIStatePersistence = memo(function UIStatePersistence({
   useClientViewStatePersistence(isInitialized)
 
   useEffect(() => {
+    // react-doctor-disable-next-line react-doctor/no-pass-data-to-parent -- intentional isolation leaf: keeps persistence hook re-renders out of MainWindow; only the one-time isInitialized flip is reported
     onInitializedChange(isInitialized)
   }, [isInitialized, onInitializedChange])
 
@@ -259,15 +289,15 @@ const UIStatePersistence = memo(function UIStatePersistence({
 
 export function MainWindow() {
   useTerminalThemeSync()
+  // Fetch lazy chunks in idle time so the first open has no load delay.
+  useEffect(() => preloadWhenIdle(IDLE_PRELOADS.map(c => c.preload)), [])
   const isMaximized = useWindowMaximized()
   const { offset: toasterOffset, mobileOffset: toasterMobileOffset } =
     useToasterOffset()
   const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
   const showAgents = useShowAgents()
-  // Agents and projects keep their own sidebar width
-  const leftSidebarSize = useUIStore(state =>
-    showAgents ? state.agentsSidebarSize : state.leftSidebarSize
-  )
+  // One width for every sidebar tab (Projects, Recent, Agents)
+  const leftSidebarSize = useUIStore(state => state.leftSidebarSize)
   const setLeftSidebarVisible = useUIStore(state => state.setLeftSidebarVisible)
   const fileBrowserVisible = useUIStore(state => state.fileBrowserVisible)
   const fileBrowserSize = useUIStore(state => state.fileBrowserSize)
@@ -283,6 +313,7 @@ export function MainWindow() {
   const featureTourOpen = useUIStore(state => state.featureTourOpen)
   const bugReportOpen = useUIStore(state => state.bugReportOpen)
   const openInModalOpen = useUIStore(state => state.openInModalOpen)
+  const mcpServersModalOpen = useUIStore(state => state.mcpServersModalOpen)
   const remotePickerOpen = useUIStore(state => state.remotePickerOpen)
   const resolveConflictsDialogOpen = useUIStore(
     state => state.resolveConflictsDialogOpen
@@ -437,21 +468,6 @@ export function MainWindow() {
     handleConfirmRequired
   )
 
-  // Handle restore-last-archived keybinding
-  useRestoreLastArchived()
-
-  // Archive modal state (triggered by command palette or sidebar button)
-  const [archivedModalOpen, setArchivedModalOpen] = useState(false)
-  useEffect(() => {
-    const handler = () => setArchivedModalOpen(true)
-    window.addEventListener('command:open-archived-modal', handler)
-    return () =>
-      window.removeEventListener('command:open-archived-modal', handler)
-  }, [])
-
-  // Auto-cleanup old archived items on startup
-  useArchiveCleanup()
-
   // Sync all worktrees with open PRs to backend for sweep polling
   usePrWorktreeSweep(projects)
 
@@ -483,7 +499,6 @@ export function MainWindow() {
       e.preventDefault()
       const startX = e.clientX
       const startWidth = leftSidebarSize
-      const minWidth = showAgents ? MIN_AGENTS_SIDEBAR_WIDTH : MIN_SIDEBAR_WIDTH
       let currentWidth = startWidth
 
       const handleMouseMove = (moveEvent: MouseEvent) => {
@@ -491,7 +506,7 @@ export function MainWindow() {
         const delta = moveEvent.clientX - startX
         currentWidth = Math.min(
           MAX_SIDEBAR_WIDTH,
-          Math.max(minWidth, startWidth + delta)
+          Math.max(MIN_SIDEBAR_WIDTH, startWidth + delta)
         )
         // Update DOM directly for smooth resize (no React re-render)
         if (sidebarRef.current) {
@@ -503,15 +518,13 @@ export function MainWindow() {
         document.removeEventListener('mousemove', handleMouseMove)
         document.removeEventListener('mouseup', handleMouseUp)
         // Commit final width to Zustand state
-        const ui = useUIStore.getState()
-        if (showAgents) ui.setAgentsSidebarSize(currentWidth)
-        else ui.setLeftSidebarSize(currentWidth)
+        useUIStore.getState().setLeftSidebarSize(currentWidth)
       }
 
       document.addEventListener('mousemove', handleMouseMove)
       document.addEventListener('mouseup', handleMouseUp)
     },
-    [leftSidebarSize, showAgents]
+    [leftSidebarSize]
   )
 
   const handleFileBrowserResizeStart = useCallback(
@@ -560,6 +573,7 @@ export function MainWindow() {
   )
   const shouldRenderCliLoginModal = useRetainedMount(cliLoginModalOpen)
   const shouldRenderOpenInModal = useRetainedMount(openInModalOpen)
+  const shouldRenderMcpServersModal = useRetainedMount(mcpServersModalOpen)
   const shouldRenderRemotePickerModal = useRetainedMount(remotePickerOpen)
   const shouldRenderUpdatePrDialog = useRetainedMount(updatePrModalOpen)
   const shouldRenderReviewCommentsDialog = useRetainedMount(
@@ -578,7 +592,6 @@ export function MainWindow() {
   const shouldRenderServerDialog = useRetainedMount(serverDialogOpen)
   const shouldRenderGitInitModal = useRetainedMount(gitInitModalOpen)
   const shouldRenderCloneProjectModal = useRetainedMount(cloneModalOpen)
-  const shouldRenderArchivedModal = useRetainedMount(archivedModalOpen)
   const shouldRenderCloseWorktreeDialog = useRetainedMount(closeConfirmOpen)
   const shouldRenderNewSessionModeModal = useRetainedMount(
     newSessionModeTarget !== null
@@ -665,8 +678,9 @@ export function MainWindow() {
         contentInset={
           isMobile || !isInitialized
             ? 0
-            : // 72px tab rail + sidebar + 1px resize handle
-              72 + (leftSidebarVisible ? leftSidebarSize + 1 : 0)
+            : leftSidebarVisible
+              ? leftSidebarSize + 1 // sidebar + 1px resize handle
+              : 0
         }
         style={
           !native && vvOffsetTop > 0 ? { top: `${vvOffsetTop}px` } : undefined
@@ -682,24 +696,6 @@ export function MainWindow() {
 
       {/* Main Content Area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Desktop: always-visible vertical tab rail for the left sidebar */}
-        {!isMobile && isInitialized && (
-          // Border starts below the title bar so it never crosses its buttons
-          // Collapsed: blend with the main window. Expanded: match the sidebar.
-          <div
-            className={cn(
-              'h-full shrink-0 pt-[var(--titlebar-height)]',
-              leftSidebarVisible
-                ? 'bg-sidebar dark:bg-[#0b0b0b]'
-                : 'bg-background'
-            )}
-          >
-            <SidebarTabRail
-              togglesSidebar
-              className="h-full border-r border-border/40"
-            />
-          </div>
-        )}
         <SidebarHoverPreview
           enabled={
             !isMobile &&
@@ -721,7 +717,7 @@ export function MainWindow() {
           <SidebarWidthProvider value={leftSidebarSize}>
             <div
               ref={sidebarRef}
-              className="h-full overflow-hidden bg-sidebar pt-[var(--titlebar-height)] dark:bg-[#0b0b0b]"
+              className="h-full overflow-hidden bg-sidebar pt-[var(--titlebar-height)]"
               style={{ width: leftSidebarSize }}
             >
               <Suspense fallback={null}>
@@ -738,7 +734,7 @@ export function MainWindow() {
             tabIndex={-1}
             aria-orientation="vertical"
             aria-label="Resize left sidebar"
-            className="relative h-full w-px bg-border/40"
+            className="relative h-full w-px bg-border/20"
             onMouseDown={handleResizeStart}
           >
             {/* Invisible wider hit area for easier clicking */}
@@ -800,7 +796,7 @@ export function MainWindow() {
             tabIndex={-1}
             aria-orientation="vertical"
             aria-label="Resize file browser"
-            className="relative z-20 h-full w-px shrink-0 cursor-col-resize bg-border/40"
+            className="relative z-20 h-full w-px shrink-0 cursor-col-resize bg-border/20"
             onMouseDown={handleFileBrowserResizeStart}
           >
             <div className="absolute inset-y-0 z-20 -left-1.5 -right-1.5 cursor-col-resize" />
@@ -826,6 +822,8 @@ export function MainWindow() {
 
       {/* Global UI Components (hidden until triggered) */}
       <CommandPalette />
+      {/* Global attachment/image preview (opened from chat messages) */}
+      <PreviewDialogHost />
       {/* Global file viewer/editor (tool clicks + file browser) */}
       <Suspense fallback={null}>
         <FileContentModal
@@ -890,6 +888,11 @@ export function MainWindow() {
       {shouldRenderOpenInModal && (
         <Suspense fallback={null}>
           <OpenInModal />
+        </Suspense>
+      )}
+      {shouldRenderMcpServersModal && (
+        <Suspense fallback={null}>
+          <McpServersModal />
         </Suspense>
       )}
       {shouldRenderWorkflowRunsModal && (
@@ -965,14 +968,6 @@ export function MainWindow() {
       {shouldRenderCloneProjectModal && (
         <Suspense fallback={null}>
           <CloneProjectModal />
-        </Suspense>
-      )}
-      {shouldRenderArchivedModal && (
-        <Suspense fallback={null}>
-          <ArchivedModal
-            open={archivedModalOpen}
-            onOpenChange={setArchivedModalOpen}
-          />
         </Suspense>
       )}
       {shouldRenderCloseWorktreeDialog && (

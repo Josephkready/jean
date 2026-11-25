@@ -1,5 +1,7 @@
 import { Fragment, useMemo, useState } from 'react'
-import { Wand2 } from '@/components/icons/reicon'
+import { Star, Wand2 } from '@/components/icons/reicon'
+import { cn } from '@/lib/utils'
+import { usePatchPreferences, usePreferences } from '@/services/preferences'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -11,12 +13,47 @@ import { useUIStore } from '@/store/ui-store'
 import { useChatStore } from '@/store/chat-store'
 import { copyActiveSessionInfo } from '@/lib/session-info'
 import { useIsMobile } from '@/hooks/use-mobile'
-import { cn } from '@/lib/utils'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 import {
   buildMagicColumns,
   isMagicOptionUnavailable,
   type MagicMenuOption,
+  type MagicSection,
 } from '@/components/magic/magic-options'
+
+const EMPTY_FAVORITES: string[] = []
+
+/** Moves favorited options into a leading "Favorites" section, in star order. */
+function withFavoritesFirst(
+  sections: MagicSection[],
+  favorites: string[]
+): MagicSection[] {
+  if (favorites.length === 0) return sections
+  const favoriteSet = new Set(favorites)
+  const byId = new Map(
+    sections.flatMap(section => section.options).map(o => [o.id, o] as const)
+  )
+  const favoriteOptions = favorites.flatMap(id => {
+    const option = byId.get(id as MagicMenuOption)
+    return option ? [option] : []
+  })
+  if (favoriteOptions.length === 0) return sections
+  return [
+    { header: 'Favorites', options: favoriteOptions },
+    ...sections
+      .map(section => ({
+        ...section,
+        options: section.options.filter(o => !favoriteSet.has(o.id)),
+      }))
+      .filter(section => section.options.length > 0),
+  ]
+}
 
 interface MobileToolbarMenuProps {
   isDisabled: boolean
@@ -26,7 +63,6 @@ interface MobileToolbarMenuProps {
   hasPrContexts: boolean
   hasAdvisoryContexts?: boolean
 
-  onSaveContext: () => void
   onLoadContext: () => void
   onCommit: () => void
   onCommitAndPush: () => void
@@ -47,7 +83,6 @@ export function MobileToolbarMenu({
   hasSentryContexts = false,
   hasPrContexts,
   hasAdvisoryContexts = false,
-  onSaveContext,
   onLoadContext,
   onCommit,
   onCommitAndPush,
@@ -63,6 +98,19 @@ export function MobileToolbarMenu({
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
   const magicColumns = useMemo(() => buildMagicColumns(hasOpenPr), [hasOpenPr])
+  const { data: preferences } = usePreferences()
+  const patchPreferences = usePatchPreferences()
+  const favorites = preferences?.favorite_magic_options ?? EMPTY_FAVORITES
+  const mobileSections = useMemo(
+    () => withFavoritesFirst(magicColumns.all, favorites),
+    [magicColumns, favorites]
+  )
+  const toggleFavorite = (id: MagicMenuOption) =>
+    patchPreferences.mutate({
+      favorite_magic_options: favorites.includes(id)
+        ? favorites.filter(favorite => favorite !== id)
+        : [...favorites, id],
+    })
   const availability = {
     hasOpenPr,
     hasIssueContexts,
@@ -77,7 +125,6 @@ export function MobileToolbarMenu({
   // Record over every menu option: a new shared item fails typecheck here
   // until it gets a mobile handler.
   const handlers: Record<MagicMenuOption, () => void> = {
-    'save-context': onSaveContext,
     'inject-session': onLoadContext,
     'linked-projects': () =>
       useUIStore.getState().setLinkedProjectsModalOpen(true),
@@ -123,31 +170,101 @@ export function MobileToolbarMenu({
       useUIStore.getState().setResolveConflictsDialogOpen(true),
   }
 
+  const trigger = (
+    <button
+      type="button"
+      aria-label="More actions"
+      className="flex @xl:hidden h-8 items-center gap-1 rounded-l-lg px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+      disabled={isDisabled}
+      onClick={isMobile ? () => setMenuOpen(true) : undefined}
+    >
+      <Wand2 className="h-4 w-4" />
+    </button>
+  )
+
+  if (isMobile) {
+    return (
+      <>
+        {trigger}
+        <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
+          <SheetContent
+            side="bottom"
+            className="max-h-[75svh] overflow-hidden rounded-t-xl p-0"
+            showCloseButton={false}
+          >
+            <SheetHeader className="shrink-0 border-b px-4 py-3 text-left">
+              <SheetTitle>Magic</SheetTitle>
+              <SheetDescription className="sr-only">
+                Git, pull request, release, and investigation actions.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="overflow-y-auto px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+              {mobileSections.map(section => (
+                <section key={section.header} aria-label={section.header}>
+                  <h3 className="px-3 pt-3 pb-1 text-xs text-muted-foreground">
+                    {section.header}
+                  </h3>
+                  {section.options.map(option => {
+                    const Icon = option.icon
+                    const isFavorite = favorites.includes(option.id)
+                    return (
+                      <div key={option.id} className="flex items-center">
+                        <button
+                          type="button"
+                          disabled={isMagicOptionUnavailable(
+                            option.id,
+                            availability
+                          )}
+                          className="flex min-h-12 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 text-left active:bg-accent disabled:opacity-40"
+                          onClick={() => {
+                            setMenuOpen(false)
+                            handlers[option.id]()
+                          }}
+                        >
+                          <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          <span className="truncate text-sm">
+                            {option.label}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`${isFavorite ? 'Unfavorite' : 'Favorite'} ${option.label}`}
+                          aria-pressed={isFavorite}
+                          className="flex size-12 shrink-0 items-center justify-center rounded-lg active:bg-accent"
+                          onClick={() => toggleFavorite(option.id)}
+                        >
+                          <Star
+                            className={cn(
+                              'h-4 w-4',
+                              isFavorite
+                                ? 'fill-warning text-warning'
+                                : 'text-muted-foreground/40'
+                            )}
+                          />
+                        </button>
+                      </div>
+                    )
+                  })}
+                </section>
+              ))}
+            </div>
+          </SheetContent>
+        </Sheet>
+      </>
+    )
+  }
+
   return (
     <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label="More actions"
-          className="flex @xl:hidden h-8 items-center gap-1 rounded-l-lg px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-          disabled={isDisabled}
-        >
-          <Wand2 className="h-4 w-4" />
-        </button>
-      </DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       <DropdownMenuContent
-        align={isMobile ? 'end' : 'start'}
-        className={cn(
-          'max-h-[min(80vh,640px)] overflow-y-auto',
-          isMobile ? 'w-[calc(100vw-1rem)] max-w-none grid grid-cols-2' : 'w-56'
-        )}
+        align="start"
+        className="max-h-[min(80vh,640px)] w-56 overflow-y-auto"
       >
         {magicColumns.all.map((section, sectionIndex) => (
           <Fragment key={section.header}>
-            {sectionIndex > 0 && (
-              <DropdownMenuSeparator className="col-span-2" />
-            )}
-            <div className="col-span-2 px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            {sectionIndex > 0 && <DropdownMenuSeparator />}
+            <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
               {section.header}
             </div>
             {section.options.map(option => {
@@ -160,12 +277,7 @@ export function MobileToolbarMenu({
                 >
                   <Icon className="h-4 w-4" />
                   {option.label}
-                  <span
-                    className={cn(
-                      'ml-auto text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded',
-                      isMobile && 'hidden'
-                    )}
-                  >
+                  <span className="ml-auto text-xs text-muted-foreground/70">
                     {option.key}
                   </span>
                 </DropdownMenuItem>

@@ -4,6 +4,12 @@ import { useChatStore } from '@/store/chat-store'
 import { StreamingMessage } from './StreamingMessage'
 import type { QuestionAnswer, Question } from '@/types/chat'
 
+vi.mock('@/lib/transport', async importOriginal => ({
+  ...(await importOriginal<object>()),
+  convertServerFileSrc: (serverId: string | undefined, path: string) =>
+    `${serverId ?? 'local'}:${path}`,
+}))
+
 describe('StreamingMessage', () => {
   const noopQuestionAnswer = (
     _toolCallId: string,
@@ -617,23 +623,23 @@ describe('StreamingMessage', () => {
     expect(screen.getByText('Working…')).toBeVisible()
   })
 
-  it('copies steered prompts while streaming', () => {
-    const onCopySteeredText = vi.fn()
-
+  it('loads a steered prompt image from the session server', () => {
     render(
       <StreamingMessage
         {...baseProps}
-        onCopySteeredText={onCopySteeredText}
+        sessionId="srv-1:session-1"
         contentBlocks={[
-          { type: 'text', text: 'Before steer' },
-          { type: 'user_input', text: 'copy the live steer' },
+          {
+            type: 'user_input',
+            text: 'look\n\n[Image attached: /data/pasted-images/a.png - Use the Read tool to view this image]',
+          },
         ]}
       />
     )
 
-    screen.getByRole('button', { name: 'Copy steered prompt' }).click()
-
-    expect(onCopySteeredText).toHaveBeenCalledTimes(1)
-    expect(onCopySteeredText).toHaveBeenCalledWith('copy the live steer')
+    expect(screen.getByAltText('Attached image 1')).toHaveAttribute(
+      'src',
+      'srv-1:/data/pasted-images/a.png'
+    )
   })
 })

@@ -1,9 +1,21 @@
 import { createRef } from 'react'
 import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@/test/test-utils'
+import { fireEvent, render, screen, waitFor, within } from '@/test/test-utils'
+import type * as transport from '@/lib/transport'
+import { invoke } from '@/lib/transport'
 import { CompactMessageList } from './CompactMessageList'
 import { formatLocalTime } from './time-utils'
+
+vi.mock('@/lib/transport', async importOriginal => ({
+  ...(await importOriginal<typeof transport>()),
+  invoke: vi.fn(),
+}))
+vi.mock('@/lib/clipboard', () => ({
+  copyHtmlToClipboard: vi.fn(async () => undefined),
+  copyToClipboard: vi.fn(async () => undefined),
+}))
+import { copyHtmlToClipboard } from '@/lib/clipboard'
 import type {
   ChatMessage,
   Question,
@@ -43,36 +55,67 @@ function message(
   }
 }
 
+function compactProps(
+  messages: ChatMessage[],
+  props: Partial<ComponentProps<typeof CompactMessageList>> = {}
+): ComponentProps<typeof CompactMessageList> {
+  return {
+    messages,
+    scrollContainerRef: createRef<HTMLDivElement>(),
+    totalMessages: messages.length,
+    lastPlanMessageIndex: -1,
+    sessionId: 'session-1',
+    worktreePath: '/tmp/worktree',
+    approveShortcut: 'Cmd+Enter',
+    isSending: false,
+    onPlanApproval: vi.fn(),
+    onQuestionAnswer: noopQuestionAnswer,
+    onQuestionSkip: vi.fn(),
+    onFileClick: vi.fn(),
+    onFixFinding: noopFixFinding,
+    onFixAllFindings: noopFixAllFindings,
+    isQuestionAnswered: vi.fn(() => false),
+    getSubmittedAnswers: vi.fn(() => undefined),
+    areQuestionsSkipped: vi.fn(() => false),
+    isFindingFixed: vi.fn(() => false),
+    ...props,
+  }
+}
+
 function renderCompact(
   messages: ChatMessage[],
   props: Partial<ComponentProps<typeof CompactMessageList>> = {}
 ) {
-  return render(
-    <CompactMessageList
-      messages={messages}
-      scrollContainerRef={createRef<HTMLDivElement>()}
-      totalMessages={messages.length}
-      lastPlanMessageIndex={-1}
-      sessionId="session-1"
-      worktreePath="/tmp/worktree"
-      approveShortcut="Cmd+Enter"
-      isSending={false}
-      onPlanApproval={vi.fn()}
-      onQuestionAnswer={noopQuestionAnswer}
-      onQuestionSkip={vi.fn()}
-      onFileClick={vi.fn()}
-      onFixFinding={noopFixFinding}
-      onFixAllFindings={noopFixAllFindings}
-      isQuestionAnswered={vi.fn(() => false)}
-      getSubmittedAnswers={vi.fn(() => undefined)}
-      areQuestionsSkipped={vi.fn(() => false)}
-      isFindingFixed={vi.fn(() => false)}
-      {...props}
-    />
-  )
+  return render(<CompactMessageList {...compactProps(messages, props)} />)
 }
 
 describe('CompactMessageList', () => {
+  it('pins the scroll container to its full height when a prompt is sent', () => {
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'scrollHeight', {
+      configurable: true,
+      value: 1800,
+    })
+    const scrollContainerRef = { current: container }
+    const onScrollToBottomHandled = vi.fn()
+    const first = [
+      message('user-1', 'user', 100, 'hello'),
+      message('assistant-1', 'assistant', 104, 'Hello!'),
+    ]
+    const props = {
+      scrollContainerRef,
+      shouldScrollToBottom: true,
+      onScrollToBottomHandled,
+    }
+    const { rerender } = renderCompact(first, props)
+
+    const next = [...first, message('user-2', 'user', 200, 'next prompt')]
+    rerender(<CompactMessageList {...compactProps(next, props)} />)
+
+    expect(container.scrollTop).toBe(1800)
+    expect(onScrollToBottomHandled).toHaveBeenCalledTimes(1)
+  })
+
   it('renders a single pure text assistant response once instead of as activity plus text', () => {
     renderCompact([
       message('user-1', 'user', 100, 'hello'),
@@ -180,6 +223,37 @@ describe('CompactMessageList', () => {
     expect(screen.getByText('4s').parentElement).toContainElement(receiveTime)
   })
 
+  it('shows the turn duration once after the activity row is expanded', () => {
+    const sentAt = 1_700_000_000
+    renderCompact([
+      message('user-1', 'user', sentAt, 'check status'),
+      message(
+        'assistant-1',
+        'assistant',
+        sentAt + 4,
+        'Working tree is clean.',
+        {
+          tool_calls: [
+            {
+              id: 'tool-1',
+              name: 'Bash',
+              input: { command: 'git status' },
+              output: 'clean',
+            },
+          ],
+          content_blocks: [
+            { type: 'tool_use', tool_call_id: 'tool-1' },
+            { type: 'text', text: 'Working tree is clean.' },
+          ],
+        }
+      ),
+    ])
+
+    expect(screen.getAllByText('4s')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: /1 step/ }))
+    expect(screen.getAllByText('4s')).toHaveLength(1)
+  })
+
   it('keeps a question reply receive time hidden until that message is hovered', () => {
     const sentAt = 1_700_000_000
     const receivedAt = sentAt + 4
@@ -241,11 +315,12 @@ describe('CompactMessageList', () => {
     const compactTrigger = screen.getByRole('button', { name: /Bash/ })
     fireEvent.click(compactTrigger)
 
-    const activityCard = compactTrigger.closest('.rounded-md.border')
     const cancelledMarker = screen.getByText('(cancelled)')
 
-    expect(activityCard).not.toBeNull()
-    expect(activityCard).not.toContainElement(cancelledMarker)
+    expect(compactTrigger.closest('[data-slot="collapsible"]')).not.toBeNull()
+    expect(
+      cancelledMarker.closest('[data-slot="collapsible-content"]')
+    ).toBeNull()
   })
 
   it('keeps cancelled intermediate assistant text inside the collapsed activity row', () => {
@@ -418,47 +493,24 @@ describe('CompactMessageList', () => {
     ).toBeVisible()
   })
 
-  it('shows edited files after an externally surfaced recap', () => {
-    renderCompact([
-      message('user-1', 'user', 100, 'make the change'),
-      message(
-        'assistant-1',
-        'assistant',
-        104,
-        'Done.\n\n## Recap\n\nChanged chat UI.',
-        {
-          tool_calls: [
-            {
-              id: 'tool-1',
-              name: 'FileChange',
-              input: [
-                {
-                  path: 'src/components/chat/CompactMessageList.tsx',
-                  diff: '@@ -1 +1 @@\n-old\n+new\n',
-                },
-              ],
-            },
-          ],
-          content_blocks: [
-            { type: 'tool_use', tool_call_id: 'tool-1' },
-            { type: 'text', text: 'Done.\n\n## Recap\n\nChanged chat UI.' },
-          ],
-        }
-      ),
-    ])
+  it('shows options of a question in a text-only reply as buttons', () => {
+    const onSendAnswer = vi.fn()
+    const text =
+      'Pick a name now.\n\n## Recap\n\nPick a name now.\n\nWhat do you want to do next?\nReply with a number:\n1. Suggest names\n2. Keep the name'
+    renderCompact(
+      [
+        message('user-1', 'user', 100, 'rename the app'),
+        message('assistant-1', 'assistant', 104, text, {
+          content_blocks: [{ type: 'text', text }],
+        }),
+      ],
+      { onSendAnswer }
+    )
 
-    const recapHeading = screen.getByText('Recap')
-    const editedFiles = screen.getByRole('button', { name: 'Edited 1 file' })
-
-    expect(editedFiles).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: /1 step/ }))
-    expect(
-      screen.getAllByRole('button', { name: 'Edited 1 file' })
-    ).toHaveLength(1)
-    expect(
-      recapHeading.compareDocumentPosition(editedFiles) &
-        Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /^2\.\s?Keep the name$/ })
+    )
+    expect(onSendAnswer).toHaveBeenCalledWith('2. Keep the name')
   })
 
   it('shows options of a question in the recap as buttons', () => {
@@ -516,69 +568,6 @@ describe('CompactMessageList', () => {
     expect(
       screen.queryByRole('button', { name: /^1\.\s?Grid$/ })
     ).not.toBeInTheDocument()
-  })
-
-  it('shows edited files after surfaced latest text when recap is absent', () => {
-    renderCompact([
-      message('user-1', 'user', 100, 'make the change'),
-      message('assistant-1', 'assistant', 104, 'Changed chat UI.', {
-        tool_calls: [
-          {
-            id: 'tool-1',
-            name: 'FileChange',
-            input: [
-              {
-                path: 'src/components/chat/CompactMessageList.tsx',
-                diff: '@@ -1 +1 @@\n-old\n+new\n',
-              },
-            ],
-          },
-        ],
-        content_blocks: [
-          { type: 'tool_use', tool_call_id: 'tool-1' },
-          { type: 'text', text: 'Changed chat UI.' },
-        ],
-      }),
-    ])
-
-    const latestText = screen.getAllByText('Changed chat UI.').at(-1)
-    const editedFiles = screen.getByRole('button', { name: 'Edited 1 file' })
-
-    expect(editedFiles).toBeVisible()
-    expect(latestText).toBeDefined()
-    if (!latestText) throw new Error('Expected changed chat UI text to render')
-    expect(
-      latestText.compareDocumentPosition(editedFiles) &
-        Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-  })
-
-  it('keeps edited files visible when the response is cancelled', () => {
-    renderCompact([
-      message('user-1', 'user', 100, 'make the change'),
-      message('assistant-1', 'assistant', 104, '', {
-        cancelled: true,
-        tool_calls: [
-          {
-            id: 'tool-1',
-            name: 'FileChange',
-            input: [
-              {
-                path: 'src/components/chat/CompactMessageList.tsx',
-                diff: '@@ -1 +1 @@\n-old\n+new\n',
-              },
-            ],
-          },
-        ],
-        content_blocks: [{ type: 'tool_use', tool_call_id: 'tool-1' }],
-      }),
-    ])
-
-    expect(screen.getByText('(cancelled)')).toBeVisible()
-    const editedFiles = screen.getByRole('button', { name: 'Edited 1 file' })
-    expect(editedFiles).toBeVisible()
-    fireEvent.click(editedFiles)
-    expect(screen.getByText('CompactMessageList.tsx')).toBeVisible()
   })
 
   it('summarizes fragmented PI text deltas as one meaningful line', () => {
@@ -671,6 +660,34 @@ describe('CompactMessageList', () => {
     expect(screen.queryByText(/Image attached:/)).not.toBeInTheDocument()
   })
 
+  it('gives steered prompts the copy button and turn settings of normal prompts', async () => {
+    renderCompact([
+      message('user-1', 'user', 100, 'do the work', {
+        model: 'codex/gpt-5.6',
+        execution_mode: 'yolo',
+      }),
+      message('assistant-1', 'assistant', 104, 'Done', {
+        content_blocks: [
+          { type: 'user_input', text: 'first' },
+          { type: 'user_input', text: 'second' },
+          { type: 'text', text: 'Done' },
+        ],
+      }),
+    ])
+
+    const group = screen.getByText('first').closest('.group') as HTMLElement
+    expect(within(group).getByText(/Full access/)).toBeInTheDocument()
+
+    fireEvent.click(within(group).getByRole('button', { name: 'Copy prompt' }))
+    await waitFor(() =>
+      expect(copyHtmlToClipboard).toHaveBeenCalledWith(
+        expect.stringContaining('data-jean-prompt'),
+        'first\n\nsecond',
+        'first\n\nsecond'
+      )
+    )
+  })
+
   it('keeps steered prompts in chronological order around activity', () => {
     renderCompact([
       message('user-1', 'user', 100, 'hello'),
@@ -710,41 +727,264 @@ describe('CompactMessageList', () => {
           Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
   })
+})
 
-  it('copies each steered prompt', () => {
-    const onCopyToInput = vi.fn()
+describe('CompactMessageList request_secret', () => {
+  const secretMessages = [
+    message('user-1', 'user', 100, 'join the tailnet'),
+    message('assistant-1', 'assistant', 104, '', {
+      tool_calls: [
+        {
+          id: 'tool-1',
+          name: 'mcp__jean__request_secret',
+          input: { label: 'Tailscale auth key', reason: 'Create it in admin.' },
+        },
+      ],
+      content_blocks: [{ type: 'tool_use', tool_call_id: 'tool-1' }],
+    }),
+  ]
 
+  const mockSecretCommands = (saved: unknown) =>
+    vi.mocked(invoke).mockImplementation((async (command: string) => {
+      if (command === 'secret_request_status') return saved
+      if (command === 'save_secret_request')
+        return { path: '/data/secrets/abc-24h', retention: 'day' }
+      return null
+    }) as typeof invoke)
+
+  it('saves the value with the chosen retention and sends only the path', async () => {
+    mockSecretCommands(null)
+    const onSendAnswer = vi.fn()
+    renderCompact(secretMessages, { onSendAnswer })
+
+    fireEvent.change(screen.getByLabelText('Tailscale auth key'), {
+      target: { value: 'tskey-auth-123' },
+    })
+    fireEvent.click(screen.getByRole('radio', { name: '24 hours' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save securely' }))
+
+    expect(
+      await screen.findByText(
+        'Tailscale auth key · saved, deleted after 24 hours'
+      )
+    ).toBeVisible()
+    expect(invoke).toHaveBeenCalledWith('save_secret_request', {
+      sessionId: 'session-1',
+      toolCallId: 'tool-1',
+      label: 'Tailscale auth key',
+      secret: 'tskey-auth-123',
+      retention: 'day',
+    })
+    expect(onSendAnswer).toHaveBeenCalledTimes(1)
+    const sent = onSendAnswer.mock.calls[0]?.[0] as string
+    expect(sent).toContain('/data/secrets/abc-24h')
+    expect(sent).not.toContain('tskey-auth-123')
+  })
+
+  it('keeps secrets until deleted by default', async () => {
+    mockSecretCommands(null)
+    renderCompact(secretMessages, { onSendAnswer: vi.fn() })
+    fireEvent.change(screen.getByLabelText('Tailscale auth key'), {
+      target: { value: 'tskey-auth-123' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save securely' }))
+    await screen.findByRole('button', { name: 'Delete' })
+    expect(invoke).toHaveBeenCalledWith(
+      'save_secret_request',
+      expect.objectContaining({ retention: 'forever' })
+    )
+  })
+
+  it('saves every line of a multi-line secret', async () => {
+    mockSecretCommands(null)
+    const envMessages = [
+      message('user-1', 'user', 100, 'add env'),
+      message('assistant-1', 'assistant', 104, '', {
+        tool_calls: [
+          {
+            id: 'tool-1',
+            name: 'mcp__jean__request_secret',
+            input: {
+              label: 'App .env',
+              reason: 'Your .env.local',
+              example: 'DATABASE_URL=postgresql://...\nRESEND_API_KEY=re_...',
+            },
+          },
+        ],
+        content_blocks: [{ type: 'tool_use', tool_call_id: 'tool-1' }],
+      }),
+    ]
+    renderCompact(envMessages, { onSendAnswer: vi.fn() })
+    const field = screen.getByLabelText('App .env')
+    expect(field.tagName).toBe('TEXTAREA')
+    fireEvent.change(field, { target: { value: 'A=1\nB=2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save securely' }))
+    await screen.findByRole('button', { name: 'Delete' })
+    expect(invoke).toHaveBeenCalledWith(
+      'save_secret_request',
+      expect.objectContaining({ secret: 'A=1\nB=2' })
+    )
+  })
+
+  it('deletes a saved secret of an answered request', async () => {
+    mockSecretCommands({ path: '/data/secrets/abc', retention: 'forever' })
+    renderCompact([...secretMessages, message('user-2', 'user', 110, 'ok')])
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+
+    expect(
+      await screen.findByText('Tailscale auth key · not saved')
+    ).toBeVisible()
+    expect(invoke).toHaveBeenCalledWith('forget_secret_request', {
+      sessionId: 'session-1',
+      toolCallId: 'tool-1',
+    })
+  })
+
+  it('shows and hides the typed value', () => {
+    mockSecretCommands(null)
+    renderCompact(secretMessages, { onSendAnswer: vi.fn() })
+    const field = screen.getByLabelText('Tailscale auth key')
+    const mask = '[-webkit-text-security:disc]'
+    expect(field).toHaveClass(mask)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show the value' }))
+    expect(field).not.toHaveClass(mask)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the value' }))
+    expect(field).toHaveClass(mask)
+  })
+
+  it('keeps the other cards open and sends one answer for all of them', async () => {
+    vi.mocked(invoke).mockImplementation((async (
+      command: string,
+      args?: { toolCallId?: string }
+    ) => {
+      if (command === 'save_secret_request')
+        return { path: `/data/secrets/${args?.toolCallId}`, retention: 'day' }
+      return null
+    }) as typeof invoke)
+    const request = (id: string, label: string) => ({
+      id,
+      name: 'mcp__jean__request_secret',
+      input: { label, reason: 'Needed.' },
+    })
+    const onSendAnswer = vi.fn()
     renderCompact(
       [
-        message('user-1', 'user', 100, 'hello'),
-        message('assistant-1', 'assistant', 104, 'All received', {
+        message('user-1', 'user', 100, 'set up keys'),
+        message('assistant-1', 'assistant', 104, '', {
+          tool_calls: [request('tool-a', 'Key A'), request('tool-b', 'Key B')],
           content_blocks: [
-            { type: 'user_input', text: 'first queued prompt' },
-            { type: 'user_input', text: 'second queued prompt' },
+            { type: 'tool_use', tool_call_id: 'tool-a' },
+            { type: 'tool_use', tool_call_id: 'tool-b' },
           ],
         }),
       ],
-      { onCopyToInput }
+      { onSendAnswer }
     )
+    const saveButtons = () =>
+      screen.getAllByRole('button', { name: 'Save securely' })
 
-    const copyButtons = screen.getAllByRole('button', {
-      name: 'Copy steered prompt',
+    fireEvent.change(screen.getByLabelText('Key A'), {
+      target: { value: 'value-a' },
+    })
+    fireEvent.click(saveButtons()[0] as HTMLElement)
+    await screen.findByText('Key A · saved, deleted after 24 hours')
+
+    expect(onSendAnswer).not.toHaveBeenCalled()
+    expect(saveButtons()).toHaveLength(1)
+    fireEvent.change(screen.getByLabelText('Key B'), {
+      target: { value: 'value-b' },
+    })
+    fireEvent.click(saveButtons()[0] as HTMLElement)
+    await screen.findByText('Key B · saved, deleted after 24 hours')
+
+    expect(onSendAnswer).toHaveBeenCalledTimes(1)
+    const sent = onSendAnswer.mock.calls[0]?.[0] as string
+    expect(sent).toContain('/data/secrets/tool-a')
+    expect(sent).toContain('/data/secrets/tool-b')
+    expect(sent).not.toContain('value-')
+  })
+
+  it('closes the card once a user message follows it', async () => {
+    mockSecretCommands(null)
+    renderCompact([
+      ...secretMessages,
+      message('user-2', 'user', 110, 'skip that'),
+    ])
+    expect(
+      await screen.findByText('Tailscale auth key · not saved')
+    ).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Save securely' })
+    ).not.toBeInTheDocument()
+  })
+})
+
+describe('CompactMessageList list_secrets', () => {
+  const entry = (id: string, label: string, ownerId: string) => ({
+    id: id.repeat(32),
+    label,
+    sessionId: 's1',
+    toolCallId: 't1',
+    ownerId,
+    ownerName: ownerId === 'agent:a1' ? 'Ops' : 'jean',
+    retention: 'forever',
+    savedAt: 1_700_000_000,
+  })
+
+  it('lists this owner by default, all owners on demand, and deletes', async () => {
+    let secrets = [
+      entry('a', 'Tailscale auth key', 'project:jean'),
+      entry('b', 'Cloudflare token', 'project:jean'),
+      entry('c', 'Hetzner token', 'agent:a1'),
+    ]
+    vi.mocked(invoke).mockImplementation((async (
+      command: string,
+      args?: Record<string, unknown>
+    ) => {
+      if (command === 'list_secrets')
+        return args?.allOwners
+          ? secrets
+          : secrets.filter(item => item.ownerId === 'project:jean')
+      if (command === 'delete_secret') {
+        secrets = secrets.filter(item => item.id !== args?.id)
+      }
+      return null
+    }) as typeof invoke)
+
+    renderCompact([
+      message('user-1', 'user', 100, 'show my secrets'),
+      message('assistant-1', 'assistant', 104, '', {
+        tool_calls: [
+          { id: 'tool-1', name: 'mcp__jean__list_secrets', input: {} },
+        ],
+        content_blocks: [{ type: 'tool_use', tool_call_id: 'tool-1' }],
+      }),
+    ])
+
+    const card = await screen.findByRole('region', { name: 'Saved secrets' })
+    expect(await within(card).findByText('Tailscale auth key')).toBeVisible()
+    expect(within(card).queryByText('Hetzner token')).toBeNull()
+    expect(invoke).toHaveBeenCalledWith('list_secrets', {
+      sessionId: 'session-1',
+      allOwners: false,
     })
 
-    expect(copyButtons).toHaveLength(2)
+    fireEvent.click(within(card).getByRole('radio', { name: 'All' }))
+    expect(await within(card).findByText('Hetzner token')).toBeVisible()
+    expect(within(card).getByText(/^Agent Ops · Saved/)).toBeVisible()
 
-    const secondCopyButton = copyButtons[1]
-    if (!secondCopyButton) {
-      throw new Error('Expected second copy button')
-    }
-    fireEvent.click(secondCopyButton)
-
-    expect(onCopyToInput).toHaveBeenCalledTimes(1)
-    expect(onCopyToInput).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: 'user',
-        content: 'second queued prompt',
-      })
+    fireEvent.click(
+      within(card).getByRole('button', { name: 'Delete Cloudflare token' })
     )
+    await waitFor(() =>
+      expect(within(card).queryByText('Cloudflare token')).toBeNull()
+    )
+    expect(invoke).toHaveBeenCalledWith('delete_secret', {
+      sessionId: 'session-1',
+      id: 'b'.repeat(32),
+    })
   })
 })

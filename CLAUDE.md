@@ -230,6 +230,10 @@ accumulating `PiResponse`. Both the batch parser (`parse_pi_json_stream_inner`)
 and the live streaming parser (`parse_pi_stream`) call it per line — never
 re-parse the whole accumulated buffer (avoids O(n²) on long sessions).
 
+#### OpenCode 1.x and 2.x
+
+**Read this before changing OpenCode code.** OpenCode 2.x (2.2.0+) has a different HTTP API, auth, event stream and MCP config shape than 1.x. 1.x stays in `jean-core/src/chat/opencode.rs`; 2.x turns are in `jean-core/src/chat/opencode_v2/`. Branch on `OpenCodeServer.api` from `opencode_server::acquire_server`; never add 2.x paths to the 1.x code. Details, and the steps to support a new 2.x minor: `docs/developer/architecture-guide.md` → "OpenCode 1.x and 2.x".
+
 #### Claude CLI Mid-Turn Steering (Detached Host)
 
 **Read this before changing Claude run spawning or `tail_claude_output`.**
@@ -238,7 +242,7 @@ When `claude_auto_steer_enabled` is on (Unix only, CLI must list `--replay-user-
 
 - The host drops the replayed initial prompt and rewrites replayed steers (`isReplay: true` user lines) as `steered_user_message`. Never parse replayed user lines elsewhere.
 - The host closes stdin on `result` only when no steer is pending, then writes `jean_claude_host_exit`. The tailer treats runs with `jean_claude_host_start` as host-backed and ends at the exit marker, not the first `result`.
-- `chat:steered` is emitted by the tailer when the CLI consumes the steer, not when the user sends it.
+- `steer_claude_turn` emits `chat:steered` as soon as the host accepts the steer (the CLI can take seconds to consume it). It marks the text as announced, so the tailer skips its own `chat:steered` on consumption. After a Jean restart nothing is marked, so recovered runs emit from the tailer.
 - Details and limitations: `docs/developer/architecture-guide.md` → "Claude CLI mid-turn steering".
 
 #### Claude CLI JSON Schema Pattern
@@ -282,6 +286,12 @@ When `claude_auto_steer_enabled` is on (Unix only, CLI must list `--replay-user-
   - Schema constant: `PR_CONTENT_SCHEMA` in `src-tauri/src/projects/commands.rs`
   - Tauri command: `create_pr_with_ai_content` - creates PR with AI-generated title/body
 
+#### Auto Naming and Codex Auth Serializations
+
+- **Codex auth last_refresh format**: Official Codex CLI (`0.163.0`) deserializes `auth.json`'s `last_refresh` using `chrono::DateTime<Utc>` (RFC 3339 string). Writing numeric Unix timestamps breaks Codex CLI with `input contains invalid characters at line 8 column 30`. Always write RFC 3339 strings and normalize legacy numeric timestamps on load.
+- **Naming schema constrained decoding**: When generating names via constrained decoding backends (Codex, Antigravity, Muse, Grok), the JSON schema required fields must strictly match what is asked for (`NAMING_SCHEMA_SESSION_ONLY`, `NAMING_SCHEMA_BRANCH_ONLY`, or `NAMING_SCHEMA_BOTH`). Requiring unrequested fields causes constrained decoding generation to fail.
+- **Codex ChatGPT account one-shot model compatibility**: ChatGPT accounts do not support API-only models like `gpt-6.1-sol`. One-shot calls fall back to `gpt-6-luna` when encountering ChatGPT account model restrictions.
+
 #### Background Operations with Toast Notifications
 
 **Pattern:** For operations that run in the background (not in chat), use toast notifications instead of inline UI state indicators.
@@ -317,7 +327,6 @@ const [isLoading, setIsLoading] = useState(false)
 
 **Current background operations using this pattern:**
 
-- `handleSaveContext` in `ChatWindow.tsx` - saves context with AI summarization
 - `handleOpenPr` in `ChatWindow.tsx` - creates PR with AI-generated title/body
 - `handleCommit` in `ChatWindow.tsx` - creates commit with AI-generated message (uses `create_commit_with_ai` command with JSON schema)
 - `handleReview` in `ChatWindow.tsx` - runs AI code review, stores results in Zustand/UI state, shows in ReviewResultsPanel (uses `run_review_with_ai` command with JSON schema)
@@ -381,12 +390,11 @@ The helpers are defined in `jean-core/src/platform/process.rs` and re-exported v
 **Shared Hooks** (in `src/components/chat/hooks/`):
 
 - `useCanvasKeyboardNav.ts` - Arrow key navigation (up/down), Enter selection
-- `useCanvasShortcutEvents.ts` - Event handlers for `open-plan`, `open-recap`, `approve-plan`, etc.
+- `useCanvasShortcutEvents.ts` - Event handlers for `open-recap`, `approve-plan`, etc.
 - `useCanvasStoreState.ts` - Subscribes to chat store state needed for `SessionCardData`
 
 **Shared Components**:
 
-- `SessionListRow.tsx` - Compact row component for list view
 - `session-card-utils.tsx` - `computeSessionCardData()`, `SessionCardData`, and `SessionCardProps` types
 
 #### Feature Parity: Native, Web Access, and Mobile
@@ -423,7 +431,7 @@ Images pasted or dropped into chat are processed before saving (`process_image()
 
 Three files need updating when adding a new model option:
 
-1. **`src/types/preferences.ts`** — Add to `ClaudeModel` type union and `modelOptions` array (full labels like "Claude Fable 5.1" or "Claude Sonnet 4.6"). Current first-party Claude Code model IDs use API-style names such as `claude-fable-5-1`, `claude-opus-4-8[1m]`, and `claude-sonnet-4-6[1m]`; legacy/provider aliases may still use `opus`, `sonnet`, or `haiku`.
+1. **`src/types/preferences.ts`** — Add to `ClaudeModel` type union and `modelOptions` array (full labels like "Claude Fable 5.2" or "Claude Sonnet 4.6"). Current first-party Claude Code model IDs use API-style names such as `claude-fable-5-2`, `claude-opus-4-8[1m]`, and `claude-sonnet-4-6[1m]`; legacy/provider aliases may still use `opus`, `sonnet`, or `haiku`.
 2. **`src/store/chat-store.ts`** — Add to duplicated `ClaudeModel` type union (line ~27)
 3. **`src/components/chat/ChatToolbar.tsx`** — Add to `MODEL_OPTIONS` array (short labels like "Sonnet 4.6")
 
@@ -580,3 +588,7 @@ crate::background_tasks::commands::my_command(state, arg)?;
 - [ ] Register in `lib.rs` `generate_handler![]`
 - [ ] Add match arm in `dispatch.rs` `dispatch_command()`
 - [ ] Add `emit_cache_invalidation()` if the command mutates data that other clients should refresh
+
+#### Vitest Partial Module Mocks
+
+`src/lib/ssh-tunnel.ts` registers `setSshProfileLifecycle(...)` at module evaluation time, so tests that mock `@/lib/remote-connections` while transitively importing `ssh-tunnel.ts` (for example via `@/services/projects`) must preserve exports with `importOriginal` (or also mock `@/lib/ssh-tunnel`). Also keep heavy module imports at top level rather than `await import(...)` inside `it(...)` so cold transforms do not eat into the 5s per-test timeout.

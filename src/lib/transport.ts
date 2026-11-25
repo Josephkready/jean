@@ -20,6 +20,8 @@ import {
   getRemoteConnections,
 } from './remote-connections'
 import { getSshTransportEndpoint } from './ssh-tunnel-endpoint'
+import type { ServerId } from '@/types/server-resource'
+import type { RunState } from '@/types/chat'
 import {
   prepareRemoteEditorOpenArgs,
   prepareRemoteTerminalOpenArgs,
@@ -44,11 +46,37 @@ function getWebBackendBaseUrl(): string {
   return getActiveRemoteConnection()?.url ?? window.location.origin
 }
 
+/**
+ * Where older versions kept the web access token. Read once to migrate the
+ * browser to a session cookie, then deleted. Never written.
+ */
+const LEGACY_WEB_TOKEN_KEY = 'jean-http-token'
+
+/** Remove the access token from browser storage and from the page URL. */
+function forgetBrowserWebToken(): void {
+  localStorage.removeItem(LEGACY_WEB_TOKEN_KEY)
+  const url = new URL(window.location.href)
+  if (!url.searchParams.has('token')) return
+  url.searchParams.delete('token')
+  window.history.replaceState({}, '', url.toString())
+}
+
+/**
+ * Sign this browser in: load the page with `?token=` so the normal connect
+ * flow exchanges it for a session cookie, reports a refused token, and
+ * removes the token from the URL.
+ */
+export function signInToWebAccess(token: string): void {
+  const url = new URL(window.location.href)
+  url.searchParams.set('token', token)
+  window.location.replace(url.toString())
+}
+
 function getWebBackendToken(): string {
   const remote = getActiveRemoteConnection()
   if (remote) return remote.token
   const urlToken = new URLSearchParams(window.location.search).get('token')
-  return urlToken || localStorage.getItem('jean-http-token') || ''
+  return urlToken || localStorage.getItem(LEGACY_WEB_TOKEN_KEY) || ''
 }
 
 function backendUrl(path: string): string {
@@ -64,6 +92,65 @@ function fetchBackend(url: string): Promise<Response> {
   return fetch(url, { signal: controller.signal }).finally(() =>
     clearTimeout(timeout)
   )
+}
+
+const REACHABLE_PROBE_TIMEOUT = 5_000
+const REACHABLE_RETRY_MAX = 5_000
+let reachablePromise: Promise<void> | null = null
+
+/** Resolve once the backend answers HTTP. A page reload while the network
+ *  is switching (Wi-Fi to cellular) shows the browser's offline error page,
+ *  and no Jean code runs there to recover. Wait for the server first. */
+export function waitUntilBackendReachable(): Promise<void> {
+  reachablePromise ??= probeUntilReachable().finally(() => {
+    reachablePromise = null
+  })
+  return reachablePromise
+}
+
+async function probeUntilReachable(): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    if (navigator.onLine !== false) {
+      const controller = new AbortController()
+      const timeout = setTimeout(
+        () => controller.abort(),
+        REACHABLE_PROBE_TIMEOUT
+      )
+      try {
+        const res = await fetch(backendUrl('healthz'), {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        if (res.ok) return
+      } catch {
+        // Network still switching; retry below.
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+    await waitForRetryOrWake(Math.min(500 * 2 ** attempt, REACHABLE_RETRY_MAX))
+  }
+}
+
+/** Sleep, but retry at once when the network or page comes back. */
+function waitForRetryOrWake(ms: number): Promise<void> {
+  return new Promise(resolve => {
+    const connection = getNetworkInformation()
+    const done = () => {
+      clearTimeout(timer)
+      window.removeEventListener('online', done)
+      document.removeEventListener('visibilitychange', onVisible)
+      connection?.removeEventListener('change', done)
+      resolve()
+    }
+    const onVisible = () => {
+      if (!document.hidden) done()
+    }
+    const timer = setTimeout(done, ms)
+    window.addEventListener('online', done)
+    document.addEventListener('visibilitychange', onVisible)
+    connection?.addEventListener('change', done)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +175,7 @@ export function setAppDataDir(dir: string): void {
  *
  * In browser mode, converts to /api/files/ URLs served by the HTTP server.
  */
-export function convertFileSrc(filePath: string, protocol = 'asset'): string {
+function convertFileSrc(filePath: string, protocol = 'asset'): string {
   if (!usesWebSocketBackend()) {
     // Use Tauri's native implementation which correctly percent-encodes paths
     // on all platforms (JS encodeURIComponent misses dots/hyphens/underscores
@@ -129,13 +216,8 @@ export function convertFileSrc(filePath: string, protocol = 'asset'): string {
   return filePath
 }
 
-/**
- * Convert an absolute project/worktree file path to a browser-loadable URL.
- * Native mode can use Tauri's asset protocol directly; browser mode uses the
- * authenticated project-file endpoint, which validates the path against known
- * project/worktree roots before serving it.
- */
-export function convertProjectFileSrc(filePath: string): string {
+/** Project-file URL on the active transport. */
+function activeProjectFileSrc(filePath: string): string {
   if (!usesWebSocketBackend()) {
     return convertFileSrc(filePath)
   }
@@ -164,12 +246,17 @@ function remoteHttpEndpoint(
   return { url: connection.url, token: connection.token }
 }
 
-/** Build an authenticated file URL for a project owned by a specific server. */
-export function convertServerProjectFileSrc(
-  serverId: string | undefined,
+/**
+ * Browser-loadable URL for an absolute project/worktree file. The owner is
+ * required: `undefined` deliberately means the active transport. Remote
+ * servers serve it through the authenticated project-file endpoint, which
+ * validates the path against known project/worktree roots.
+ */
+export function convertProjectFileSrc(
+  serverId: ServerId | undefined,
   filePath: string
 ): string {
-  if (!serverId || serverId === 'local') return convertProjectFileSrc(filePath)
+  if (!serverId || serverId === 'local') return activeProjectFileSrc(filePath)
 
   const connection = getRemoteConnections().find(item => item.id === serverId)
   const endpoint = remoteHttpEndpoint(connection)
@@ -181,9 +268,12 @@ export function convertServerProjectFileSrc(
   return `${base}/api/project-files/${encodeURIComponent(filePath)}${token}`
 }
 
-/** Build an authenticated app-data file URL for a specific remote server. */
+/**
+ * Browser-loadable URL for an app-data file (pasted images, avatars). The
+ * owner is required: `undefined` deliberately means the active transport.
+ */
 export function convertServerFileSrc(
-  serverId: string | undefined,
+  serverId: ServerId | undefined,
   filePath: string
 ): string {
   if (!serverId || serverId === 'local') return convertFileSrc(filePath)
@@ -324,9 +414,17 @@ const LOCAL_SHELL_COMMANDS = new Set([
 /**
  * Call a backend command. Drop-in replacement for Tauri's invoke().
  */
-export async function invoke<T>(
+export function invoke<T>(
   command: string,
   args?: Record<string, unknown>
+): Promise<T> {
+  return invokeCommand<T>(command, args, false)
+}
+
+async function invokeCommand<T>(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  ownerDeclared: boolean
 ): Promise<T> {
   // E2E mock transport — route to in-memory handlers
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -339,9 +437,25 @@ export async function invoke<T>(
   }
 
   if (isNativeApp() && args) {
-    const { resolveServerCommand, decorateServerResult } =
+    const { routeServerCommand, decorateServerResult } =
       await import('./server-command-routing')
-    const routed = resolveServerCommand(args)
+    const routes = routeServerCommand(command, args, ownerDeclared)
+    if (routes.length > 1) {
+      const results = await Promise.all(
+        routes.map(route =>
+          route.serverId
+            ? invokeForServer(route.serverId, command, route.args)
+            : invokeCommand(command, route.args, true)
+        )
+      )
+      // List results from each server merge into one list; mutations return void.
+      return (results.every(Array.isArray) ? results.flat() : undefined) as T
+    }
+    const [route] = routes
+    const routed =
+      route?.serverId && route.args
+        ? { serverId: route.serverId, args: route.args }
+        : null
     if (routed) {
       // Path ownership can route local worktree actions before the normal
       // desktop-only branch below. Keep local shell actions on their native
@@ -474,7 +588,7 @@ export function invokeForOptionalServer<T>(
 ): Promise<T> {
   return serverId
     ? invokeForServer<T>(serverId, command, args)
-    : invoke<T>(command, args)
+    : invokeCommand<T>(command, args, true)
 }
 
 /** Invoke a server command when no resource id can carry its ownership. */
@@ -500,9 +614,17 @@ export async function invokeForServer<T>(
     }
   }
 
-  const { invokeOnServer } = await import('./server-connections')
-  const { stripServerScope } = await import('./server-command-routing')
+  const [{ invokeOnServer }, { stripServerScope }] = await Promise.all([
+    import('./server-connections'),
+    import('./server-command-routing'),
+  ])
   const serverArgs = stripServerScope(serverId, args)
+  // The local core dispatcher rejects desktop-only commands. Explicitly local
+  // shell actions (editor, Finder, terminal opens) use their native handlers.
+  if (serverId === 'local' && DESKTOP_ONLY_COMMANDS.has(command)) {
+    const { invoke: tauriInvoke } = await import('@tauri-apps/api/core')
+    return tauriInvoke<T>(command, serverArgs)
+  }
   let value: T
   try {
     value = await invokeOnServer<T>(serverId, command, serverArgs)
@@ -515,7 +637,7 @@ export async function invokeForServer<T>(
     ) {
       throw error
     }
-    value = await invoke<T>(command, args)
+    value = await invokeCommand<T>(command, args, true)
   }
   if (serverId === 'local') return value
   const { decorateServerResult } = await import('./server-command-routing')
@@ -599,7 +721,7 @@ export interface InitialData {
   worktreesByProject?: Record<string, unknown[]>
   sessionsByWorktree?: Record<string, unknown> // worktreeId -> WorktreeSessions
   activeSessions?: Record<string, unknown> // sessionId -> Session (with messages)
-  runningSessions?: string[] // sessionIds with active CLI processes
+  runStates?: RunState[] // versioned run state of every live session
   replayEvents?: BootstrapEvent[]
   preferences?: unknown
   uiState?: unknown
@@ -915,24 +1037,16 @@ export class WsTransport {
       return
 
     const remote = this.config ? null : getActiveRemoteConnection()
-    // Read token from URL query param or localStorage
+    // Browsers sign in once with a `?token=` link (or a token saved by an
+    // older version) and then use the HttpOnly session cookie that
+    // /api/auth sets. Remote connections keep sending their token.
     const urlToken = new URLSearchParams(window.location.search).get('token')
     const token = this.config
       ? this.config.getToken()
       : remote?.token ||
         urlToken ||
-        localStorage.getItem('jean-http-token') ||
+        localStorage.getItem(LEGACY_WEB_TOKEN_KEY) ||
         ''
-
-    // Persist token from URL to localStorage for future page loads
-    if (!remote && urlToken) {
-      localStorage.setItem('jean-http-token', urlToken)
-
-      // Remove token from URL for security (prevent history/bookmark exposure)
-      const url = new URL(window.location.href)
-      url.searchParams.delete('token')
-      window.history.replaceState({}, '', url.toString())
-    }
 
     this._connecting = true
 
@@ -976,11 +1090,10 @@ export class WsTransport {
 
     try {
       const res = await this.fetchBackend(authUrl)
+      // The server answered: the token is now either in the session cookie or
+      // refused. Drop it from browser storage and the URL either way.
+      if (!remote) forgetBrowserWebToken()
       if (!res.ok) {
-        // Invalid token — clear it and wait for the user to provide another.
-        if (!remote) {
-          localStorage.removeItem('jean-http-token')
-        }
         this.setAuthError(
           token
             ? "That access token was refused. Check the token in Jean's Web Access settings."
@@ -1692,8 +1805,14 @@ export function useWsAuthReason(): WsAuthReason | null {
  * screen. Only affects this device — the server keeps running and other
  * browsers stay signed in.
  */
-export function signOutOfWebAccess(): void {
-  localStorage.removeItem('jean-http-token')
+export async function signOutOfWebAccess(): Promise<void> {
+  try {
+    await fetch(backendUrl('api/logout'), { method: 'POST' })
+  } catch {
+    // Offline: the cookie stays until it expires, but this device still
+    // returns to the sign-in screen below.
+  }
+  localStorage.removeItem(LEGACY_WEB_TOKEN_KEY)
   // Reload on a bare origin. A bookmarked `?token=...` takes priority over
   // localStorage on boot, so keeping the current URL would sign us straight
   // back in and make the button look broken.

@@ -75,7 +75,6 @@ function renderChatToolbar(props: Partial<ChatToolbarProps> = {}) {
     prNumber: undefined,
     displayStatus: undefined,
     checkStatus: undefined,
-    mergeableStatus: undefined,
     activeWorktreePath: undefined,
     worktreeId: null,
     activeSessionId: null,
@@ -89,7 +88,6 @@ function renderChatToolbar(props: Partial<ChatToolbarProps> = {}) {
     loadedSentryContexts: [],
     attachedSavedContexts: [],
     onOpenMagicModal: vi.fn(),
-    onSaveContext: vi.fn(),
     onLoadContext: vi.fn(),
     onCommit: vi.fn(),
     onCommitAndPush: vi.fn(),
@@ -97,7 +95,6 @@ function renderChatToolbar(props: Partial<ChatToolbarProps> = {}) {
     onReview: vi.fn(),
     onMerge: vi.fn(),
     onMergePr: vi.fn(),
-    onResolvePrConflicts: vi.fn(),
     onResolveConflicts: vi.fn(),
     hasOpenPr: false,
     onSetDiffRequest: vi.fn(),
@@ -137,7 +134,7 @@ describe('ChatToolbar pending questions', () => {
     await user.click(screen.getByRole('button', { name: /more actions/i }))
 
     expect(screen.queryByText('Magic')).not.toBeInTheDocument()
-    expect(screen.getByText('Save Context')).toBeInTheDocument()
+    expect(screen.getByText('Inject Context')).toBeInTheDocument()
     expect(onOpenMagicModal).not.toHaveBeenCalled()
 
     await user.keyboard('{Escape}')
@@ -194,5 +191,19 @@ describe('ChatToolbar zen mode', () => {
       window.dispatchEvent(new CustomEvent('open-thinking-dropdown'))
     })
     expect(await screen.findByRole('menu')).toBeInTheDocument()
+  })
+})
+
+describe('ChatToolbar PR link', () => {
+  const pr = { prUrl: 'https://github.com/o/r/pull/42', prNumber: 42 }
+
+  it('links the PR in the full-page chat, which has no session header', () => {
+    renderChatToolbar(pr)
+    expect(screen.getByText('#42')).toBeInTheDocument()
+  })
+
+  it('leaves the PR link to the SessionChatModal header', () => {
+    renderChatToolbar({ ...pr, isModal: true })
+    expect(screen.queryByText('#42')).toBeNull()
   })
 })

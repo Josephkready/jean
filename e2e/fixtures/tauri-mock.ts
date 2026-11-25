@@ -4,7 +4,7 @@
  */
 
 import { test as base, expect, type Page } from '@playwright/test'
-import { defaultResponses } from './invoke-handlers'
+import { defaultResponses, sessionFixtures } from './invoke-handlers'
 
 interface TauriMockFixtures {
   /** Page with Tauri mocks injected. Navigates to '/' automatically. */
@@ -29,11 +29,16 @@ export const test = base.extend<TauriMockFixtures>({
       ({
         responseMap,
         overrideKeys,
+        fixtures,
       }: {
         responseMap: Record<string, unknown>
         overrideKeys: string[]
+        fixtures: typeof sessionFixtures
       }) => {
         const overrideSet = new Set(overrideKeys)
+        // Opt-in seed data, e.g. `/?fixture=delegation`
+        const fixture =
+          fixtures[new URLSearchParams(location.search).get('fixture') ?? '']
 
         // In-memory session store for stateful handlers
         const sessionStore: Record<
@@ -54,11 +59,14 @@ export const test = base.extend<TauriMockFixtures>({
             const seededWorktree = worktreeStore.find(
               worktree => worktree.id === worktreeId
             )
-            const seededSessions = Array.isArray(seededWorktree?.sessions)
-              ? structuredClone(
-                  seededWorktree.sessions as Record<string, unknown>[]
-                )
-              : []
+            const seededSessions =
+              fixture?.worktreeId === worktreeId
+                ? structuredClone(fixture.sessions)
+                : Array.isArray(seededWorktree?.sessions)
+                  ? structuredClone(
+                      seededWorktree.sessions as Record<string, unknown>[]
+                    )
+                  : []
             sessionStore[worktreeId] = {
               sessions: seededSessions,
               active_session_id:
@@ -170,6 +178,31 @@ export const test = base.extend<TauriMockFixtures>({
                   messages: [],
                 }
           },
+          get_recent_worktrees: () => {
+            // Same as an unmocked command without a fixture
+            if (!fixture) return null
+            const worktree = worktreeStore.find(
+              item => item.id === fixture.worktreeId
+            )
+            const projects = Array.isArray(responseMap.list_projects)
+              ? (responseMap.list_projects as Record<string, unknown>[])
+              : []
+            const project = projects.find(
+              item => item.id === worktree?.project_id
+            )
+            const items = getWorktreeStore(fixture.worktreeId).sessions.map(
+              session => ({
+                projectId: project?.id,
+                projectName: project?.name,
+                worktree,
+                session,
+                lastActivityAt: session.updated_at,
+                added: 0,
+                removed: 0,
+              })
+            )
+            return { items, total: items.length, failedWorktreeIds: [] }
+          },
           send_chat_message: args => {
             // Return a mock assistant ChatMessage
             // Actual streaming is handled via emitEvent
@@ -218,7 +251,7 @@ export const test = base.extend<TauriMockFixtures>({
           eventEmitter: new EventTarget(),
         }
       },
-      { responseMap: responses, overrideKeys }
+      { responseMap: responses, overrideKeys, fixtures: sessionFixtures }
     )
 
     await page.goto('/')
@@ -252,15 +285,19 @@ export async function activateWorktree(
   worktreeName: string
 ): Promise<void> {
   // Ensure sidebar is visible
-  const projectsHeader = page.getByText('PROJECTS')
+  const projectsHeader = page.getByRole('tab', { name: 'Workspace' })
   if (!(await projectsHeader.isVisible().catch(() => false))) {
-    await page.keyboard.press('Meta+b')
+    await page.keyboard.press('ControlOrMeta+b')
     await page.waitForTimeout(500)
   }
   await expect(projectsHeader).toBeVisible({ timeout: 3000 })
 
-  // Click the worktree
-  await page.getByText(worktreeName).click()
+  // Click the worktree name in the sidebar row (the canvas lists it too).
+  // The row's centre is its expand toggle, which only lists the sessions.
+  await page
+    .getByRole('button', { name: `${worktreeName} Expand sessions` })
+    .getByText(worktreeName, { exact: true })
+    .click()
   await page.waitForTimeout(1000)
 
   // Wait for chat view (dashboard empty state should be gone)

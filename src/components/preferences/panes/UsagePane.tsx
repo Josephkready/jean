@@ -2,6 +2,7 @@ import React, { useCallback } from 'react'
 import { useIsFetching, useQueryClient } from '@tanstack/react-query'
 import { Loader2, RefreshCw } from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import {
   Tooltip,
   TooltipContent,
@@ -29,6 +30,7 @@ import {
   useGrokCliStatus,
   useGrokUsage,
 } from '@/services/grok-cli'
+import type { CodexUsageSnapshot } from '@/types/codex-cli'
 import { useNow } from '@/hooks/useNow'
 import {
   formatCompactDuration,
@@ -41,9 +43,10 @@ import {
   UsageWindows,
   type UsageWindowSpec,
 } from '@/components/usage/usage-windows'
+import { TokenCostCard } from '@/components/usage/token-cost-card'
 import { cn } from '@/lib/utils'
 
-/** One card per backend: icon, name, plan badge, then usage windows. */
+/** One section per backend: icon, name, plan badge, then usage windows. */
 function UsageCard({
   title,
   subtitle,
@@ -62,7 +65,7 @@ function UsageCard({
 }) {
   return (
     <section id={anchorId} className="space-y-3">
-      <div className="flex items-center justify-between gap-2 px-1 sm:px-2">
+      <div className="flex items-center justify-between gap-2">
         <h3 className="flex min-w-0 items-center gap-2 text-sm font-medium text-foreground">
           <Icon className="size-4 shrink-0" />
           <span className="shrink-0">{title}</span>
@@ -73,14 +76,12 @@ function UsageCard({
           ) : null}
         </h3>
         {plan ? (
-          <span className="truncate rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+          <Badge variant="subtle" className="truncate">
             {plan} plan
-          </span>
+          </Badge>
         ) : null}
       </div>
-      <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-4 sm:p-5">
-        {children}
-      </div>
+      <div className="space-y-3">{children}</div>
     </section>
   )
 }
@@ -271,6 +272,58 @@ function ClaudeAccountUsageCard({
   )
 }
 
+function CodexUsageBody({
+  data,
+  nowMs,
+}: {
+  data: CodexUsageSnapshot
+  nowMs: number
+}) {
+  const credits =
+    data.creditsRemaining !== null
+      ? `Credits remaining: ${data.creditsRemaining}`
+      : null
+
+  const extraLimits = data.modelLimits.flatMap((limit): UsageWindowSpec[] => [
+    {
+      key: `${limit.label}-session`,
+      label: limit.label,
+      usage: limit.session,
+    },
+    {
+      key: `${limit.label}-weekly`,
+      label: `${limit.label} · Weekly`,
+      usage: limit.weekly,
+    },
+  ])
+
+  return (
+    <div className="space-y-2">
+      <MetaLine items={[credits]} />
+      {data.rateLimitReachedType ? (
+        <InlineStatus tone="error">
+          Rate limit reached ({data.rateLimitReachedType.replace(/_/g, ' ')})
+        </InlineStatus>
+      ) : null}
+      <UsageWindows
+        nowMs={nowMs}
+        primary={[
+          {
+            key: 'session',
+            label: sessionLabel(data.session?.limitWindowSeconds),
+            usage: data.session,
+          },
+          { key: 'weekly', label: 'Weekly', usage: data.weekly },
+        ]}
+        secondary={[
+          { key: 'reviews', label: 'Code reviews', usage: data.reviews },
+          ...extraLimits,
+        ]}
+      />
+    </div>
+  )
+}
+
 export const UsagePane: React.FC = () => {
   const queryClient = useQueryClient()
   const { data: preferences } = usePreferences()
@@ -401,50 +454,7 @@ export const UsagePane: React.FC = () => {
       return <InlineStatus>No usage data available.</InlineStatus>
     }
 
-    const data = codexUsage.data
-    const credits =
-      data.creditsRemaining !== null
-        ? `Credits remaining: ${data.creditsRemaining}`
-        : null
-
-    const extraLimits = data.modelLimits.flatMap((limit): UsageWindowSpec[] => [
-      {
-        key: `${limit.label}-session`,
-        label: limit.label,
-        usage: limit.session,
-      },
-      {
-        key: `${limit.label}-weekly`,
-        label: `${limit.label} · Weekly`,
-        usage: limit.weekly,
-      },
-    ])
-
-    return (
-      <div className="space-y-2">
-        <MetaLine items={[credits]} />
-        {data.rateLimitReachedType ? (
-          <InlineStatus tone="error">
-            Rate limit reached ({data.rateLimitReachedType.replace(/_/g, ' ')})
-          </InlineStatus>
-        ) : null}
-        <UsageWindows
-          nowMs={nowMs}
-          primary={[
-            {
-              key: 'session',
-              label: sessionLabel(data.session?.limitWindowSeconds),
-              usage: data.session,
-            },
-            { key: 'weekly', label: 'Weekly', usage: data.weekly },
-          ]}
-          secondary={[
-            { key: 'reviews', label: 'Code reviews', usage: data.reviews },
-            ...extraLimits,
-          ]}
-        />
-      </div>
-    )
+    return <CodexUsageBody data={codexUsage.data} nowMs={nowMs} />
   }
 
   const renderGrok = () => {
@@ -527,7 +537,7 @@ export const UsagePane: React.FC = () => {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+      <div className="flex items-center justify-between gap-2 text-2xs text-muted-foreground">
         <span className="min-w-0 truncate">
           {isRefreshing ? (
             'Refreshing…'
@@ -555,7 +565,7 @@ export const UsagePane: React.FC = () => {
         <Button
           variant="ghost"
           size="sm"
-          className="h-6 shrink-0 gap-1 px-1.5 text-[11px]"
+          className="h-6 shrink-0 gap-1 px-1.5 text-2xs"
           onClick={handleRefresh}
           disabled={isRefreshing}
         >
@@ -627,6 +637,8 @@ export const UsagePane: React.FC = () => {
           {renderGrok()}
         </UsageCard>
       ) : null}
+
+      <TokenCostCard />
     </div>
   )
 }

@@ -26,18 +26,18 @@ import {
   type AgentNotification,
   type AgentSummary,
 } from '@/services/agents'
-import { formatRelative } from './AgentActivity'
+import { formatRelative } from '@/lib/relative-time'
 import {
-  AgentBadge,
   AgentEmpty,
   AgentList,
   AgentLoading,
   AgentSection,
   AgentTabBody,
+  AGENT_ROW,
 } from './agent-ui'
 
 const LEVEL_DOTS: Record<string, string> = {
-  action: 'bg-amber-500',
+  action: 'bg-warning',
   error: 'bg-destructive',
   info: 'bg-muted-foreground/50',
 }
@@ -68,7 +68,8 @@ function NotificationRow({
       <button
         type="button"
         className={cn(
-          'flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:outline-none',
+          AGENT_ROW,
+          'flex w-full items-center gap-2 text-left text-sm focus-visible:bg-muted/30 focus-visible:outline-none',
           notification.readAt !== null && 'text-muted-foreground'
         )}
         onClick={() => onOpen(notification)}
@@ -76,6 +77,8 @@ function NotificationRow({
         <Tooltip>
           <TooltipTrigger asChild>
             <span
+              role="img"
+              aria-label={levelLabel(notification.level)}
               className={cn(
                 'size-2 shrink-0 rounded-full',
                 LEVEL_DOTS[notification.level] ?? LEVEL_DOTS.info
@@ -94,14 +97,7 @@ function NotificationRow({
         >
           {notificationPreview(notification.message)}
         </span>
-        {notification.level !== 'info' && (
-          <AgentBadge
-            tone={notification.level === 'error' ? 'danger' : 'attention'}
-          >
-            {levelLabel(notification.level)}
-          </AgentBadge>
-        )}
-        <span className="shrink-0 text-xs text-muted-foreground">
+        <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
           {formatRelative(notification.createdAt)}
         </span>
       </button>
@@ -165,14 +161,12 @@ export function AgentInbox({ agent }: { agent: AgentSummary }) {
   return (
     <AgentTabBody>
       <AgentSection
-        title="Inbox"
-        count={isLoading ? undefined : unread.length}
-        description="Results, questions, and errors the agent reports to you."
         actions={
           agent.unreadNotifications > 0 ? (
             <Button
               size="sm"
               variant="ghost"
+              className="h-6 px-2 text-xs text-muted-foreground"
               disabled={markRead.isPending}
               onClick={() => markRead.mutate({ agentId: agent.id })}
             >
@@ -200,16 +194,19 @@ export function AgentInbox({ agent }: { agent: AgentSummary }) {
         )}
         {read.length > 0 && (
           <Collapsible open={readOpen} onOpenChange={setReadOpen}>
-            <CollapsibleTrigger className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground">
+            <CollapsibleTrigger className="flex items-center gap-1 px-2 text-xs font-medium text-muted-foreground hover:text-foreground">
               <ChevronRight
                 className={cn(
                   'size-3.5 transition-transform',
                   readOpen && 'rotate-90'
                 )}
               />
-              Read ({read.length})
+              Read
+              <span className="font-normal tabular-nums text-muted-foreground/70">
+                {read.length}
+              </span>
             </CollapsibleTrigger>
-            <CollapsibleContent className="mt-2">
+            <CollapsibleContent className="mt-1">
               <AgentList>
                 {read.map(notification => (
                   <NotificationRow

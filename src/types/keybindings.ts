@@ -16,16 +16,18 @@ export type KeybindingAction =
   | 'open_new_session_modal'
   | 'next_session'
   | 'previous_session'
+  | 'next_recent_session'
+  | 'previous_recent_session'
   | 'close_session_or_worktree'
   | 'new_worktree'
   | 'cycle_execution_mode'
   | 'approve_plan'
   | 'approve_plan_yolo'
+  | 'deny_permission'
   | 'approve_plan_clear_context'
   | 'approve_plan_clear_context_build'
   | 'approve_plan_worktree_build'
   | 'approve_plan_worktree_yolo'
-  | 'restore_last_archived'
   | 'focus_canvas_search'
   | 'toggle_terminal'
   | 'toggle_browser'
@@ -80,6 +82,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   open_new_session_modal: 'mod+shift+t',
   next_session: 'mod+arrowright',
   previous_session: 'mod+arrowleft',
+  next_recent_session: 'mod+shift+arrowdown',
+  previous_recent_session: 'mod+shift+arrowup',
   close_session_or_worktree: 'mod+w',
   new_worktree: 'mod+n',
   cycle_execution_mode: 'shift+tab',
@@ -87,11 +91,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   // Full access stays on Y, with the clear-context (shift) and worktree (alt)
   // variants. Bare mod+y is redo in text fields on Windows and Linux (#777).
   approve_plan_yolo: 'mod+shift+alt+y',
+  deny_permission: 'mod+shift+backspace',
   approve_plan_clear_context: 'mod+shift+y',
   approve_plan_clear_context_build: 'mod+shift+enter',
   approve_plan_worktree_build: 'mod+alt+enter',
   approve_plan_worktree_yolo: 'mod+alt+y',
-  restore_last_archived: 'mod+shift+alt+t',
   focus_canvas_search: 'slash',
   toggle_terminal: 'mod+backquote',
   toggle_browser: 'mod+shift+backquote',
@@ -211,6 +215,20 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     category: 'chat',
   },
   {
+    action: 'next_recent_session',
+    label: 'Next recent session',
+    description: 'Open the next session in the Recent sidebar',
+    default_shortcut: 'mod+shift+arrowdown',
+    category: 'navigation',
+  },
+  {
+    action: 'previous_recent_session',
+    label: 'Previous recent session',
+    description: 'Open the previous session in the Recent sidebar',
+    default_shortcut: 'mod+shift+arrowup',
+    category: 'navigation',
+  },
+  {
     action: 'close_session_or_worktree',
     label: 'Close session',
     description:
@@ -238,6 +256,13 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     label: 'Approve plan (Full access)',
     description: 'Approve the current plan with Full access',
     default_shortcut: 'mod+shift+alt+y',
+    category: 'chat',
+  },
+  {
+    action: 'deny_permission',
+    label: 'Deny tool permission',
+    description: 'Deny the pending tool permission request',
+    default_shortcut: 'mod+shift+backspace',
     category: 'chat',
   },
   {
@@ -276,13 +301,6 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     label: 'New worktree',
     description: 'Create a new worktree in the current project',
     default_shortcut: 'mod+n',
-    category: 'navigation',
-  },
-  {
-    action: 'restore_last_archived',
-    label: 'Restore archived',
-    description: 'Restore the most recently archived worktree or session',
-    default_shortcut: 'mod+shift+alt+t',
     category: 'navigation',
   },
   {

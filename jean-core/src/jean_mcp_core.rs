@@ -28,8 +28,6 @@ pub const CLAUDE_PERMISSION_PROMPT_TOOL: &str = "claude_permission_prompt";
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const RATE_LIMITED_TOOLS: &[&str] = &[
     "add_project",
-    "archive_session",
-    "archive_worktree",
     "cancel_session_run",
     "clone_project",
     "create_commit",
@@ -37,22 +35,21 @@ const RATE_LIMITED_TOOLS: &[&str] = &[
     "create_session",
     "create_worktree",
     "create_worktree_from_existing_branch",
+    "delete_session",
     "delete_worktree",
     "import_worktree",
     "init_project",
     "link_worktree_pr",
     "merge_pull_request",
     "move_session",
-    "permanently_delete_worktree",
     "push_worktree",
     "remove_project",
     "run_review",
     "send_chat_message",
+    "set_connector",
     "set_session_model",
     "set_session_settings",
     "start_run_environment",
-    "unarchive_session",
-    "unarchive_worktree",
     "unlink_worktree_pr",
     // Agent tools that write
     "schedule_create",
@@ -153,7 +150,7 @@ fn schedule_session_move(
 
         if crate::chat::worktree_archived_at(&app, &target_worktree_id).is_some() {
             log::warn!(
-                "Deferred session move cancelled because target worktree is archived: session={session_id} target={target_worktree_id}"
+                "Deferred session move cancelled because target worktree is no longer active: session={session_id} target={target_worktree_id}"
             );
             return;
         }
@@ -241,7 +238,8 @@ fn tool_registry_core() -> Value {
         {"name":"add_project","description":"Add an existing local git repository as a Jean project. Path must already be a git repo (use init_project for a new folder, or clone_project for a remote URL). Returns the created project (id, name, path, default_branch).","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to an existing local git repository."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["path"],"additionalProperties":false}},
         {"name":"clone_project","description":"Clone a remote git repository to a local path and add it as a Jean project. Returns the created project.","inputSchema":{"type":"object","properties":{"url":{"type":"string","description":"Git remote URL to clone (https or ssh)."},"path":{"type":"string","description":"Absolute local path where the repo should be cloned."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["url","path"],"additionalProperties":false}},
         {"name":"init_project","description":"Create a new git repository at path (creating the directory if needed) and add it as a Jean project. Use add_project instead when the path is already a git repo. Returns the created project.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path for the new project directory."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["path"],"additionalProperties":false}},
-        {"name":"remove_project","description":"Remove a project from Jean (same as the UI \"Remove project\"). Repository files on disk are kept. Fails if the project has active (non-archived) worktrees; its archived worktrees and their sessions are removed from Jean. Does not remove folders. Needs user approval.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"remove_project","description":"Remove a project from Jean (same as the UI \"Remove project\"). Repository files on disk are kept. Fails if the project has worktrees. Does not remove folders. Needs user approval.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"set_connector","description":"Turn a discovered MCP server (connector) on or off, like the MCP Servers switches in settings. scope global: the default servers for new sessions. scope project (projectId): the project's own server list; enable on a project without a list starts one with only this server. scope agent (agentId): the agent's connector limit; enable on an agent without a limit starts one with only this server. Disable fails when no list is saved. backend and name identify the server (the backend's own MCP config, as listed in settings). Does not add or edit server definitions and never returns server config. Needs user approval.","inputSchema":{"type":"object","properties":{"scope":{"type":"string","enum":["global","project","agent"]},"action":{"type":"string","enum":["enable","disable"]},"backend":{"type":"string","description":"CLI backend that owns the server, for example claude or codex."},"name":{"type":"string","description":"Server name in that backend's MCP config."},"projectId":{"type":"string","description":"Required for scope project."},"agentId":{"type":"string","description":"Required for scope agent."}},"required":["scope","action","backend","name"],"additionalProperties":false}},
         {"name":"list_worktrees","description":"List all worktrees for a project.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
         {"name":"get_worktree","description":"Get a single worktree by id (path, branch, status, etc.).","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"get_project_context","description":"Get project-level context needed by orchestration agents: project settings, linked projects, default branch/backend, and worktree counts. Does not read arbitrary repo files.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
@@ -254,11 +252,7 @@ fn tool_registry_core() -> Value {
         {"name":"create_worktree_from_existing_branch","description":"Create a Jean worktree from an existing local or remote-tracking branch (branch name is used as the worktree name). Does not open Jean's UI. Prefer create_worktree for new branches; use this when the branch already exists.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"branchName":{"type":"string","description":"Existing branch name to check out into a new worktree path."}},"required":["projectId","branchName"],"additionalProperties":false}},
         {"name":"import_worktree","description":"Import an existing git worktree/directory on disk into a Jean project. Path must already exist and be a git worktree or repo. Does not create a new git worktree.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"path":{"type":"string","description":"Absolute path to an existing git worktree directory."}},"required":["projectId","path"],"additionalProperties":false}},
         {"name":"rename_worktree","description":"Rename a worktree's display name in Jean (does not rename the git branch or folder).","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"newName":{"type":"string","description":"New display name. Must be unique within the project."}},"required":["worktreeId","newName"],"additionalProperties":false}},
-        {"name":"archive_worktree","description":"Archive a worktree (hide from the active project canvas). Cancels running sessions for the worktree. Base sessions cannot be archived. Prefer this over delete when work may still be needed.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"unarchive_worktree","description":"Restore an archived worktree to the active project canvas. Fails if the worktree directory no longer exists on disk.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"list_archived_worktrees","description":"List archived worktrees. Optionally filter by projectId. Active worktrees are not included (use list_worktrees for those).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string","description":"Optional project id to filter archived worktrees."}},"additionalProperties":false}},
-        {"name":"delete_worktree","description":"Start permanently deleting an active (non-archived) worktree in the background: removes Jean tracking, git worktree, and branch. Returns started=true when cleanup is accepted, not completion. Destructive and irreversible when cleanup succeeds. Cannot delete base sessions. Prefer archive_worktree when unsure.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"permanently_delete_worktree","description":"Start permanently deleting an already-archived worktree in the background (storage + git worktree/branch cleanup). Returns started=true when cleanup is accepted, not completion. Fails immediately if the worktree is not archived — archive it first, or use delete_worktree for active worktrees.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"delete_worktree","description":"Start permanently deleting a worktree in the background: removes Jean tracking, git worktree, and branch. Returns started=true when cleanup is accepted, not completion. Destructive and irreversible when cleanup succeeds. Cannot delete base sessions.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"update_worktree_labels","description":"Update native Jean worktree labels. Use action=add/remove/set/clear. Returns the updated worktree.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"action":{"type":"string","enum":["add","remove","set","clear"]},"label":{"type":"object","properties":{"name":{"type":"string"},"color":{"type":"string","description":"Hex color like #eab308. Optional for add; ignored by remove."},"pinned":{"type":"boolean","description":"Show this label as a project-view filter tab for the current project."}},"required":["name"],"additionalProperties":false},"labels":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"color":{"type":"string"},"pinned":{"type":"boolean","description":"Show this label as a project-view filter tab for the current project."}},"required":["name","color"],"additionalProperties":false}}},"required":["worktreeId","action"],"additionalProperties":false}},
         {"name":"claude_permission_prompt","description":"Internal Jean hook for Claude CLI --permission-prompt-tool. Do not call directly.","inputSchema":{"type":"object","properties":{"tool_name":{"type":"string"},"input":{"type":"object"},"tool_use_id":{"type":"string"}},"required":["tool_name"]}}
     ])
@@ -324,11 +318,10 @@ fn claude_permission_decision(args: &Value, approved: bool) -> Value {
 
 fn tool_registry_session() -> Value {
     json!([
-        {"name":"list_sessions","description":"List chat sessions in a worktree without loading full message history. Use before creating a session to avoid duplicates.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"includeArchived":{"type":"boolean","default":false}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"create_session","description":"Get a chat session for a prompt in an existing non-archived worktree. Reuses an empty chat session when one is available; otherwise creates a new session. Returns the session id needed for send_chat_message. Fails if the worktree is archived — call unarchive_worktree first.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"name":{"type":"string"},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity","muse"]}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"send_chat_message","description":"Send a message to an existing non-archived session. Fire-and-forget: returns immediately as the session begins processing; poll get_session_status with the returned sessionId for completion or failure. Omitted settings inherit the session selections, then the user's defaults. Supplied settings override one turn only.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"message":{"type":"string"},"model":{"type":"string"},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity","muse"]},"customProfileName":{"type":"string","description":"Optional one-turn provider/profile override."},"effortLevel":{"type":"string","enum":["off","adaptive","minimal","low","medium","high","xhigh","max","ultracode"]},"thinkingLevel":{"type":"string","enum":["off","adaptive","think","megathink","ultrathink"]},"executionMode":{"type":"string","enum":EXECUTION_MODES,"description":"Permission modes: supervised = Supervised, build = Auto-accept edits, auto = Auto, yolo = Full access. plan is the legacy planning mode. Use get_session_capabilities to check backend support. Pass only when the user explicitly asks for a mode. Omit it to use the session's selected mode or the user's default execution mode. Do not choose plan just because the message asks for a plan first."}},"required":["sessionId","message"],"additionalProperties":false}},
-        {"name":"archive_session","description":"Archive a chat session (hide it from the active session list). Prefer this over delete when history may still be useful. Cannot run send_chat_message on an archived session until unarchive_session is called.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
-        {"name":"unarchive_session","description":"Restore an archived chat session so it can run again. Also unarchives the parent worktree when it is archived. Call this before send_chat_message if a previous attempt failed because the session was archived.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
+        {"name":"list_sessions","description":"List chat sessions in a worktree without loading full message history. Use before creating a session to avoid duplicates.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"create_session","description":"Get a chat session for a prompt in an existing worktree. Reuses an empty chat session when one is available; otherwise creates a new session. Returns the session id needed for send_chat_message.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"name":{"type":"string"},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity","muse"]}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"send_chat_message","description":"Send a message to an existing session. Deleted sessions are rejected, and so is a session that is still working for another session (wait for its result or use a different session). Returns as soon as the session begins processing. When the run ends, its result comes back to you automatically as a message; if the session was already running, the result of that run comes back instead. End your turn after sending; do not poll. Omitted settings inherit the session selections, then the user's defaults. Supplied settings override one turn only.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"message":{"type":"string"},"model":{"type":"string"},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity","muse"]},"customProfileName":{"type":"string","description":"Optional one-turn provider/profile override."},"effortLevel":{"type":"string","enum":["off","adaptive","minimal","low","medium","high","xhigh","max","ultracode"]},"thinkingLevel":{"type":"string","enum":["off","adaptive","think","megathink","ultrathink"]},"executionMode":{"type":"string","enum":EXECUTION_MODES,"description":"Permission modes: supervised = Supervised, build = Auto-accept edits, auto = Auto, yolo = Full access. plan is the legacy planning mode. Use get_session_capabilities to check backend support. Pass only when the user explicitly asks for a mode. Omit it to use the session's selected mode or the user's default execution mode. Do not choose plan just because the message asks for a plan first."}},"required":["sessionId","message"],"additionalProperties":false}},
+        {"name":"delete_session","description":"Delete a chat session. It disappears from the session list immediately; its history stays on disk for 30 days, then it is purged. Cannot be undone from Jean.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
         {"name":"move_session","description":"Move a Jean session to another active worktree while preserving its session id, complete message/run history, attachments, settings, and backend resume context. An idle session moves immediately. A running session is scheduled to move automatically after its current turn finishes; do not cancel the run or retry the move.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"targetWorktreeId":{"type":"string"}},"required":["sessionId","targetWorktreeId"],"additionalProperties":false}},
         {"name":"get_session_status","description":"Get whether a Jean session is idle/running/resumable/cancelled/error plus latest run metadata. Use after send_chat_message to poll fire-and-forget work.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
         {"name":"cancel_session_run","description":"Cancel the currently running request for a session. Returns whether Jean found an active process/turn/flag to cancel.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
@@ -340,6 +333,9 @@ fn tool_registry_session() -> Value {
         {"name":"get_worktree_changes","description":"Get a bounded summary of a worktree's git changes: porcelain status, ahead/behind counts, diff stats, and changed files. Does not return full diffs.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"maxFiles":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"get_worktree_diff","description":"Get a bounded unified git diff for a worktree. diffType is uncommitted (HEAD vs working tree) or branch (origin/base...HEAD). Optional path limits to one pathspec; maxBytes is capped.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"diffType":{"type":"string","enum":["uncommitted","branch"],"default":"uncommitted"},"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1,"maximum":200000,"default":60000}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+        {"name":"request_secret","description":"Ask the user for a secret (API key, token, auth key) in a private card in this chat. First call get_secret: a secret saved earlier for this project (or for you, in an agent session) can be reused without asking. You never see the value. Never ask for secrets in chat text and never invent one. End your turn after the call. When the user saves, the next user message gives a private file path that holds only the value. Read it only inside a shell command, for example TOKEN=\"$(cat '<path>')\" mycli login. Do not print, echo, or copy the value. The user picks how long the file is kept (until they delete it, or 24 hours) and can delete it at any time. If the file is gone, call request_secret again. For a value with several lines, such as a whole .env file, set multiline and give an example.","inputSchema":{"type":"object","properties":{"label":{"type":"string","maxLength":80,"description":"Card title, for example 'Tailscale auth key'."},"reason":{"type":"string","maxLength":500,"description":"What the secret is for and where the user can create it."},"placeholder":{"type":"string","maxLength":80,"description":"Optional input placeholder, for example 'tskey-auth-...'."},"multiline":{"type":"boolean","description":"Show a multi-line text area instead of a one-line input. Use it for values with several lines, such as a whole .env file or a private key."},"example":{"type":"string","maxLength":1000,"description":"Optional example of the expected format with fake values, shown on the card. Give one for multi-line values, for example 'DATABASE_URL=postgresql://user:password@host/db\\nRESEND_API_KEY=re_...'."}},"required":["label","reason"],"additionalProperties":false}},
+        {"name":"get_secret","description":"Get the private file path of a secret saved earlier (from a request_secret card), by its label. Secrets belong to the project of a worktree session, or to the agent in an agent chat, its task sessions, and its subagents. Use it in new sessions and scheduled tasks to reuse a saved key without asking again. Read the path only inside a shell command, for example TOKEN=\"$(cat '<path>')\". Never print the value. Fails with the saved labels of this project or agent when none matches; then call request_secret.","inputSchema":{"type":"object","properties":{"label":{"type":"string","maxLength":80,"description":"Label of the saved secret (case-insensitive)."}},"required":["label"],"additionalProperties":false}},
+        {"name":"list_secrets","description":"Show the user the secrets saved for this project (or this agent, in an agent session) from request_secret cards, in a card in this chat with a Delete button for each. Use it when the user asks to see, manage, or delete saved secrets. Returns labels, retention, and save time only; never values or file paths. You cannot delete secrets: the user deletes them on the card. End your turn after the call.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
         {"name":"get_run_environments","description":"List Jean Run-command / panel-command dev environments. Returns whether each is running, worktree/base-session identity, startup command, listening/configured ports, and http URL when a port is known. Optional worktreeId or projectId filters. Does not include full-screen CLI session terminals.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string","description":"Optional worktree id to filter to one worktree or base session."},"projectId":{"type":"string","description":"Optional project id to filter to that project's worktrees."}},"additionalProperties":false}}
         ,{"name":"start_run_environment","description":"Start or reuse a Jean-managed Run environment for a worktree using a run command configured in jean.json. When command is omitted, uses the first configured run command. Returns the environment identity, command, running state, ports, and URL when detected.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string","description":"Worktree whose configured Run environment should start."},"command":{"type":"string","description":"Optional exact jean.json run command to start. Must be one of the configured run commands."}},"required":["worktreeId"],"additionalProperties":false}}
     ])
@@ -425,11 +421,14 @@ pub async fn call_tool(
     }))
 }
 
-// Keep the large command-dispatch future off the MCP router's stack. In debug
-// builds, inline dispatch futures in each match arm exhaust a normal test stack.
+// Off the core runtime (blocking git/CLI work) and off the MCP router's stack:
+// in debug builds, inline dispatch futures in each match arm exhaust a normal
+// test stack.
 async fn dispatch_command(app: &AppHandle, command: &str, args: Value) -> Result<Value, String> {
-    Box::pin(crate::http_server::dispatch::dispatch_command(
-        app, command, args,
+    Box::pin(crate::http_server::dispatch::dispatch_command_off_runtime(
+        app.clone(),
+        command.to_string(),
+        args,
     ))
     .await
 }
@@ -631,58 +630,9 @@ async fn run_tool(
             .await
             .map_err(ToolError::internal)
         }
-        "archive_worktree" => {
-            let worktree_id = require_str(&args, "worktreeId")?;
-            dispatch_command(
-                app,
-                "archive_worktree",
-                json!({ "worktreeId": worktree_id }),
-            )
+        "set_connector" => crate::agents::connectors::set_connector(app, &args)
             .await
-            .map_err(ToolError::internal)?;
-            Ok(json!({
-                "worktreeId": worktree_id,
-                "action": "archive",
-                "ok": true,
-            }))
-        }
-        "unarchive_worktree" => {
-            let worktree_id = require_str(&args, "worktreeId")?;
-            dispatch_command(
-                app,
-                "unarchive_worktree",
-                json!({ "worktreeId": worktree_id }),
-            )
-            .await
-            .map_err(ToolError::internal)
-        }
-        "list_archived_worktrees" => {
-            let project_id =
-                optional_str(&args, "projectId").or_else(|| optional_str(&args, "project_id"));
-            let result = dispatch_command(app, "list_archived_worktrees", json!({}))
-                .await
-                .map_err(ToolError::internal)?;
-            if let Some(project_id) = project_id {
-                let filtered = result
-                    .as_array()
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter(|item| {
-                                item.get("project_id")
-                                    .or_else(|| item.get("projectId"))
-                                    .and_then(|v| v.as_str())
-                                    == Some(project_id.as_str())
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                Ok(Value::Array(filtered))
-            } else {
-                Ok(result)
-            }
-        }
+            .map_err(ToolError::internal),
         "remove_project" => {
             let project_id = require_str(&args, "projectId")?;
             dispatch_command(app, "remove_project", json!({ "projectId": project_id }))
@@ -696,17 +646,6 @@ async fn run_tool(
                 .await
                 .map_err(ToolError::internal)?;
             Ok(deletion_started_result(&worktree_id, "delete"))
-        }
-        "permanently_delete_worktree" => {
-            let worktree_id = require_str(&args, "worktreeId")?;
-            dispatch_command(
-                app,
-                "permanently_delete_worktree",
-                json!({ "worktreeId": worktree_id }),
-            )
-            .await
-            .map_err(ToolError::internal)?;
-            Ok(deletion_started_result(&worktree_id, "permanently_delete"))
         }
         "create_worktree" => {
             let project_id = require_str(&args, "projectId")?;
@@ -994,17 +933,12 @@ async fn run_tool(
         "list_sessions" => {
             let worktree_id = require_str(&args, "worktreeId")?;
             let worktree_path = resolve_worktree_path(app, &worktree_id)?;
-            let include_archived = args
-                .get("includeArchived")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
             dispatch_command(
                 app,
                 "list_sessions_summary",
                 json!({
                     "worktreeId": worktree_id,
                     "worktreePath": worktree_path,
-                    "includeArchived": include_archived
                 }),
             )
             .await
@@ -1012,14 +946,13 @@ async fn run_tool(
         }
         "create_session" => {
             let worktree_id = require_str(&args, "worktreeId")?;
-            // Fail fast when the worktree is archived (also enforced in create_session).
+            // Fail fast when the worktree is inactive (also enforced in create_session).
             ensure_mcp_worktree_not_archived(app, &worktree_id)?;
             let worktree_path = resolve_worktree_path(app, &worktree_id)?;
             let sessions = crate::chat::get_sessions(
                 app.clone(),
                 worktree_id.clone(),
                 worktree_path.clone(),
-                None,
                 Some(true),
             )
             .await
@@ -1090,7 +1023,7 @@ async fn run_tool(
             let session_id = require_str(&args, "sessionId")?;
             let message = require_str(&args, "message")?;
             let (worktree_id, worktree_path) = resolve_session_worktree(app, &session_id)?;
-            // Validate archive status before fire-and-forget so agents get an
+            // Reject deleted sessions before fire-and-forget so agents get an
             // immediate error instead of a silent log-only failure after "started".
             ensure_mcp_session_can_run(app, &session_id, &worktree_id)?;
             if let Some(value) = optional_str(&args, "backend") {
@@ -1119,6 +1052,11 @@ async fn run_tool(
             )?;
             // Agent callers: the agent gets an update when this session's run ends.
             crate::agents::mcp::record_delegation(app, source, &session_id, &worktree_id);
+            // Chat callers: the end of this run comes back as a queued message.
+            if let Some(origin) = chat_delegation_origin(app, source, &session_id) {
+                crate::chat::delegation::arm(app, &origin, &session_id)
+                    .map_err(ToolError::invalid_params)?;
+            }
             // Agent callers: mark the sender so the chat shows one "Message from" line
             let message = match crate::agents::agent_for_session(app, source) {
                 Some(agent) if source != session_id => {
@@ -1172,12 +1110,12 @@ async fn run_tool(
                 "worktreeName": worktree_name,
             }))
         }
-        "archive_session" => {
+        "delete_session" => {
             let session_id = require_str(&args, "sessionId")?;
             let (worktree_id, worktree_path) = resolve_session_worktree(app, &session_id)?;
             dispatch_command(
                 app,
-                "archive_session",
+                "close_session",
                 json!({
                     "sessionId": session_id.clone(),
                     "worktreeId": worktree_id,
@@ -1188,76 +1126,8 @@ async fn run_tool(
             .map_err(ToolError::internal)?;
             Ok(json!({
                 "sessionId": session_id,
-                "action": "archive",
+                "action": "delete",
                 "ok": true,
-            }))
-        }
-        "unarchive_session" => {
-            let session_id = require_str(&args, "sessionId")?;
-            let (worktree_id, worktree_path) = resolve_session_worktree(app, &session_id)?;
-            let mut unarchived_worktree = false;
-            let mut unarchived_session = false;
-
-            // If the parent worktree is archived, restore it first so the
-            // session becomes runnable (not just un-flagged inside a hidden wt).
-            if crate::chat::worktree_archived_at(app, &worktree_id).is_some() {
-                dispatch_command(
-                    app,
-                    "unarchive_worktree",
-                    json!({ "worktreeId": worktree_id.clone() }),
-                )
-                .await
-                .map_err(ToolError::internal)?;
-                unarchived_worktree = true;
-            }
-
-            let session_is_archived = crate::chat::storage::load_metadata(app, &session_id)
-                .map_err(|e| ToolError::internal(format!("load_metadata: {e}")))?
-                .map(|m| m.archived_at.is_some())
-                .unwrap_or(false);
-
-            let session = if session_is_archived {
-                let restored = dispatch_command(
-                    app,
-                    "unarchive_session",
-                    json!({
-                        "sessionId": session_id.clone(),
-                        "worktreeId": worktree_id.clone(),
-                        "worktreePath": worktree_path.clone(),
-                    }),
-                )
-                .await
-                .map_err(ToolError::internal)?;
-                unarchived_session = true;
-                restored
-            } else if !unarchived_worktree {
-                return Err(ToolError::invalid_params(
-                    "Session is not archived (and parent worktree is not archived either)",
-                ));
-            } else {
-                // Worktree was archived but the session itself was not — return
-                // current session payload so callers get a consistent shape.
-                dispatch_command(
-                    app,
-                    "get_session",
-                    json!({
-                        "sessionId": session_id.clone(),
-                        "worktreeId": worktree_id.clone(),
-                        "worktreePath": worktree_path,
-                    }),
-                )
-                .await
-                .map_err(ToolError::internal)?
-            };
-
-            Ok(json!({
-                "sessionId": session_id,
-                "worktreeId": worktree_id,
-                "action": "unarchive",
-                "ok": true,
-                "unarchivedWorktree": unarchived_worktree,
-                "unarchivedSession": unarchived_session,
-                "session": session,
             }))
         }
         "move_session" => {
@@ -1980,6 +1850,60 @@ async fn run_tool(
                 json!({ "sessionId": source, "worktreeId": worktree_id, "worktreePath": worktree_path, "projectId": project_id, "projectName": project_name, "projectPath": project_path }),
             )
         }
+        "request_secret" => {
+            if source == "anon" {
+                return Err(ToolError::invalid_params(
+                    "request_secret works only in a Jean chat session.",
+                ));
+            }
+            for (key, max) in [("label", 80), ("reason", 500)] {
+                if require_nonempty_str(&args, key)?.chars().count() > max {
+                    return Err(ToolError::invalid_params(format!(
+                        "{key} must be at most {max} characters"
+                    )));
+                }
+            }
+            Ok(json!({
+                "status": "shown",
+                "note": "The user sees the secret card. End your turn now. When the user saves, the next user message gives the file path. Read the file only inside a shell command and never print the value.",
+            }))
+        }
+        "get_secret" => {
+            if source == "anon" {
+                return Err(ToolError::invalid_params(
+                    "get_secret works only in a Jean chat session.",
+                ));
+            }
+            let label = require_nonempty_str(&args, "label")?;
+            let saved =
+                crate::chat::secrets::get_secret(app.clone(), source.to_string(), label.clone())
+                    .map_err(ToolError::invalid_params)?;
+            Ok(json!({
+                "label": label,
+                "path": saved.path,
+                "retention": saved.retention,
+                "note": "Read the file only inside a shell command. Never print the value.",
+            }))
+        }
+        "list_secrets" => {
+            if source == "anon" {
+                return Err(ToolError::invalid_params(
+                    "list_secrets works only in a Jean chat session.",
+                ));
+            }
+            let secrets =
+                crate::chat::secrets::list_secrets(app.clone(), source.to_string(), false)
+                    .map_err(ToolError::internal)?;
+            let secrets: Vec<Value> = secrets
+                .iter()
+                .map(|s| json!({ "label": s.label, "retention": s.retention, "savedAt": s.saved_at }))
+                .collect();
+            Ok(json!({
+                "count": secrets.len(),
+                "secrets": secrets,
+                "note": "The user sees these secrets in a card with Delete buttons. End your turn now.",
+            }))
+        }
         CLAUDE_PERMISSION_PROMPT_TOOL => Ok(claude_permission_prompt(app, source, &args).await),
         // Boxed: keeps this large function's stack frame small.
         agent_tool if crate::agents::mcp::is_agent_tool(agent_tool) => {
@@ -2067,7 +1991,6 @@ fn get_project_context(app: &AppHandle, project_id: &str) -> Result<Value, ToolE
         "counts": {
             "worktrees": worktrees.len(),
             "activeWorktrees": worktrees.iter().filter(|w| w.archived_at.is_none()).count(),
-            "archivedWorktrees": worktrees.iter().filter(|w| w.archived_at.is_some()).count(),
         },
     }))
 }
@@ -2606,7 +2529,6 @@ pub async fn start_background_investigation_impl(
         app.clone(),
         worktree_id.clone(),
         worktree_path.clone(),
-        None,
         Some(false),
     )
     .await?;
@@ -3193,7 +3115,7 @@ fn resolve_session_worktree(
     Ok((metadata.worktree_id, worktree_path))
 }
 
-/// Reject MCP mutations/runs when the worktree is archived.
+/// Reject MCP mutations/runs when the worktree is no longer active.
 fn ensure_mcp_worktree_not_archived(app: &AppHandle, worktree_id: &str) -> Result<(), ToolError> {
     crate::chat::ensure_worktree_not_archived(
         worktree_id,
@@ -3221,13 +3143,32 @@ fn ensure_mcp_worktree_can_link_pr(app: &AppHandle, worktree_id: &str) -> Result
     Ok(())
 }
 
-/// Reject MCP send_chat_message when the session or its worktree is archived.
+/// The chat session behind an MCP call, when there is one: manual MCP
+/// clients (`manual-dev`, `manual-prod`) have no session, agents report
+/// through their own delegation table, and a session sending to itself owes
+/// itself nothing.
+fn chat_delegation_origin(
+    app: &AppHandle,
+    source: &str,
+    target_session_id: &str,
+) -> Option<crate::chat::types::SessionMetadata> {
+    if source == target_session_id {
+        return None;
+    }
+    let origin = crate::chat::storage::load_metadata(app, source).ok()??;
+    if crate::agents::is_agent_worktree_id(&origin.worktree_id) {
+        return None;
+    }
+    Some(origin)
+}
+
+/// Reject MCP send_chat_message when the session was deleted or its worktree is inactive.
 fn ensure_mcp_session_can_run(
     app: &AppHandle,
     session_id: &str,
     worktree_id: &str,
 ) -> Result<(), ToolError> {
-    // A new session (no metadata until its first run) cannot be archived yet.
+    // A new session (no metadata until its first run) cannot be deleted yet.
     // Callers resolve the session first, so it is known to exist.
     let archived_at = crate::chat::storage::load_metadata(app, session_id)
         .map_err(|e| ToolError::internal(format!("load_metadata: {e}")))?
@@ -3570,6 +3511,299 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
         assert_eq!(messages[1]["content"], "Fixture reply");
     }
 
+    /// A session in the `current-base` worktree with metadata on disk.
+    fn saved_session(app: &AppHandle, id: &str) -> crate::chat::types::SessionMetadata {
+        let metadata = crate::chat::types::SessionMetadata::new(
+            id.to_string(),
+            "current-base".to_string(),
+            "Session".to_string(),
+            0,
+        );
+        crate::chat::storage::save_metadata(app, &metadata).unwrap();
+        metadata
+    }
+
+    #[test]
+    fn chat_delegation_origin_is_only_a_real_chat_session() {
+        let (_temp, app) = session_lookup_app();
+        saved_session(&app, "origin");
+        let mut agent = saved_session(&app, "agent-chat");
+        agent.worktree_id = "__agent_release__".to_string();
+        crate::chat::storage::save_metadata(&app, &agent).unwrap();
+
+        assert_eq!(
+            chat_delegation_origin(&app, "origin", "target").map(|m| m.id),
+            Some("origin".to_string())
+        );
+        assert!(chat_delegation_origin(&app, "manual-dev", "target").is_none());
+        assert!(chat_delegation_origin(&app, "manual-prod", "target").is_none());
+        assert!(chat_delegation_origin(&app, "test", "target").is_none());
+        assert!(chat_delegation_origin(&app, "agent-chat", "target").is_none());
+        assert!(chat_delegation_origin(&app, "origin", "origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn send_chat_message_rejects_a_fourth_hop_before_dispatch() {
+        let (_temp, app) = session_lookup_app();
+        let mut deep = saved_session(&app, "deep");
+        deep.delegated_by = Some(crate::chat::types::SessionDelegation {
+            origin_session_id: "above".to_string(),
+            origin_worktree_id: "current-base".to_string(),
+            hop: 3,
+            armed: true,
+            created_at: 1,
+            outcome: None,
+        });
+        crate::chat::storage::save_metadata(&app, &deep).unwrap();
+        saved_session(&app, "target");
+
+        let error = run_tool(
+            &app,
+            "send_chat_message",
+            json!({ "sessionId": "target", "message": "go deeper" }),
+            "deep",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.contains("3 hops"), "{}", error.message);
+        assert_eq!(
+            crate::chat::storage::load_metadata(&app, "target")
+                .unwrap()
+                .unwrap()
+                .delegated_by,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn send_chat_message_refuses_a_target_armed_for_another_session() {
+        let (_temp, app) = session_lookup_app();
+        let first = saved_session(&app, "first");
+        saved_session(&app, "second");
+        saved_session(&app, "target");
+        crate::chat::delegation::arm(&app, &first, "target").unwrap();
+
+        let error = run_tool(
+            &app,
+            "send_chat_message",
+            json!({ "sessionId": "target", "message": "also do this" }),
+            "second",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "Session target is already working for another session; wait for its result or use \
+             a different session."
+        );
+        let link = crate::chat::storage::load_metadata(&app, "target")
+            .unwrap()
+            .unwrap()
+            .delegated_by
+            .unwrap();
+        assert_eq!(link.origin_session_id, "first");
+        assert!(link.armed);
+    }
+
+    /// A run the queue drain started on an armed child reports once; the next
+    /// queued run, with the link disarmed, reports nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drain_started_run_on_an_armed_child_reports_once() {
+        if !crate::test_support::in_isolated_process(
+            "jean_mcp_core::tests::drain_started_run_on_an_armed_child_reports_once",
+        ) {
+            return;
+        }
+        let (temp, app) = session_send_app();
+        let path = temp.path().to_string_lossy().to_string();
+        let create = |name: &str| {
+            crate::chat::create_session(
+                app.clone(),
+                "current-base".to_string(),
+                path.clone(),
+                Some(name.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let origin_id = create("Origin").await.unwrap().id;
+        let child_id = create("Child").await.unwrap().id;
+        // The origin waits for input, so its drain holds and the update stays
+        // visible in its queue.
+        let origin = crate::chat::storage::with_existing_metadata_mut(&app, &origin_id, |m| {
+            m.waiting_for_input = true;
+            m.waiting_for_input_type = Some("question".to_string());
+            m.clone()
+        })
+        .unwrap();
+        crate::chat::delegation::arm(&app, &origin, &child_id).unwrap();
+
+        for text in ["first", "second"] {
+            crate::chat::enqueue_message(
+                app.clone(),
+                "current-base".to_string(),
+                path.clone(),
+                child_id.clone(),
+                json!({
+                    "id": text,
+                    "message": text,
+                    "pendingImages": [],
+                    "pendingFiles": [],
+                    "pendingSkills": [],
+                    "pendingTextFiles": [],
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let metadata = crate::chat::storage::load_metadata(&app, &child_id)
+                    .unwrap()
+                    .unwrap();
+                let both_done = metadata.runs.len() == 2
+                    && metadata
+                        .runs
+                        .iter()
+                        .all(|run| run.status == crate::chat::types::RunStatus::Completed);
+                if both_done && !crate::chat::registry::is_session_actively_managed(&child_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both queued prompts ran in the child");
+
+        let queued = crate::chat::storage::load_metadata(&app, &origin_id)
+            .unwrap()
+            .unwrap()
+            .queued_messages;
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        let update = queued[0]["message"].as_str().unwrap();
+        assert!(
+            update.starts_with(&format!("[Jean session update]\nsession: {child_id}\n")),
+            "{update}"
+        );
+        assert!(
+            update.contains("\nstatus: done\n---\nFixture reply\n"),
+            "{update}"
+        );
+        assert!(
+            !crate::chat::storage::load_metadata(&app, &child_id)
+                .unwrap()
+                .unwrap()
+                .delegated_by
+                .unwrap()
+                .armed
+        );
+    }
+
+    /// Origin sends to a child through the tool; the child's fixture run ends;
+    /// the update is queued into the origin and sent as the origin's next run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_send_from_a_chat_session_reports_the_run_end_back() {
+        if !crate::test_support::in_isolated_process(
+            "jean_mcp_core::tests::mcp_send_from_a_chat_session_reports_the_run_end_back",
+        ) {
+            return;
+        }
+        let (_temp, app) = session_send_app();
+        let origin = run_tool(
+            &app,
+            "create_session",
+            json!({ "worktreeId": "current-base" }),
+            "test",
+        )
+        .await
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // A run makes the origin non-empty, so the next create_session is a new session.
+        run_tool(
+            &app,
+            "send_chat_message",
+            json!({ "sessionId": origin, "message": "plan the work" }),
+            "test",
+        )
+        .await
+        .unwrap();
+        assert_mcp_send_completed(&app, &origin, "plan the work", "build").await;
+        let child = run_tool(
+            &app,
+            "create_session",
+            json!({ "worktreeId": "current-base" }),
+            "test",
+        )
+        .await
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(child, origin);
+
+        let sent = run_tool(
+            &app,
+            "send_chat_message",
+            json!({ "sessionId": child, "message": "fix the bug" }),
+            &origin,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sent["status"], "started");
+        let link = crate::chat::storage::load_metadata(&app, &child)
+            .unwrap()
+            .unwrap()
+            .delegated_by
+            .unwrap();
+        assert_eq!(link.origin_session_id, origin);
+        assert_eq!(link.hop, 1);
+
+        let update = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let metadata = crate::chat::storage::load_metadata(&app, &origin)
+                    .unwrap()
+                    .unwrap();
+                if let Some(run) = metadata.runs.get(1) {
+                    if run.status == crate::chat::types::RunStatus::Completed {
+                        break run.user_message.clone();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("origin received and ran the update");
+        assert_eq!(
+            update,
+            format!(
+                "[Jean session update]\nsession: {child}\nworktree: current-base\nname: Session 2\nstatus: done\n---\nFixture reply\n\nUse read_session_messages for a full transcript. Reply briefly; the user sees sub-session status in the side panel."
+            )
+        );
+        let child_metadata = crate::chat::storage::load_metadata(&app, &child)
+            .unwrap()
+            .unwrap();
+        assert!(!child_metadata.delegated_by.unwrap().armed);
+        assert_eq!(
+            child_metadata.runs.len(),
+            1,
+            "the update ran in the origin only"
+        );
+        assert!(crate::chat::storage::load_metadata(&app, &origin)
+            .unwrap()
+            .unwrap()
+            .queued_messages
+            .is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn mcp_create_session_can_send_and_read_immediately() {
@@ -3662,7 +3896,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
         )
         .await
         .unwrap_err();
-        assert!(error.message.to_lowercase().contains("archived"));
+        assert!(error.message.contains("Session was deleted and cannot run"));
 
         crate::chat::storage::with_existing_metadata_mut(&app, session_id, |metadata| {
             metadata.archived_at = None;
@@ -3682,7 +3916,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
     }
 
     #[test]
-    fn mcp_index_only_archived_session_stays_archived_and_unknown_ids_stay_unknown() {
+    fn mcp_index_only_deleted_session_stays_deleted_and_unknown_ids_stay_unknown() {
         let (_temp, app) = session_lookup_app();
         let session_id = crate::chat::storage::with_index_mut(&app, "current-base", |index| {
             index.sessions[0].archived_at = Some(123);
@@ -3726,21 +3960,18 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
     }
 
     #[test]
-    fn mcp_session_recovery_does_not_bypass_worktree_archive_or_reopen_closed_base() {
+    fn mcp_session_recovery_does_not_bypass_inactive_worktree() {
         let (_temp, app) = session_lookup_app();
         let index = crate::chat::storage::load_index(&app, "current-base").unwrap();
         let session_id = &index.sessions[0].id;
         let mut projects = crate::projects::storage::load_projects_data(&app).unwrap();
+        // A base session is never archived, so archive a regular worktree.
+        projects.worktrees[0].session_type = crate::projects::types::SessionType::Worktree;
         projects.worktrees[0].archived_at = Some(123);
         crate::projects::storage::save_projects_data(&app, &projects).unwrap();
         let (worktree_id, _) = resolve_session_worktree(&app, session_id).unwrap();
         assert!(ensure_mcp_session_can_run(&app, session_id, &worktree_id).is_err());
         assert!(ensure_mcp_worktree_not_archived(&app, &worktree_id).is_err());
-
-        crate::chat::storage::preserve_base_sessions(&app, "current-base", "project").unwrap();
-        projects.worktrees.clear();
-        crate::projects::storage::save_projects_data(&app, &projects).unwrap();
-        assert!(resolve_session_worktree(&app, session_id).is_err());
     }
 
     #[test]
@@ -4124,11 +4355,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
             "create_worktree_from_existing_branch",
             "import_worktree",
             "rename_worktree",
-            "archive_worktree",
-            "unarchive_worktree",
-            "list_archived_worktrees",
             "delete_worktree",
-            "permanently_delete_worktree",
         ] {
             assert!(names.contains(expected), "missing MCP tool {expected}");
         }
@@ -4145,13 +4372,19 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
             "MCP must not expose auto-open for create_worktree_from_existing_branch"
         );
 
-        let list_archived = find_tool(&tools, "list_archived_worktrees");
-        assert!(
-            list_archived["inputSchema"]["properties"]
-                .get("projectId")
-                .is_some(),
-            "list_archived_worktrees should allow optional projectId filter"
-        );
+        for removed in [
+            "archive_worktree",
+            "unarchive_worktree",
+            "list_archived_worktrees",
+            "permanently_delete_worktree",
+            "archive_session",
+            "unarchive_session",
+        ] {
+            assert!(
+                !names.contains(removed),
+                "archive tool {removed} must be gone"
+            );
+        }
 
         let rename = find_tool(&tools, "rename_worktree");
         assert_eq!(
@@ -4160,10 +4393,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
         );
 
         for limited in [
-            "archive_worktree",
-            "unarchive_worktree",
             "delete_worktree",
-            "permanently_delete_worktree",
             "import_worktree",
             "create_worktree_from_existing_branch",
         ] {
@@ -4205,8 +4435,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
             "set_session_model",
             "set_session_settings",
             "get_session_capabilities",
-            "archive_session",
-            "unarchive_session",
+            "delete_session",
             "move_session",
             "get_run_environments",
             "start_run_environment",
@@ -4214,10 +4443,10 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
             assert!(names.contains(expected), "missing MCP tool {expected}");
         }
 
-        for limited in ["archive_session", "unarchive_session", "move_session"] {
+        for limited in ["delete_session", "move_session"] {
             assert!(
                 RATE_LIMITED_TOOLS.contains(&limited),
-                "session archive tool {limited} must be rate-limited"
+                "session mutation tool {limited} must be rate-limited"
             );
         }
 
@@ -4233,10 +4462,12 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
             );
         }
 
-        let archive = find_tool(&tools, "archive_session");
-        assert_eq!(archive["inputSchema"]["required"], json!(["sessionId"]));
-        let unarchive = find_tool(&tools, "unarchive_session");
-        assert_eq!(unarchive["inputSchema"]["required"], json!(["sessionId"]));
+        let delete = find_tool(&tools, "delete_session");
+        assert_eq!(delete["inputSchema"]["required"], json!(["sessionId"]));
+        assert!(delete["description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("30 days"));
         let move_session = find_tool(&tools, "move_session");
         assert_eq!(
             move_session["inputSchema"]["required"],
@@ -4245,8 +4476,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
         let send = find_tool(&tools, "send_chat_message");
         let send_desc = send["description"].as_str().unwrap_or("");
         assert!(
-            send_desc.contains("archived"),
-            "send_chat_message description should mention archive rejection"
+            send_desc.contains("Deleted sessions are rejected"),
+            "send_chat_message description should mention deleted-session rejection"
         );
         assert!(
             send_desc.contains("inherit"),
@@ -4480,6 +4711,20 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
     }
 
     #[test]
+    fn set_connector_is_registered_rate_limited_and_needs_approval() {
+        let tools = tool_registry();
+        let tool = find_tool(&tools, "set_connector");
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["scope", "action", "backend", "name"])
+        );
+        assert!(RATE_LIMITED_TOOLS.contains(&"set_connector"));
+        assert!(crate::agents::mcp::APPROVAL_TOOLS.contains(&"set_connector"));
+        // Not an agent-only tool: an approved call replays through run_tool.
+        assert!(!crate::agents::mcp::is_agent_tool("set_connector"));
+    }
+
+    #[test]
     fn remove_project_is_registered_rate_limited_and_needs_approval() {
         let tools = tool_registry();
         let remove = find_tool(&tools, "remove_project");
@@ -4508,14 +4753,12 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"F
     fn deletion_tool_descriptions_explain_background_completion() {
         let tools = tool_registry();
 
-        for name in ["delete_worktree", "permanently_delete_worktree"] {
-            let tool = find_tool(&tools, name);
-            let description = tool["description"].as_str().expect("tool description");
+        let tool = find_tool(&tools, "delete_worktree");
+        let description = tool["description"].as_str().expect("tool description");
 
-            assert!(description.contains("background"));
-            assert!(description.contains("started"));
-            assert!(description.contains("not completion"));
-        }
+        assert!(description.contains("background"));
+        assert!(description.contains("started"));
+        assert!(description.contains("not completion"));
     }
 
     #[test]

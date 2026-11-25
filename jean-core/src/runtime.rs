@@ -306,7 +306,11 @@ mod tests {
 
     #[tokio::test]
     async fn async_runtime_can_spawn_from_background_threads() {
-        async_runtime::set(tokio::runtime::Handle::current());
+        // The handle is process-global. Leak the runtime: a handle to a dropped
+        // runtime silently discards every task later tests spawn.
+        let runtime: &'static tokio::runtime::Runtime =
+            Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
+        async_runtime::set(runtime.handle().clone());
 
         let task = std::thread::spawn(|| async_runtime::spawn(async { 7 }))
             .join()

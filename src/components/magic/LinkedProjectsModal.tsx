@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link2, X, Search, Plus } from '@/components/icons/reicon'
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { X, Search, Plus } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import {
   Dialog,
@@ -91,19 +91,13 @@ export function LinkedProjectsModal({
     })
   }, [projects, projectId, currentServerId, linkedIds, search, instanceName])
 
-  useEffect(() => {
-    if (!open) {
-      setSearch('')
-      setSelectedIndex(0)
-    }
-  }, [open])
-
-  useEffect(() => {
-    setSelectedIndex(index => {
-      if (availableProjects.length === 0) return 0
-      return Math.min(index, availableProjects.length - 1)
-    })
-  }, [availableProjects.length])
+  // Adjusted during render: reset when closed, clamp when the list shrinks.
+  if (!open && (search !== '' || selectedIndex !== 0)) {
+    setSearch('')
+    setSelectedIndex(0)
+  }
+  const maxSelectedIndex = Math.max(0, availableProjects.length - 1)
+  if (selectedIndex > maxSelectedIndex) setSelectedIndex(maxSelectedIndex)
 
   const updateLinks = useCallback(
     (newIds: string[]) => {
@@ -176,10 +170,7 @@ export function LinkedProjectsModal({
         }}
       >
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Link2 className="h-4 w-4" />
-            Linked Projects
-          </DialogTitle>
+          <DialogTitle>Linked Projects</DialogTitle>
         </DialogHeader>
 
         {/* Current linked projects */}

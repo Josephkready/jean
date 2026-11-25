@@ -15,7 +15,7 @@ import { isNativeApp } from '@/lib/environment'
 
 const MAGIC_MENU_FEATURES = [
   'Commit, push, and open pull requests',
-  'Save context, create recaps, and resolve conflicts',
+  'Inject context, create recaps, and resolve conflicts',
   'Review, merge, and investigate issues',
 ] as const
 
@@ -155,7 +155,7 @@ export function FeatureTourDialog() {
             onClick={() => (page === 0 ? setPage(1) : handleClose())}
           >
             {page === 0 ? 'Next' : 'Got it'}
-            {showShortcut && <Kbd className="ml-2 h-4 px-1 text-[10px]">↵</Kbd>}
+            {showShortcut && <Kbd className="ml-2 h-4 px-1 text-2xs">↵</Kbd>}
           </Button>
         </div>
       </DialogContent>

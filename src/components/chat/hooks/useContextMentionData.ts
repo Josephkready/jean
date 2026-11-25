@@ -184,6 +184,8 @@ export function useContextMentionData({
   discussionLimit?: number
 }): {
   groups: ContextMentionGroup[]
+  /** Every section, including empty ones, in a fixed order (for tabs) */
+  sections: ContextMentionGroup[]
   isFetching: boolean
   /** Fetch the next GitHub page when `limit` passes the loaded discussions */
   loadMoreDiscussions: (limit: number) => void
@@ -199,7 +201,6 @@ export function useContextMentionData({
   const prState = includeClosed ? 'all' : 'open'
   const discussionState = includeClosed ? 'all' : 'open'
   const securityState = includeClosed ? 'all' : 'open'
-  const advisoryState = includeClosed ? 'all' : 'published'
 
   const { data: issueResult, isFetching: isFetchingIssues } = useGitHubIssues(
     enabledProjectPath,
@@ -216,13 +217,18 @@ export function useContextMentionData({
     isFetching: isFetchingDiscussions,
     hasNextPage: hasMoreDiscussionPages,
     fetchNextPage: fetchNextDiscussionPage,
-  } = useGitHubDiscussions(enabledProjectPath, discussionState, {
-    enabled: open,
-  })
+  } = useGitHubDiscussions(
+    enabledProjectPath,
+    enabledProjectId,
+    discussionState,
+    { enabled: open }
+  )
   const { data: alerts = [], isFetching: isFetchingAlerts } =
-    useDependabotAlerts(enabledProjectPath, securityState, { enabled: open })
+    useDependabotAlerts(enabledProjectPath, enabledProjectId, securityState, {
+      enabled: open,
+    })
   const { data: advisories = [], isFetching: isFetchingAdvisories } =
-    useRepositoryAdvisories(enabledProjectPath, advisoryState, {
+    useRepositoryAdvisories(enabledProjectPath, enabledProjectId, undefined, {
       enabled: open,
     })
   const { data: linearResult, isFetching: isFetchingLinear } = useLinearIssues(
@@ -231,30 +237,39 @@ export function useContextMentionData({
   )
 
   const { data: searchedIssues, isFetching: isSearchingIssues } =
-    useSearchGitHubIssues(enabledProjectPath, activeQuery)
+    useSearchGitHubIssues(enabledProjectPath, enabledProjectId, activeQuery)
   const { data: searchedPRs, isFetching: isSearchingPRs } = useSearchGitHubPRs(
     enabledProjectPath,
+    enabledProjectId,
     activeQuery
   )
   const { data: searchedDiscussions, isFetching: isSearchingDiscussions } =
-    useSearchGitHubDiscussions(enabledProjectPath, activeQuery)
+    useSearchGitHubDiscussions(
+      enabledProjectPath,
+      enabledProjectId,
+      activeQuery
+    )
   const { data: searchedLinear, isFetching: isSearchingLinear } =
     useSearchLinearIssues(enabledProjectId, activeQuery, { enabled: open })
 
   const { data: exactIssue, isFetching: isFetchingExactIssue } =
-    useGetGitHubIssueByNumber(enabledProjectPath, activeQuery)
+    useGetGitHubIssueByNumber(enabledProjectPath, enabledProjectId, activeQuery)
   const { data: exactPR, isFetching: isFetchingExactPR } =
-    useGetGitHubPRByNumber(enabledProjectPath, activeQuery)
+    useGetGitHubPRByNumber(enabledProjectPath, enabledProjectId, activeQuery)
   const { data: exactDiscussion, isFetching: isFetchingExactDiscussion } =
-    useGetGitHubDiscussionByNumber(enabledProjectPath, activeQuery)
+    useGetGitHubDiscussionByNumber(
+      enabledProjectPath,
+      enabledProjectId,
+      activeQuery
+    )
   const { data: exactSecurity, isFetching: isFetchingExactSecurity } =
-    useDependabotAlert(enabledProjectPath, itemNumber)
+    useDependabotAlert(enabledProjectPath, enabledProjectId, itemNumber)
   const { data: exactAdvisory, isFetching: isFetchingExactAdvisory } =
-    useRepositoryAdvisory(enabledProjectPath, ghsaId)
+    useRepositoryAdvisory(enabledProjectPath, enabledProjectId, ghsaId)
   const { data: exactLinear, isFetching: isFetchingExactLinear } =
     useGetLinearIssueByNumber(enabledProjectId, activeQuery, { enabled: open })
 
-  const groups = useMemo<ContextMentionGroup[]>(() => {
+  const sections = useMemo<ContextMentionGroup[]>(() => {
     if (!open) return []
 
     const q = lowerTrim(activeQuery)
@@ -367,7 +382,7 @@ export function useContextMentionData({
       },
       {
         id: 'security',
-        heading: 'Security Alerts',
+        heading: 'Dependabot Alerts',
         items: filteredAlerts.slice(0, 8).map(securityToItem),
       },
       {
@@ -382,11 +397,7 @@ export function useContextMentionData({
       },
     ]
 
-    if (!q) {
-      return allGroups.filter(group => group.items.length > 0)
-    }
-
-    return allGroups.filter(group => group.items.length > 0)
+    return allGroups
   }, [
     activeQuery,
     advisories,
@@ -416,6 +427,11 @@ export function useContextMentionData({
     searchedPRs,
   ])
 
+  const groups = useMemo(
+    () => sections.filter(group => group.items.length > 0),
+    [sections]
+  )
+
   const loadMoreDiscussions = (limit: number) => {
     if (limit > discussions.length && hasMoreDiscussionPages) {
       void fetchNextDiscussionPage()
@@ -424,6 +440,7 @@ export function useContextMentionData({
 
   return {
     groups,
+    sections,
     loadMoreDiscussions,
     isFetching:
       isFetchingIssues ||

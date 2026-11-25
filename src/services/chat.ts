@@ -10,7 +10,6 @@ import { toast } from 'sonner'
 import { logger } from '@/lib/logger'
 import { generateId } from '@/lib/uuid'
 import { disposeTerminal } from '@/lib/terminal-instances'
-import { readCloseBypassDetail } from '@/lib/confirm-bypass'
 import {
   beginSessionStateHydration,
   endSessionStateHydration,
@@ -18,10 +17,8 @@ import {
 import type {
   AllSessionsResponse,
   SessionSearchResponse,
-  ArchivedSessionEntry,
   ChatMessage,
   ChatHistory,
-  LoadedMessages,
   Session,
   WorktreeSessions,
   Question,
@@ -32,19 +29,24 @@ import type {
   EffortLevel,
   LabelData,
   QueuedMessage,
+  QueuedMessageEdit,
   Backend,
   PinnedTable,
+  UserTurnOutcome,
 } from '@/types/chat'
 import { isTauri, projectsQueryKeys } from '@/services/projects'
 import { hasBackendTransport } from '@/lib/environment'
-import { preferencesQueryKeys } from '@/services/preferences'
-import type { AppPreferences } from '@/types/preferences'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { useTerminalStore } from '@/store/terminal-store'
 import { clearSessionScrollState } from '@/components/chat/session-scroll-state'
 import { isNativeTerminalBackend } from '@/lib/native-cli-session'
 import { getResumeArgs } from '@/components/chat/session-card-utils'
+import {
+  openSessions,
+  resolveActiveAfterCloseSuccess,
+  resolveActiveSessionId,
+} from '@/components/chat/session-lifecycle'
 import {
   bareCommandForBackend,
   isBareCliCommand,
@@ -58,16 +60,10 @@ import type {
 } from '@/types/projects'
 import { preserveQueryCacheOnError } from '@/lib/query-error'
 import { renameTableKeyMessage } from '@/lib/pinned-table-reveal'
-import { closeRequiresConfirmation } from '@/components/projects/worktree-close-decision'
 import {
   useConsolidatedAllSessions,
   useConsolidatedUnreadSessions,
 } from './multi-server-sessions'
-
-/** Default number of recent runs loaded on initial session fetch. */
-export const INITIAL_RUN_LIMIT = 10
-/** Number of older runs to load per scroll-up batch. */
-export const OLDER_RUN_BATCH = 10
 
 /** Move a continued session to its new position in every cached Recent page. */
 export function touchRecentSessionCaches(
@@ -126,7 +122,7 @@ export function cleanupSessionTerminalForRemovedSession(
 /**
  * Optimistically drop a session from the ['all-sessions'] cache so the
  * finished-session bell (UnreadBell / useUnreadCount) updates instantly when a
- * session is closed or archived. Invalidation still runs afterwards to
+ * session is closed. Invalidation still runs afterwards to
  * reconcile with the backend.
  */
 export function removeSessionFromAllSessionsCache(
@@ -324,6 +320,7 @@ export const chatQueryKeys = {
   session: (sessionId: string) =>
     [...chatQueryKeys.all, 'session', sessionId] as const,
   nativeCliSessions: (
+    worktreeId: string,
     worktreePath: string,
     backend: string,
     searchQuery: string,
@@ -333,6 +330,7 @@ export const chatQueryKeys = {
       ...chatQueryKeys.all,
       'native-cli-sessions',
       backend,
+      worktreeId,
       worktreePath,
       searchQuery,
       resultLimit,
@@ -391,6 +389,36 @@ export function useChatHistory(
 // Session Queries (new multi-tab support)
 // ============================================================================
 
+const SESSIONS_STALE_TIME = 1000 * 60 * 5 // enables instant tab bar rendering from cache
+const SESSIONS_GC_TIME = 1000 * 60 * 2
+const SESSION_STALE_TIME = 1000 * 60 * 5 // enables instant session switching from cache
+const SESSION_GC_TIME = 1000 * 60 * 5
+
+async function fetchWorktreeSessions(
+  worktreeId: string | null,
+  worktreePath: string | null,
+  includeMessageCounts: boolean
+): Promise<WorktreeSessions> {
+  if (!hasBackendTransport() || !worktreeId || !worktreePath) {
+    // An empty success is cached for the stale time and hides every tab.
+    throw new Error('Session list is not available yet')
+  }
+
+  try {
+    logger.debug('Loading sessions', { worktreeId, includeMessageCounts })
+    const sessions = await invoke<WorktreeSessions>('get_sessions', {
+      worktreeId,
+      worktreePath,
+      includeMessageCounts,
+    })
+    logger.info('Sessions loaded', { count: sessions.sessions.length })
+    return sessions
+  } catch (error) {
+    logger.error('Failed to load sessions', { error, worktreeId })
+    return preserveQueryCacheOnError(error)
+  }
+}
+
 /**
  * Hook to get all sessions for a worktree (for tab bar display)
  */
@@ -405,34 +433,17 @@ export function useSessions(
     queryKey: includeMessageCounts
       ? [...chatQueryKeys.sessions(worktreeId ?? ''), 'with-counts']
       : chatQueryKeys.sessions(worktreeId ?? ''),
-    queryFn: async (): Promise<WorktreeSessions> => {
-      if (!hasBackendTransport() || !worktreeId || !worktreePath) {
-        // An empty success is cached for the stale time and hides every tab.
-        throw new Error('Session list is not available yet')
-      }
-
-      try {
-        logger.debug('Loading sessions', { worktreeId, includeMessageCounts })
-        const sessions = await invoke<WorktreeSessions>('get_sessions', {
-          worktreeId,
-          worktreePath,
-          includeMessageCounts,
-        })
-        logger.info('Sessions loaded', { count: sessions.sessions.length })
-        return sessions
-      } catch (error) {
-        logger.error('Failed to load sessions', { error, worktreeId })
-        return preserveQueryCacheOnError(error)
-      }
-    },
+    queryFn: () =>
+      fetchWorktreeSessions(worktreeId, worktreePath, includeMessageCounts),
     enabled: !!worktreeId && !!worktreePath,
-    staleTime: 1000 * 60 * 5, // 5 minutes - enables instant tab bar rendering from cache
-    gcTime: 1000 * 60 * 2,
+    staleTime: SESSIONS_STALE_TIME,
+    gcTime: SESSIONS_GC_TIME,
     refetchOnMount: options?.refetchOnMount ?? true, // Modal openings must also refresh cached empty lists
   })
 }
 
 export function useNativeCliSessions(
+  worktreeId: string | null,
   worktreePath: string | null,
   backend: NonNullable<Session['backend']> | null,
   options?: { enabled?: boolean; searchQuery?: string; resultLimit?: number }
@@ -442,6 +453,7 @@ export function useNativeCliSessions(
 
   return useQuery({
     queryKey: chatQueryKeys.nativeCliSessions(
+      worktreeId ?? '',
       worktreePath ?? '',
       backend ?? '',
       searchQuery,
@@ -453,6 +465,7 @@ export function useNativeCliSessions(
         return await invoke<NativeCliHistorySession[]>(
           'list_native_cli_sessions',
           {
+            worktreeId: worktreeId ?? undefined,
             worktreePath,
             backend,
             searchQuery,
@@ -753,160 +766,174 @@ export function useSession(
 
   return useQuery({
     queryKey: chatQueryKeys.session(sessionId ?? ''),
-    queryFn: async (): Promise<Session | null> => {
-      if (
-        !hasBackendTransport() ||
-        !sessionId ||
-        !worktreeId ||
-        !worktreePath
-      ) {
-        return null
-      }
-
-      try {
-        logger.debug('[useSession] fetching from disk', { sessionId })
-        const session = await invoke<Session>('get_session', {
-          worktreeId,
-          worktreePath,
-          sessionId,
-          limit: INITIAL_RUN_LIMIT,
-        })
-        logger.info('[useSession] loaded', {
-          sessionId,
-          messageCount: session.messages.length,
-          totalRuns: session.total_runs,
-          loadedFromRun: session.loaded_run_start_index,
-          backend: session.backend,
-        })
-
-        // Preserve optimistic messages from sendMessage.onMutate that the
-        // backend hasn't persisted yet (race: refetchOnMount fires before
-        // the send_chat_message invoke writes the user message to disk).
-        // Also preserve messages the user loaded via scroll-up pagination:
-        // fresh fetch uses INITIAL_RUN_LIMIT so its loaded_run_start_index
-        // reflects only the last N runs — using it would wrongly re-show
-        // the "load older" button for runs the cache already contains.
-        const cached = queryClient.getQueryData<Session>(
-          chatQueryKeys.session(sessionId)
-        )
-        const cachedStart = cached?.loaded_run_start_index
-        const freshStart = session.loaded_run_start_index ?? 0
-        const cachedIncludesCancelledAssistant = cached?.messages.some(
-          message => message.role === 'assistant' && message.cancelled
-        )
-        const shouldPreserveCachedMessages =
-          cached &&
-          cached.messages.length > session.messages.length &&
-          !cachedIncludesCancelledAssistant &&
-          (useChatStore.getState().sendingSessionIds[sessionId] ||
-            (typeof cachedStart === 'number' && cachedStart < freshStart))
-
-        if (cached && shouldPreserveCachedMessages) {
-          logger.warn(
-            '[useSession] preserving cached messages over fresh fetch',
-            {
-              sessionId,
-              cachedCount: cached.messages.length,
-              diskCount: session.messages.length,
-              cachedStart: cached.loaded_run_start_index,
-              freshStart: session.loaded_run_start_index,
-            }
-          )
-          return {
-            ...session,
-            messages: cached.messages,
-            // Keep cached pagination cursor (reflects what's actually in
-            // messages); fresh total_runs is still authoritative.
-            loaded_run_start_index: cached.loaded_run_start_index,
-          }
-        }
-
-        return session
-      } catch (error) {
-        logger.warn('[useSession] FAILED to load session', { error, sessionId })
-        return preserveQueryCacheOnError(error)
-      }
-    },
+    queryFn: () =>
+      fetchSession(queryClient, sessionId, worktreeId, worktreePath),
     enabled: !!sessionId && !!worktreeId && !!worktreePath,
-    staleTime: 1000 * 60 * 5, // 5 minutes - enables instant session switching from cache
-    gcTime: 1000 * 60 * 5,
+    staleTime: SESSION_STALE_TIME,
+    gcTime: SESSION_GC_TIME,
     // Respects staleTime; cross-client sync handled by cache:invalidate broadcast
     // from Rust after send_chat_message completes (JSONL fully written).
     refetchOnMount: true,
   })
 }
 
-/**
- * Hook to load an older window of messages for an already-cached session.
- * Prepends the fetched messages into the existing `useSession` cache and
- * advances `loaded_run_start_index` so subsequent calls walk backward.
- */
-export function useLoadOlderMessages() {
-  const queryClient = useQueryClient()
+/** Runs loaded on a cold session open. One run = user + assistant message. */
+const INITIAL_SESSION_RUN_LIMIT = 1
 
-  return useMutation({
-    retry: false,
-    mutationFn: async ({
+interface LoadedMessages {
+  messages: ChatMessage[]
+  total_runs: number
+  loaded_run_start_index: number
+}
+
+/** Prepend every run before `beforeRunIndex` to the cached session. */
+async function loadOlderSessionHistory(
+  queryClient: QueryClient,
+  sessionId: string,
+  beforeRunIndex: number
+): Promise<void> {
+  const queryKey = chatQueryKeys.session(sessionId)
+  try {
+    const older = await invoke<LoadedMessages>('load_older_session_messages', {
       sessionId,
       beforeRunIndex,
-      limit = OLDER_RUN_BATCH,
-    }: {
-      sessionId: string
-      beforeRunIndex: number
-      limit?: number
-    }): Promise<LoadedMessages> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
+      limit: beforeRunIndex,
+    })
+    queryClient.setQueryData<Session | null>(queryKey, prev => {
+      // A full refetch already replaced the window; nothing to merge.
+      if (!prev || prev.loaded_run_start_index !== beforeRunIndex) return prev
+      const loadedIds = new Set(prev.messages.map(message => message.id))
+      return {
+        ...prev,
+        messages: [
+          ...older.messages.filter(message => !loadedIds.has(message.id)),
+          ...prev.messages,
+        ],
+        loaded_run_start_index: older.loaded_run_start_index,
       }
-      logger.debug('[useLoadOlderMessages] fetching', {
+    })
+  } catch (error) {
+    logger.warn('[useSession] FAILED to load older history', {
+      error,
+      sessionId,
+    })
+    // Warm cache now, so the refetch loads the full history in one call.
+    void queryClient.invalidateQueries({ queryKey, exact: true })
+  }
+}
+
+async function fetchSession(
+  queryClient: QueryClient,
+  sessionId: string | null,
+  worktreeId: string | null,
+  worktreePath: string | null
+): Promise<Session | null> {
+  if (!hasBackendTransport() || !sessionId || !worktreeId || !worktreePath) {
+    return null
+  }
+
+  try {
+    // Cold load: fetch only the latest run (user + assistant message) so the
+    // chat renders fast, then fill in older history in the background.
+    // Warm refetches load everything at once so the transcript never shrinks.
+    const coldCache = queryClient.getQueryData<Session>(
+      chatQueryKeys.session(sessionId)
+    )
+    const isColdLoad = !coldCache || coldCache.messages.length === 0
+    logger.debug('[useSession] fetching from disk', { sessionId, isColdLoad })
+    const session = await invoke<Session>('get_session', {
+      worktreeId,
+      worktreePath,
+      sessionId,
+      ...(isColdLoad ? { limit: INITIAL_SESSION_RUN_LIMIT } : {}),
+    })
+    const olderStart = session.loaded_run_start_index ?? 0
+    if (isColdLoad && olderStart > 0) {
+      void loadOlderSessionHistory(queryClient, sessionId, olderStart)
+    }
+    logger.info('[useSession] loaded', {
+      sessionId,
+      messageCount: session.messages.length,
+      totalRuns: session.total_runs,
+      loadedFromRun: session.loaded_run_start_index,
+      backend: session.backend,
+    })
+
+    // Preserve optimistic messages from sendMessage.onMutate that the
+    // backend hasn't persisted yet (race: refetchOnMount fires before
+    // the send_chat_message invoke writes the user message to disk).
+    const cached = queryClient.getQueryData<Session>(
+      chatQueryKeys.session(sessionId)
+    )
+    const cachedIncludesCancelledAssistant = cached?.messages.some(
+      message => message.role === 'assistant' && message.cancelled
+    )
+    const shouldPreserveCachedMessages =
+      cached &&
+      cached.messages.length > session.messages.length &&
+      !cachedIncludesCancelledAssistant &&
+      useChatStore.getState().sendingSessionIds[sessionId]
+
+    if (cached && shouldPreserveCachedMessages) {
+      logger.warn('[useSession] preserving cached messages over fresh fetch', {
         sessionId,
-        beforeRunIndex,
-        limit,
+        cachedCount: cached.messages.length,
+        diskCount: session.messages.length,
       })
-      const result = await invoke<LoadedMessages>(
-        'load_older_session_messages',
-        {
-          sessionId,
-          beforeRunIndex,
-          limit,
-        }
-      )
-      logger.info('[useLoadOlderMessages] loaded', {
-        sessionId,
-        added: result.messages.length,
-        newStart: result.loaded_run_start_index,
-      })
-      return result
-    },
-    onSuccess: (loaded, { sessionId }) => {
-      queryClient.setQueryData<Session>(
-        chatQueryKeys.session(sessionId),
-        old => {
-          if (!old) return old
-          // Guard: if backend returned empty (race) keep cache untouched.
-          if (loaded.messages.length === 0) {
-            return {
-              ...old,
-              total_runs: loaded.total_runs,
-              loaded_run_start_index: loaded.loaded_run_start_index,
-            }
-          }
-          return {
-            ...old,
-            messages: [...loaded.messages, ...old.messages],
-            total_runs: loaded.total_runs,
-            loaded_run_start_index: loaded.loaded_run_start_index,
-          }
-        }
-      )
-    },
-    onError: error => {
-      if (isWsDisconnectError(error)) return
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to load older messages', { error })
-      toast.error('Failed to load older messages', { description: message })
-    },
+      return { ...session, messages: cached.messages }
+    }
+
+    return session
+  } catch (error) {
+    logger.warn('[useSession] FAILED to load session', { error, sessionId })
+    return preserveQueryCacheOnError(error)
+  }
+}
+
+/** Warm the session cache (e.g. on hover) so opening the session is instant. */
+export function prefetchSession(
+  queryClient: QueryClient,
+  sessionId: string,
+  worktreeId: string,
+  worktreePath: string
+): Promise<void> {
+  return queryClient.prefetchQuery({
+    queryKey: chatQueryKeys.session(sessionId),
+    queryFn: () =>
+      fetchSession(queryClient, sessionId, worktreeId, worktreePath),
+    staleTime: SESSION_STALE_TIME,
+    gcTime: SESSION_GC_TIME,
   })
+}
+
+/**
+ * Warm the session list and the session a worktree opens by default, using
+ * the same choice as the open path (store active id → backend active → first).
+ */
+export async function prefetchWorktreeDefaultSession(
+  queryClient: QueryClient,
+  worktreeId: string,
+  worktreePath: string
+): Promise<void> {
+  let sessions: WorktreeSessions
+  try {
+    sessions = await queryClient.ensureQueryData({
+      queryKey: chatQueryKeys.sessions(worktreeId),
+      queryFn: () => fetchWorktreeSessions(worktreeId, worktreePath, false),
+      staleTime: SESSIONS_STALE_TIME,
+      gcTime: SESSIONS_GC_TIME,
+    })
+  } catch {
+    return
+  }
+  const sessionId = resolveActiveSessionId({
+    current: useChatStore.getState().activeSessionIds[worktreeId],
+    backendActive: sessions.active_session_id,
+    listedIds: openSessions(sessions.sessions).map(session => session.id),
+  })
+  if (sessionId) {
+    await prefetchSession(queryClient, sessionId, worktreeId, worktreePath)
+  }
 }
 
 // ============================================================================
@@ -1255,15 +1282,16 @@ export function useCloseSession() {
       clearSessionScrollState(sessionId)
       cleanupSessionTerminalForRemovedSession(worktreeId, sessionId)
 
-      // Switch to the new active session — but only if the caller hasn't already
-      // picked a neighbor (e.g. SessionChatModal sets it based on visual tab order)
-      if (newActiveId) {
-        const currentActive =
-          useChatStore.getState().activeSessionIds[worktreeId]
-        if (!currentActive || currentActive === sessionId) {
-          useChatStore.getState().setActiveSession(worktreeId, newActiveId)
-        }
-      } else {
+      // Switch to the new active session, unless the caller already picked a
+      // neighbor (SessionChatModal selects one from the visual tab order).
+      const next = resolveActiveAfterCloseSuccess(
+        useChatStore.getState().activeSessionIds[worktreeId],
+        sessionId,
+        newActiveId
+      )
+      if (next.kind === 'select') {
+        useChatStore.getState().setActiveSession(worktreeId, next.sessionId)
+      } else if (next.kind === 'clear') {
         // Keep the worktree modal open and let it render its empty state.
         useChatStore.setState(state => {
           if (!(worktreeId in state.activeSessionIds)) return state
@@ -1287,296 +1315,57 @@ export function useCloseSession() {
 }
 
 /**
- * Hook to archive a session tab (hide from UI but keep messages)
- * Returns the new active session ID (if any)
+ * Close sessions of one worktree one after another, stopping at the first
+ * failure (`useCloseSession` reports it). Used to close a lead session with
+ * its finished sub-sessions.
  */
-export function useArchiveSession() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-      worktreePath,
-      sessionId,
-    }: {
-      worktreeId: string
-      worktreePath: string
-      sessionId: string
-    }): Promise<string | null> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Archiving session', { sessionId })
-      const newActiveId = await invoke<string | null>('archive_session', {
-        worktreeId,
-        worktreePath,
-        sessionId,
-      })
-      logger.info('Session archived', { newActiveId })
-      return newActiveId
-    },
-    onSuccess: (newActiveId, { worktreeId, sessionId }) => {
-      queryClient.invalidateQueries({
-        queryKey: chatQueryKeys.sessions(worktreeId),
-      })
-
-      // Invalidate archived sessions query so it shows up immediately
-      queryClient.invalidateQueries({ queryKey: ['all-archived-sessions'] })
-
-      // Drop from the finished-session bell (reads from ['all-sessions']).
-      removeSessionFromAllSessionsCache(queryClient, sessionId)
-      queryClient.invalidateQueries({
-        queryKey: chatQueryKeys.unreadSessionCount(),
-      })
-      queryClient.invalidateQueries({ queryKey: ['all-sessions'] })
-
-      // Clear all session-scoped state
-      useChatStore
-        .getState()
-        .clearSessionState(sessionId, { removeReferences: true })
-      clearSessionScrollState(sessionId)
-      cleanupSessionTerminalForRemovedSession(worktreeId, sessionId)
-
-      // Switch to the new active session — but only if the caller hasn't already
-      // picked a neighbor (e.g. SessionChatModal sets it based on visual tab order)
-      if (newActiveId) {
-        const currentActive =
-          useChatStore.getState().activeSessionIds[worktreeId]
-        if (!currentActive || currentActive === sessionId) {
-          useChatStore.getState().setActiveSession(worktreeId, newActiveId)
-        }
-      } else {
-        // Keep the worktree modal open and let it render its empty state.
-        useChatStore.setState(state => {
-          if (!(worktreeId in state.activeSessionIds)) return state
-          const { [worktreeId]: _removed, ...rest } = state.activeSessionIds
-          return { activeSessionIds: rest }
-        })
-      }
-    },
-    onError: error => {
-      if (isWsDisconnectError(error)) return
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to archive session', { error })
-      toast.error('Failed to archive session', { description: message })
-    },
-  })
-}
-
 /**
- * Hook to unarchive a session (restore it to the session list)
+ * Close a lead session, then the sub-sessions the user chose with it. The
+ * sub-sessions were picked when the dialog opened; one that started working
+ * since then is kept, so a running or waiting session is never closed.
  */
-export function useUnarchiveSession() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-      worktreePath,
-      sessionId,
-    }: {
-      worktreeId: string
-      worktreePath: string
-      sessionId: string
-    }): Promise<Session> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Unarchiving session', { sessionId })
-      const session = await invoke<Session>('unarchive_session', {
-        worktreeId,
-        worktreePath,
-        sessionId,
-      })
-      logger.info('Session unarchived', { sessionId })
-      return session
-    },
-    onSuccess: (_, { worktreeId }) => {
-      queryClient.invalidateQueries({
-        queryKey: chatQueryKeys.sessions(worktreeId),
-      })
-      toast.success('Session restored')
-    },
-    onError: error => {
-      if (isWsDisconnectError(error)) return
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to unarchive session', { error })
-      toast.error('Failed to restore session', { description: message })
-    },
-  })
-}
-
-/** Response from restore_session_with_base */
-interface RestoreSessionWithBaseResponse {
-  session: Session
-  worktree: Worktree
-}
-
-/**
- * Hook to restore a session, recreating the base session if needed
- *
- * This handles the case where a session belongs to a closed base session.
- * It will recreate the base session and migrate all sessions to it.
- */
-export function useRestoreSessionWithBase() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-      worktreePath,
-      sessionId,
-      projectId,
-    }: {
-      worktreeId: string
-      worktreePath: string
-      sessionId: string
-      projectId: string
-    }): Promise<RestoreSessionWithBaseResponse> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
-      }
-
-      logger.debug('Restoring session with base', { sessionId, projectId })
-      const response = await invoke<RestoreSessionWithBaseResponse>(
-        'restore_session_with_base',
-        {
+export function useCloseSessions() {
+  const { mutateAsync } = useCloseSession()
+  return useCallback(
+    async (
+      worktreeId: string,
+      worktreePath: string,
+      leadSessionId: string,
+      subSessionIds: string[]
+    ) => {
+      try {
+        await mutateAsync({
           worktreeId,
           worktreePath,
-          sessionId,
-          projectId,
-        }
-      )
-      logger.info('Session restored with base', {
-        sessionId,
-        worktreeId: response.worktree.id,
-      })
-      return response
-    },
-    onSuccess: (response, { worktreeId }) => {
-      // Invalidate queries for both old and new worktree IDs
-      queryClient.invalidateQueries({
-        queryKey: chatQueryKeys.sessions(worktreeId),
-      })
-      if (response.worktree.id !== worktreeId) {
-        queryClient.invalidateQueries({
-          queryKey: chatQueryKeys.sessions(response.worktree.id),
+          sessionId: leadSessionId,
         })
+      } catch {
+        return
       }
-      // Invalidate worktrees to show the restored base session
-      queryClient.invalidateQueries({
-        queryKey: projectsQueryKeys.worktrees(response.worktree.project_id),
-      })
-      toast.success('Session restored')
-    },
-    onError: error => {
-      if (isWsDisconnectError(error)) return
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to restore session with base', { error })
-      toast.error('Failed to restore session', { description: message })
-    },
-  })
-}
-
-/**
- * Hook to permanently delete an archived session
- */
-export function useDeleteArchivedSession() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: async ({
-      worktreeId,
-      worktreePath,
-      sessionId,
-    }: {
-      worktreeId: string
-      worktreePath: string
-      sessionId: string
-    }): Promise<void> => {
-      if (!isTauri()) {
-        throw new Error('Not in Tauri context')
+      for (const sessionId of subSessionIds) {
+        const chat = useChatStore.getState()
+        if (
+          chat.sendingSessionIds[sessionId] ||
+          chat.waitingForInputSessionIds[sessionId]
+        ) {
+          continue
+        }
+        try {
+          await mutateAsync({ worktreeId, worktreePath, sessionId })
+        } catch {
+          return
+        }
       }
-
-      logger.debug('Deleting archived session', { sessionId })
-      await invoke('delete_archived_session', {
-        worktreeId,
-        worktreePath,
-        sessionId,
-      })
-      logger.info('Archived session deleted', { sessionId })
     },
-    onSuccess: (_, { worktreeId }) => {
-      queryClient.invalidateQueries({
-        queryKey: chatQueryKeys.sessions(worktreeId),
-      })
-      toast.success('Session permanently deleted')
-    },
-    onError: error => {
-      if (isWsDisconnectError(error)) return
-      const message = error instanceof Error ? error.message : String(error)
-      logger.error('Failed to delete archived session', { error })
-      toast.error('Failed to delete session', { description: message })
-    },
-  })
-}
-
-/**
- * Hook to list archived sessions for a worktree
- */
-export function useArchivedSessions(
-  worktreeId: string | null,
-  worktreePath: string | null
-) {
-  return useQuery({
-    queryKey: [...chatQueryKeys.sessions(worktreeId ?? ''), 'archived'],
-    queryFn: async (): Promise<Session[]> => {
-      if (!isTauri() || !worktreeId || !worktreePath) {
-        return []
-      }
-
-      logger.debug('Listing archived sessions', { worktreeId })
-      const sessions = await invoke<Session[]>('list_archived_sessions', {
-        worktreeId,
-        worktreePath,
-      })
-      logger.debug('Got archived sessions', { count: sessions.length })
-      return sessions
-    },
-    enabled: !!worktreeId && !!worktreePath,
-    staleTime: 1000 * 60, // 1 minute
-  })
-}
-
-/**
- * Hook to list all archived sessions across all active worktrees
- */
-export function useAllArchivedSessions() {
-  return useQuery({
-    queryKey: ['all-archived-sessions'],
-    queryFn: async (): Promise<ArchivedSessionEntry[]> => {
-      if (!isTauri()) {
-        return []
-      }
-
-      logger.debug('Listing all archived sessions')
-      const sessions = await invoke<ArchivedSessionEntry[]>(
-        'list_all_archived_sessions'
-      )
-      logger.debug('Got all archived sessions', { count: sessions.length })
-      return sessions
-    },
-    staleTime: 1000 * 60, // 1 minute
-  })
+    [mutateAsync]
+  )
 }
 
 /**
  * Hook to handle the CMD+W keybinding for closing session or worktree.
  *
  * Listens for 'close-session-or-worktree' custom event and either:
- * - Removes the current session (archive or delete based on removal_behavior preference)
+ * - Deletes the current session (the backend purges it after 30 days)
  * - When closing the last session, navigates to canvas instead of deleting the worktree
  */
 export function useCloseSessionOrWorktreeKeybinding(
@@ -1585,7 +1374,6 @@ export function useCloseSessionOrWorktreeKeybinding(
     mode?: 'worktree' | 'session'
   ) => void
 ) {
-  const archiveSession = useArchiveSession()
   const closeSession = useCloseSession()
   const queryClient = useQueryClient()
 
@@ -1594,14 +1382,14 @@ export function useCloseSessionOrWorktreeKeybinding(
       useChatStore.getState()
 
     if (!activeWorktreeId || !activeWorktreePath) {
-      logger.warn('Cannot archive session: no active worktree')
+      logger.warn('Cannot close session: no active worktree')
       return
     }
 
     const activeSessionId = getActiveSession(activeWorktreeId)
 
     if (!activeSessionId) {
-      logger.warn('Cannot archive session: no active session')
+      logger.warn('Cannot close session: no active session')
       return
     }
 
@@ -1611,63 +1399,29 @@ export function useCloseSessionOrWorktreeKeybinding(
     )
 
     if (!sessionsData) {
-      logger.warn('Cannot archive session: no sessions data in cache')
+      logger.warn('Cannot close session: no sessions data in cache')
       return
     }
 
-    // Filter to non-archived sessions
-    const activeSessions = sessionsData.sessions.filter(s => !s.archived_at)
-    const sessionCount = activeSessions.length
+    const sessionCount = openSessions(sessionsData.sessions).length
 
-    // Read removal behavior preference from cache
-    const preferences = queryClient.getQueryData<AppPreferences>(
-      preferencesQueryKeys.preferences()
-    )
-    const shouldDelete = preferences?.removal_behavior === 'delete'
-
-    // Close the current session (archive or delete)
-    if (shouldDelete) {
-      logger.debug('Deleting session', {
-        sessionId: activeSessionId,
-        sessionCount,
-      })
-      closeSession.mutate({
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        sessionId: activeSessionId,
-      })
-    } else {
-      logger.debug('Archiving session', {
-        sessionId: activeSessionId,
-        sessionCount,
-      })
-      archiveSession.mutate({
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        sessionId: activeSessionId,
-      })
-    }
-  }, [archiveSession, closeSession, queryClient])
+    logger.debug('Deleting session', {
+      sessionId: activeSessionId,
+      sessionCount,
+    })
+    closeSession.mutate({
+      worktreeId: activeWorktreeId,
+      worktreePath: activeWorktreePath,
+      sessionId: activeSessionId,
+    })
+  }, [closeSession, queryClient])
 
   useEffect(() => {
-    const handleCloseSessionOrWorktree = (e: Event) => {
+    const handleCloseSessionOrWorktree = () => {
       // Skip when session modal is open — SessionChatModal handles CMD+W in that case
       if (useUIStore.getState().sessionChatModalOpen) return
 
-      const bypassConfirm = readCloseBypassDetail(e)
-
-      // Check if confirmation is required
-      const preferences = queryClient.getQueryData<AppPreferences>(
-        preferencesQueryKeys.preferences()
-      )
-      if (
-        !bypassConfirm &&
-        closeRequiresConfirmation(
-          preferences?.confirm_session_close,
-          preferences?.removal_behavior
-        ) &&
-        onConfirmRequired
-      ) {
+      if (onConfirmRequired) {
         // Find branch name and session count for the dialog
         const { activeWorktreeId } = useChatStore.getState()
         if (activeWorktreeId) {
@@ -1878,7 +1632,7 @@ export function upsertTurnAssistantMessage(
  * text and the attachment chips; the wire message would instead inline them
  * as `[Image attached: ...]` refs.
  */
-function restoreRejectedSend(sessionId: string, sentMessage: string) {
+export function restoreRejectedSend(sessionId: string, sentMessage: string) {
   const store = useChatStore.getState()
   const typed = store.lastSentMessages[sessionId]
   const hasAttachments = !!store.lastSentAttachments[sessionId]
@@ -1896,6 +1650,194 @@ function restoreRejectedSend(sessionId: string, sentMessage: string) {
     store.clearLastSentAttachments(sessionId)
   }
   store.clearLastSentMessage(sessionId)
+}
+
+/**
+ * Put this client's last send back into the composer. Returns false when this
+ * client has no unfinished send for the session (another client or the
+ * backend queue sent it). `lastSentArgs` outlives its send, so it is only
+ * trusted while `lastSentMessages` marks the send as unfinished.
+ */
+export function restoreLastSentPrompt(sessionId: string): boolean {
+  const store = useChatStore.getState()
+  const typed = store.lastSentMessages[sessionId]
+  if (typed === undefined) return false
+  restoreRejectedSend(
+    sessionId,
+    store.lastSentArgs[sessionId]?.message ?? typed
+  )
+  return true
+}
+
+/** Ids of returned queued prompts this client already put back. */
+const returnedQueuedMessageIds = new Set<string>()
+
+/**
+ * Put a queued prompt the backend could not run back into the composer, once
+ * per client. A newer draft is kept and the prompt is appended below it. The
+ * prompt's attachment chips come back only when the composer has none, so
+ * they never merge into a draft the user is still building. Returns whether
+ * anything was restored.
+ */
+export function restoreReturnedQueuedMessage(
+  sessionId: string,
+  message: QueuedMessage
+): boolean {
+  if (returnedQueuedMessageIds.has(message.id)) return false
+  returnedQueuedMessageIds.add(message.id)
+  const images = message.pendingImages ?? []
+  const files = message.pendingFiles ?? []
+  const skills = message.pendingSkills ?? []
+  const textFiles = message.pendingTextFiles ?? []
+  const hasAttachments =
+    images.length + files.length + skills.length + textFiles.length > 0
+  if (!message.message.trim() && !hasAttachments) return false
+  const store = useChatStore.getState()
+  if (message.message.trim()) {
+    const draft = store.inputDrafts[sessionId]?.trim()
+    store.setInputDraft(
+      sessionId,
+      draft ? `${draft}\n\n${message.message}` : message.message
+    )
+  }
+  const composerHasChips =
+    store.getPendingImages(sessionId).length > 0 ||
+    store.getPendingFiles(sessionId).length > 0 ||
+    store.getPendingSkills(sessionId).length > 0 ||
+    store.getPendingTextFiles(sessionId).length > 0
+  if (hasAttachments && !composerHasChips) {
+    useChatStore.setState(state => ({
+      pendingImages: { ...state.pendingImages, [sessionId]: images },
+      pendingFiles: { ...state.pendingFiles, [sessionId]: files },
+      pendingSkills: { ...state.pendingSkills, [sessionId]: skills },
+      pendingTextFiles: { ...state.pendingTextFiles, [sessionId]: textFiles },
+    }))
+  }
+  return true
+}
+
+/**
+ * The send this client has in flight, keyed by session. The entry is `null`
+ * until `chat:sending` names the send's user message id. A `chat:user-turn`
+ * verdict belongs to this client only when that id matches; a verdict for an
+ * older run that lands after a new send started must not touch the new
+ * prompt. Without an entry (no send in flight, or after a reload) the verdict
+ * is judged by time alone.
+ */
+const ownSends = new Map<string, string | null>()
+
+export function beginOwnSend(sessionId: string) {
+  ownSends.set(sessionId, null)
+}
+
+export function bindOwnSend(sessionId: string, userMessageId: string) {
+  if (ownSends.get(sessionId) === null) ownSends.set(sessionId, userMessageId)
+}
+
+export function endOwnSend(sessionId: string) {
+  ownSends.delete(sessionId)
+}
+
+/** Whether the verdict is about another send while this client's own is unfinished. */
+export function isVerdictForOtherSend(
+  sessionId: string,
+  userMessageId: string | undefined
+): boolean {
+  if (!userMessageId) return false
+  const own = ownSends.get(sessionId)
+  return own !== undefined && own !== userMessageId
+}
+
+/**
+ * Run ids whose verdict this client already applied, keyed by session. The
+ * backend can state a verdict twice for one run (a pending cancel answers at
+ * once, the send's teardown answers again); the second is a no-op.
+ */
+const appliedVerdictRuns = new Map<string, string>()
+
+export function markVerdictApplied(sessionId: string, runId: string): boolean {
+  if (appliedVerdictRuns.get(sessionId) === runId) return false
+  appliedVerdictRuns.set(sessionId, runId)
+  return true
+}
+
+/** Forget per-client send tracking. Tests call this between cases. */
+export function resetSendTracking() {
+  ownSends.clear()
+  appliedVerdictRuns.clear()
+  returnedQueuedMessageIds.clear()
+  userTurnOutcomes.clear()
+  for (const waiter of userTurnWaiters.values()) waiter('not_accepted')
+  userTurnWaiters.clear()
+}
+
+/**
+ * The backend's verdict on the prompt of the send in flight, keyed by session.
+ * `chat:user-turn` records it; `useSendMessage.onError` reads it so a rejected
+ * invoke after an accepted run does not restore a prompt that is already in
+ * history. Absent means the invoke was rejected before acceptance.
+ */
+const userTurnOutcomes = new Map<string, UserTurnOutcome>()
+
+/** `onError` calls that wait for a verdict, keyed by session. */
+const userTurnWaiters = new Map<string, (outcome: UserTurnOutcome) => void>()
+
+/**
+ * How long a rejected send waits for its `chat:user-turn` verdict. The event
+ * and the invoke rejection travel on different channels, so the rejection can
+ * arrive first (#927). Only rejections before acceptance, which get no
+ * verdict, wait the full time.
+ */
+export const USER_TURN_VERDICT_GRACE_MS = 1_500
+
+export function recordUserTurnOutcome(
+  sessionId: string,
+  outcome: UserTurnOutcome
+) {
+  const waiter = userTurnWaiters.get(sessionId)
+  if (waiter) {
+    userTurnWaiters.delete(sessionId)
+    waiter(outcome)
+    return
+  }
+  userTurnOutcomes.set(sessionId, outcome)
+}
+
+/** Forget a verdict or a wait left over from an earlier send. */
+export function clearUserTurnOutcome(sessionId: string) {
+  userTurnOutcomes.delete(sessionId)
+  userTurnWaiters.get(sessionId)?.('not_accepted')
+  userTurnWaiters.delete(sessionId)
+}
+
+/**
+ * The verdict on the send that just failed. Resolves at once when it is
+ * already recorded, else when it arrives, else `not_accepted` after
+ * `timeoutMs`.
+ */
+export function awaitUserTurnOutcome(
+  sessionId: string,
+  timeoutMs = USER_TURN_VERDICT_GRACE_MS
+): Promise<UserTurnOutcome> {
+  const recorded = userTurnOutcomes.get(sessionId)
+  if (recorded) {
+    userTurnOutcomes.delete(sessionId)
+    return Promise.resolve(recorded)
+  }
+  clearUserTurnOutcome(sessionId)
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      if (userTurnWaiters.get(sessionId) === finish) {
+        userTurnWaiters.delete(sessionId)
+      }
+      resolve('not_accepted')
+    }, timeoutMs)
+    const finish = (outcome: UserTurnOutcome) => {
+      clearTimeout(timer)
+      resolve(outcome)
+    }
+    userTurnWaiters.set(sessionId, finish)
+  })
 }
 
 /**
@@ -1967,7 +1909,7 @@ export function useSendMessage() {
         chromeEnabled,
         customProfileName,
         backend,
-        })
+      })
 
       console.log(
         `[SendMutation] mutationFn CALLED sessionId=${sessionId} worktreeId=${worktreeId}`
@@ -2002,7 +1944,7 @@ export function useSendMessage() {
         chromeEnabled,
         customProfileName,
         backend,
-        })
+      })
       logger.info('Chat message sent', { responseId: response.id })
       return response
     },
@@ -2017,6 +1959,8 @@ export function useSendMessage() {
       backend,
     }) => {
       console.log(`[SendMutation] onMutate sessionId=${sessionId}`)
+      clearUserTurnOutcome(sessionId)
+      beginOwnSend(sessionId)
       // Cancel in-flight queries to avoid overwriting optimistic update
       await queryClient.cancelQueries({
         queryKey: chatQueryKeys.session(sessionId),
@@ -2099,6 +2043,7 @@ export function useSendMessage() {
       }
     },
     onSuccess: (response, { sessionId, worktreeId }, context) => {
+      endOwnSend(sessionId)
       console.log(
         `[SendMutation] onSuccess sessionId=${sessionId} cancelled=${response.cancelled}`,
         {
@@ -2169,8 +2114,9 @@ export function useSendMessage() {
         queryKey: chatQueryKeys.sessions(worktreeId),
       })
     },
-    onError: (error, variables, context) => {
+    onError: async (error, variables, context) => {
       const { sessionId, worktreeId } = variables
+      endOwnSend(sessionId)
       // Check for cancellation - Tauri errors may not be Error instances
       // so we check both the stringified error and the message property
       const errorStr = String(error)
@@ -2254,19 +2200,28 @@ export function useSendMessage() {
         return
       }
 
-      // Check if CLI produced streaming content before the error.
-      // If so, the CLI likely ran — don't destroy the conversation by
-      // rolling back to pre-send state. Instead, refetch from disk (#209).
-      const hasStreamedContent =
-        !!useChatStore.getState().streamingContents[sessionId]
-      if (hasStreamedContent) {
-        logger.warn(
-          'Error after CLI produced content, refetching instead of rollback',
-          {
-            sessionId,
-            error: errorMessage,
-          }
-        )
+      // The verdict can arrive after the rejection. Keep the optimistic
+      // prompt on screen until it does (#927).
+      const userTurn = await awaitUserTurnOutcome(sessionId)
+
+      // Sending was cleared above, so a newer send owns the session now.
+      if (useChatStore.getState().sendingSessionIds[sessionId]) {
+        queryClient.invalidateQueries({
+          queryKey: chatQueryKeys.session(sessionId),
+        })
+        queryClient.invalidateQueries({
+          queryKey: chatQueryKeys.sessions(worktreeId),
+        })
+        return
+      }
+
+      // The backend recorded the prompt before it failed (crashed run or a
+      // provider rejection). History owns it; refetch instead of rolling back.
+      if (userTurn === 'persisted') {
+        logger.warn('Error after the prompt was recorded, refetching', {
+          sessionId,
+          error: errorMessage,
+        })
         setError(sessionId, errorMessage || 'Unknown error occurred')
         queryClient.invalidateQueries({
           queryKey: chatQueryKeys.session(sessionId),
@@ -2280,7 +2235,8 @@ export function useSendMessage() {
         return
       }
 
-      // Real errors with no streamed content — rollback to previous state
+      // Rejected before acceptance (or withdrawn): the prompt is not in
+      // history, so put it back and roll the cache back to the pre-send state.
       setError(sessionId, errorMessage || 'Unknown error occurred')
 
       // The composer is cleared before the async mutation starts.
@@ -2482,6 +2438,7 @@ export function useSetSessionModel() {
  * Hook to set the backend for a session
  */
 export function useSetSessionBackend() {
+  // react-doctor-disable-next-line react-doctor/query-mutation-missing-invalidation -- caller chains setSessionModel, which invalidates
   return useMutation({
     mutationFn: async ({
       worktreeId,
@@ -2916,12 +2873,15 @@ export function formatAnswersAsNaturalLanguage(
  * Read a plan file from disk
  * Used by the frontend to display plan file content in the approval UI
  */
-export async function readPlanFile(path: string): Promise<string> {
+export async function readPlanFile(
+  path: string,
+  sessionId: string
+): Promise<string> {
   if (!isTauri()) {
     throw new Error('Not in Tauri context')
   }
 
-  return invoke<string>('read_plan_file', { path })
+  return invoke<string>('read_plan_file', { path, sessionId })
 }
 
 // ============================================================================
@@ -3000,7 +2960,7 @@ export function persistRemoveQueued(
 }
 
 /**
- * Persist a queued message text edit.
+ * Persist a queued message edit (text and attachments).
  * Returns false when the message is no longer queued.
  */
 export async function persistUpdateQueued(
@@ -3008,14 +2968,14 @@ export async function persistUpdateQueued(
   worktreePath: string,
   sessionId: string,
   messageId: string,
-  message: string
+  edit: QueuedMessageEdit
 ): Promise<boolean> {
   return invoke<boolean>('update_queued_message', {
     worktreeId,
     worktreePath,
     sessionId,
     messageId,
-    message,
+    edit,
   })
 }
 

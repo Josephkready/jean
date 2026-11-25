@@ -378,6 +378,7 @@ describe('MagicModal manual PR link', () => {
           {
             command: 'investigate',
             type: 'issue',
+            separate: false,
             override: { backend, model },
           },
         ])
@@ -430,6 +431,7 @@ describe('MagicModal manual PR link', () => {
           {
             command: 'investigate',
             type: 'issue',
+            separate: false,
             ...(source === 'magic-settings'
               ? {}
               : {
@@ -474,7 +476,7 @@ describe('MagicModal manual PR link', () => {
     expect(within(mobileMenu).getByText('Context')).toBeInTheDocument()
     expect(within(mobileMenu).getByText('Pull Request')).toBeInTheDocument()
     expect(
-      within(mobileMenu).getByRole('button', { name: 'Save Context' })
+      within(mobileMenu).getByRole('button', { name: 'Inject Context' })
     ).toHaveClass('min-h-12')
     expect(mobileMenu.querySelector('kbd')).not.toBeInTheDocument()
   })
@@ -1018,7 +1020,7 @@ describe('MagicModal manual PR link', () => {
     await waitFor(() => {
       expect(mocks.invokeMock).toHaveBeenCalledWith(
         'revert_last_local_commit',
-        { worktreePath: '/repo/worktree' }
+        { worktreeId: 'wt-1', worktreePath: '/repo/worktree' }
       )
     })
     expect(

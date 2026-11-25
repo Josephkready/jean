@@ -230,6 +230,21 @@ accumulating `PiResponse`. Both the batch parser (`parse_pi_json_stream_inner`)
 and the live streaming parser (`parse_pi_stream`) call it per line — never
 re-parse the whole accumulated buffer (avoids O(n²) on long sessions).
 
+#### OpenCode 1.x and 2.x
+
+**Read this before changing OpenCode code.** OpenCode 2.x (2.2.0+) has a different HTTP API, auth, event stream and MCP config shape than 1.x. 1.x stays in `jean-core/src/chat/opencode.rs`; 2.x turns are in `jean-core/src/chat/opencode_v2/`. Branch on `OpenCodeServer.api` from `opencode_server::acquire_server`; never add 2.x paths to the 1.x code. Details, and the steps to support a new 2.x minor: `docs/developer/architecture-guide.md` → "OpenCode 1.x and 2.x".
+
+#### Claude CLI Mid-Turn Steering (Detached Host)
+
+**Read this before changing Claude run spawning or `tail_claude_output`.**
+
+When `claude_auto_steer_enabled` is on (Unix only, CLI must list `--replay-user-messages`), Claude runs go through Jean's detached Claude host (`jean-core/src/chat/claude_host.rs`, argv `--jean-claude-host`) instead of `cat input | claude`. The host keeps Claude's stdin open and accepts `steer` requests on `<app_data>/r/c<sid8><run8>.sock` (`steer_claude_turn`).
+
+- The host drops the replayed initial prompt and rewrites replayed steers (`isReplay: true` user lines) as `steered_user_message`. Never parse replayed user lines elsewhere.
+- The host closes stdin on `result` only when no steer is pending, then writes `jean_claude_host_exit`. The tailer treats runs with `jean_claude_host_start` as host-backed and ends at the exit marker, not the first `result`.
+- `steer_claude_turn` emits `chat:steered` as soon as the host accepts the steer (the CLI can take seconds to consume it). It marks the text as announced, so the tailer skips its own `chat:steered` on consumption. After a Jean restart nothing is marked, so recovered runs emit from the tailer.
+- Details and limitations: `docs/developer/architecture-guide.md` → "Claude CLI mid-turn steering".
+
 #### Claude CLI JSON Schema Pattern
 
 **CRITICAL:** When using `--json-schema` with Claude CLI, structured output is returned via a tool call, not plain text.
@@ -312,7 +327,6 @@ const [isLoading, setIsLoading] = useState(false)
 
 **Current background operations using this pattern:**
 
-- `handleSaveContext` in `ChatWindow.tsx` - saves context with AI summarization
 - `handleOpenPr` in `ChatWindow.tsx` - creates PR with AI-generated title/body
 - `handleCommit` in `ChatWindow.tsx` - creates commit with AI-generated message (uses `create_commit_with_ai` command with JSON schema)
 - `handleReview` in `ChatWindow.tsx` - runs AI code review, stores results in Zustand/UI state, shows in ReviewResultsPanel (uses `run_review_with_ai` command with JSON schema)
@@ -376,12 +390,11 @@ The helpers are defined in `jean-core/src/platform/process.rs` and re-exported v
 **Shared Hooks** (in `src/components/chat/hooks/`):
 
 - `useCanvasKeyboardNav.ts` - Arrow key navigation (up/down), Enter selection
-- `useCanvasShortcutEvents.ts` - Event handlers for `open-plan`, `open-recap`, `approve-plan`, etc.
+- `useCanvasShortcutEvents.ts` - Event handlers for `open-recap`, `approve-plan`, etc.
 - `useCanvasStoreState.ts` - Subscribes to chat store state needed for `SessionCardData`
 
 **Shared Components**:
 
-- `SessionListRow.tsx` - Compact row component for list view
 - `session-card-utils.tsx` - `computeSessionCardData()`, `SessionCardData`, and `SessionCardProps` types
 
 #### Feature Parity: Native, Web Access, and Mobile
@@ -400,6 +413,7 @@ Keyboard-only affordances are native-desktop only by default:
 - Hide `<Kbd>` shortcut hints in web access and mobile views unless the shortcut is explicitly useful there.
 - Disable matching keyboard-only default actions in web access/mobile (examples: toast default action `Alt+Enter`, unread session mark-read `R`).
 - Keep the click/tap action available; only gate the desktop keyboard hint/handler.
+- `src/App.css` hides every `<kbd>` outside the native app. To show a hint in web access (desktop width), add `data-web-visible` to the `<kbd>` (example: Magic menu letters). Mobile width still hides all `<kbd>`.
 - Use `isNativeApp()` plus `useIsMobile()`/viewport width for gating, and add tests for native desktop, web access, and mobile.
 
 #### Image Processing on Paste/Drop
@@ -417,7 +431,7 @@ Images pasted or dropped into chat are processed before saving (`process_image()
 
 Three files need updating when adding a new model option:
 
-1. **`src/types/preferences.ts`** — Add to `ClaudeModel` type union and `modelOptions` array (full labels like "Claude Fable 5.1" or "Claude Sonnet 4.6"). Current first-party Claude Code model IDs use API-style names such as `claude-fable-5-1`, `claude-opus-4-8[1m]`, and `claude-sonnet-4-6[1m]`; legacy/provider aliases may still use `opus`, `sonnet`, or `haiku`.
+1. **`src/types/preferences.ts`** — Add to `ClaudeModel` type union and `modelOptions` array (full labels like "Claude Fable 5.2" or "Claude Sonnet 4.6"). Current first-party Claude Code model IDs use API-style names such as `claude-fable-5-2`, `claude-opus-4-8[1m]`, and `claude-sonnet-4-6[1m]`; legacy/provider aliases may still use `opus`, `sonnet`, or `haiku`.
 2. **`src/store/chat-store.ts`** — Add to duplicated `ClaudeModel` type union (line ~27)
 3. **`src/components/chat/ChatToolbar.tsx`** — Add to `MODEL_OPTIONS` array (short labels like "Sonnet 4.6")
 
@@ -474,7 +488,7 @@ When adding a backend like Claude, Codex, OpenCode, Cursor, Pi, Command Code, or
 
 **System prompts, modes, and context:**
 
-- [ ] Assemble prompts with project custom prompt, global system prompt, execution-mode instruction, language preference, and parallel-execution prompt when enabled
+- [ ] Assemble prompts with project custom prompt, global system prompt, execution-mode instruction, language preference, and parallel-execution prompt (always on)
 - [ ] Use the backend-native system prompt mechanism when available; otherwise use a safe fallback
 - [ ] Map Jean execution modes (`plan`, `build`, `yolo`) to backend-native sandbox/approval controls
 - [ ] Update `getSupportedExecutionModes`, `isExecutionModeSupported`, and `normalizeExecutionModeForBackend`

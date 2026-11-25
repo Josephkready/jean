@@ -11,38 +11,52 @@ describe('RecentWorktreesList structure', () => {
     expect(source).toContain('const INITIAL_RECENT_LIMIT = 10')
     expect(source).toContain('const RECENT_PAGE_SIZE = 25')
     expect(source).toContain('{Math.min(hiddenCount, RECENT_PAGE_SIZE)} more')
-    expect(source).toContain('setLimit(value => value + RECENT_PAGE_SIZE)')
-    expect(source).toContain('Show snoozed sessions')
+    expect(source).toContain('setLimit(pageSize + RECENT_PAGE_SIZE)')
+    // Paging actions scroll with the list instead of a fixed sidebar footer.
+    expect(source).not.toContain('createPortal')
     expect(source).toContain(
-      'createPortal(footerActions, footerActionsContainer)'
+      'const showLoadMore = snoozedExpanded && hiddenCount > 0'
     )
-    expect(source).toContain('Snoozed · inactive for 24 hours')
-    expect(source).toContain('isSnoozedSession(row.lastActivityAt)')
+    expect(source).toContain('aria-label="Snoozed sessions"')
+    expect(source).toContain('aria-expanded={snoozedExpanded}')
+    expect(source).toContain('isSnoozedSession(row.lastActivityAt, now)')
   })
 
-  it('shows session, project, worktree, activity, and Git diff information', () => {
-    expect(source).toContain('{row.session.name}')
+  it('moves unpinned working sessions to a collapsible Working shelf', () => {
+    expect(source).toContain(
+      'if (!isPinned && isRunning(row)) groups.workingRows.push(row)'
+    )
+    expect(source).toContain('aria-label="Working sessions"')
+    expect(source).toContain('aria-expanded={workingExpanded}')
+    expect(source).toMatch(
+      /\[\.\.\.listRows, \.\.\.visibleWorkingRows, \.\.\.visibleSnoozedRows\]/
+    )
+    // The shelf sits at the bottom on every view, mobile included.
+    expect(source).not.toContain('isMobile && workingShelfSection')
+  })
+
+  it('shows session, project, worktree, and activity without Git diff information', () => {
+    expect(source).toContain(': row.session.name}')
     expect(source).toContain('namingSessionIds[row.session.id]')
     expect(source).toContain("'Generating…'")
     expect(source).toContain('{row.projectName} · {row.worktree.name}')
     expect(source).toContain('formatRecentActivity(row.lastActivityAt)')
-    expect(source).toContain('+{row.added}')
-    expect(source).toContain('-{row.removed}')
-    expect(source).toContain('fetchWorktreesStatus(projectId)')
+    expect(source).not.toContain('+{row.added}')
+    expect(source).not.toContain('-{row.removed}')
+    expect(source).not.toContain('fetchWorktreesStatus')
     expect(source).toContain('text-[13px] font-medium')
-    expect(source).toContain('text-[11px]')
+    expect(source).toContain('text-2xs')
   })
 
-  it('aligns status, activity, and optional Git changes in grid rows', () => {
+  it('aligns status and activity in grid rows', () => {
     expect(source).toContain('flex w-full flex-col gap-y-1')
     expect(source).toContain('min-w-0 flex-1 truncate text-[13px]')
     expect(source).not.toContain('min-w-14')
     expect(source).toContain('<WorkingWaveform />')
     expect(source).toContain(
-      'className="flex shrink-0 items-center justify-end gap-2 text-[10px] tabular-nums"'
+      'className="flex shrink-0 items-center justify-end text-2xs tabular-nums"'
     )
     expect(source).toContain('@container flex flex-col')
-    expect(source).toContain('hidden gap-1 font-medium @[15rem]:flex')
     expect(source).not.toContain('pt-4')
     expect(source).not.toContain('absolute right-3 top-2')
   })
@@ -58,14 +72,10 @@ describe('RecentWorktreesList structure', () => {
   })
 
   it('uses fully rounded rows and a full background for the current row', () => {
-    expect(source).toContain('@container flex flex-col gap-2 px-2 pt-2')
-    expect(source).toContain('rounded-lg border py-2.5 pl-3 pr-3')
-    expect(source).toContain(
-      "isCurrent ? 'border-border bg-muted/50 text-foreground shadow'"
-    )
-    expect(source).toContain(
-      ": 'border-transparent bg-transparent text-muted-foreground'"
-    )
+    expect(source).toContain("'@container flex flex-col gap-2 px-2'")
+    expect(source).toContain('rounded-lg py-2.5 pl-3 pr-3')
+    expect(source).toContain("isCurrent ? 'bg-muted/50 text-foreground shadow'")
+    expect(source).toContain(": 'bg-transparent text-muted-foreground'")
     expect(source).not.toContain('rounded-r-lg')
     expect(source).not.toContain('border-l-2')
     expect(source).not.toContain('bg-card/40')
@@ -74,13 +84,11 @@ describe('RecentWorktreesList structure', () => {
   })
 
   it('keeps current-row, keyboard, partial failure, and accessibility behavior', () => {
-    expect(source).toContain('event.metaKey')
-    expect(source).toContain("['ArrowUp', 'ArrowDown']")
+    expect(source).toContain("'open-adjacent-recent-session'")
+    expect(source).not.toContain("addEventListener('keydown'")
     expect(source).toContain('getAdjacentRecentRow(')
     expect(source).toContain('displayedRows,')
     expect(source).not.toContain('ignoresNavigationShortcut')
-    expect(source).toContain('event.stopPropagation()')
-    expect(source).toContain('{ capture: true }')
     expect(source).toContain("aria-current={isCurrent ? 'page' : undefined}")
     expect(source).toContain('aria-label="Recent sessions"')
     expect(source).toContain('Some recent sessions could')
@@ -99,11 +107,11 @@ describe('RecentWorktreesList structure', () => {
   })
 
   it('fetches pinned sessions without creating a list for each selected session', () => {
-    expect(source).toContain(
-      "queryKey: ['recent-worktrees', projectKey, limit, pinnedSessionIds]"
+    expect(source).toMatch(
+      /queryKey: \[\s*'recent-worktrees',\s*projectKey,\s*limit,\s*pinnedSessionIds,?\s*\]/
     )
-    expect(source).toContain(
-      'fetchRecentWorktrees(projects, limit, pinnedSessionIds)'
+    expect(source).toMatch(
+      /fetchRecentWorktrees\(\s*projects,\s*limit,\s*pinnedSessionIds,/
     )
     expect(source).not.toContain(
       "queryKey: ['recent-worktrees', projectKey, limit, selectedSessionId]"
@@ -120,7 +128,7 @@ describe('RecentWorktreesList structure', () => {
     expect(source).toContain("weight={isPinned ? 'Filled' : 'Outline'}")
     expect(source).toContain('void setRecentSessionPinned(')
     expect(source).toContain('pinned.has(row.session.id)')
-    expect(source).toContain('return sortRecentRows(')
+    expect(source).toContain('sortRecentRows(rows, pinned, isRunning)')
     expect(source).toContain('opacity-100')
     expect(source).toContain('md:opacity-0')
     expect(source).toContain('md:group-hover:opacity-100')
@@ -135,17 +143,15 @@ describe('RecentWorktreesList structure', () => {
     const pinLabel = source.indexOf(
       "isPinned ? 'Unpin session' : 'Pin session'"
     )
-    const gitAdded = source.indexOf('+{row.added}')
     expect(pinLabel).toBeGreaterThan(-1)
     expect(projectName).toBeGreaterThan(pinLabel)
-    expect(gitAdded).toBeGreaterThan(projectName)
     expect(source).toContain("isPinned ? 'Unpin session' : 'Pin session'")
     expect(source).toContain('<TooltipContent>')
     expect(source).not.toContain('title={isPinned')
     expect(source).toContain('!isPinned &&')
     expect(source).toContain('showPinnedSeparator')
     expect(source).toContain('role="separator"')
-    expect(source).toContain('border-t border-border/70')
+    expect(source).toContain('border-t border-border/20')
   })
 
   it('opens a session from the full card without treating the pin as an open action', () => {

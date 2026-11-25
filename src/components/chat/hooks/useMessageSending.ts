@@ -46,7 +46,9 @@ import {
   useInstalledBackends,
 } from '@/hooks/useInstalledBackends'
 import { applySessionSettingToSession } from './session-setting-sync'
+import { saveQueuedMessageEdit } from './useQueuedPromptActions'
 import { CODEX_GOAL_TURN_PREFIX } from '../goal-utils'
+import { resolveMentions, type MentionCandidate } from '../agent-mentions'
 
 interface UseMessageSendingParams {
   activeSessionId: string | null | undefined
@@ -58,11 +60,13 @@ interface UseMessageSendingParams {
   selectedThinkingLevelRef: RefObject<ThinkingLevel>
   selectedEffortLevelRef: RefObject<EffortLevel>
   executionModeRef: RefObject<ExecutionMode>
-  useAdaptiveThinkingRef: RefObject<boolean>
-  isCodexBackendRef: RefObject<boolean>
+  /** Whether a turn on this backend and model takes an effort level. */
+  usesEffortFor: (backend: CliBackend, model: string) => boolean
   mcpServersDataRef: RefObject<McpServerInfo[] | undefined>
   enabledMcpServersRef: RefObject<string[]>
   selectedBackendRef: RefObject<CliBackend>
+  /** Agent chats: `@` mention candidates; undefined in project chats */
+  mentionCandidatesRef?: RefObject<MentionCandidate[] | undefined>
   preferences:
     | {
         custom_cli_profiles?: { name: string }[]
@@ -132,11 +136,11 @@ export function useMessageSending({
   selectedThinkingLevelRef,
   selectedEffortLevelRef,
   executionModeRef,
-  useAdaptiveThinkingRef,
-  isCodexBackendRef,
+  usesEffortFor,
   mcpServersDataRef,
   enabledMcpServersRef,
   selectedBackendRef,
+  mentionCandidatesRef,
   preferences,
   sendMessage,
   createSession,
@@ -280,6 +284,7 @@ export function useMessageSending({
       preferences?.ai_language,
       preferences?.magic_prompts?.parallel_execution,
       resolveCustomProfile,
+      inputRef,
     ]
   )
 
@@ -330,6 +335,8 @@ export function useMessageSending({
       e: React.FormEvent | undefined,
       options?: {
         forceSteer?: boolean
+        /** Queue even when auto-steer is enabled (primary modifier held). */
+        forceQueue?: boolean
         /**
          * Runs after the input is captured and cleared, before the message is
          * sent. Session/worktree targets are captured at call time, so the send
@@ -366,6 +373,10 @@ export function useMessageSending({
       const files = getPendingFiles(activeSessionId ?? '')
       const skills = getPendingSkills(activeSessionId ?? '')
       const textFiles = getPendingTextFiles(activeSessionId ?? '')
+      const mentionCandidates = mentionCandidatesRef?.current
+      const mentions = mentionCandidates
+        ? resolveMentions(textMessage, mentionCandidates)
+        : []
 
       if (
         !textMessage &&
@@ -376,6 +387,34 @@ export function useMessageSending({
       )
         return
       if (!activeSessionId || !activeWorktreeId || !activeWorktreePath) return
+
+      // Editing a queued prompt: save the composer content back into the
+      // queue at the same position instead of sending it.
+      const editingQueuedId =
+        useChatStore.getState().editingQueuedMessageIds[activeSessionId]
+      if (editingQueuedId) {
+        const saved = await saveQueuedMessageEdit(
+          activeSessionId,
+          editingQueuedId,
+          {
+            message: textMessage,
+            pendingImages: images,
+            pendingFiles: files,
+            pendingSkills: skills,
+            pendingTextFiles: textFiles,
+            ...(mentionCandidates ? { mentions } : {}),
+          }
+        )
+        if (saved) {
+          clearInputDraft(activeSessionId)
+          clearPendingImages(activeSessionId)
+          clearPendingFiles(activeSessionId)
+          clearPendingSkills(activeSessionId)
+          clearPendingTextFiles(activeSessionId)
+          clearChatInputState()
+        }
+        return
+      }
 
       // Intercept /login — interactive CLI login is not available inside Jean
       // headless chat (issue #387). Open CliLoginModal instead.
@@ -574,11 +613,11 @@ export function useMessageSending({
         const params = textMessage.slice(1 + slashName.length).trim()
         const claudeSkills =
           queryClient.getQueryData<{ name: string }[]>(
-            skillQueryKeys.claudeSkills(activeWorktreePath)
+            skillQueryKeys.claudeSkills(activeWorktreeId, activeWorktreePath)
           ) ?? []
         const codexSkills =
           queryClient.getQueryData<{ name: string }[]>(
-            skillQueryKeys.codexSkills(activeWorktreePath)
+            skillQueryKeys.codexSkills(activeWorktreeId, activeWorktreePath)
           ) ?? []
         const opencodeSkills =
           queryClient.getQueryData<{ name: string }[]>(
@@ -611,7 +650,10 @@ export function useMessageSending({
         if (!isSkill) {
           const claudeCommands =
             queryClient.getQueryData<{ name: string; path: string }[]>(
-              skillQueryKeys.claudeCommands(activeWorktreePath)
+              skillQueryKeys.claudeCommands(
+                activeWorktreeId,
+                activeWorktreePath
+              )
             ) ?? []
           const cmd = claudeCommands.find(c => c.name === slashName)
           if (cmd) {
@@ -660,14 +702,10 @@ export function useMessageSending({
       const mode = executionModeRef.current
       const thinkingLvl = selectedThinkingLevelRef.current
       const selectedBackend = selectedBackendRef.current
-      const usesEffortLevel =
-        useAdaptiveThinkingRef.current ||
-        isCodexBackendRef.current ||
-        selectedBackend === 'pi' ||
-        selectedBackend === 'grok' ||
-        selectedBackend === 'kimi' ||
-        selectedBackend === 'antigravity' ||
-        selectedBackend === 'muse'
+      const usesEffortLevel = usesEffortFor(
+        selectedBackend,
+        selectedModelRef.current
+      )
       const queuedMessage: QueuedMessage = {
         id: generateId(),
         message,
@@ -675,6 +713,7 @@ export function useMessageSending({
         pendingFiles: files,
         pendingSkills: skills,
         pendingTextFiles: textFiles,
+        ...(mentions.length > 0 ? { mentions } : {}),
         model: selectedModelRef.current,
         provider: selectedProviderRef.current,
         executionMode: mode,
@@ -713,7 +752,8 @@ export function useMessageSending({
         if (
           isSteerCapableBackend(backend, preferences) &&
           (options?.forceSteer ||
-            isBackendAutoSteerEnabled(backend, preferences))
+            (!options?.forceQueue &&
+              isBackendAutoSteerEnabled(backend, preferences)))
         ) {
           try {
             const steerMessage = buildMessageWithRefs(queuedMessage)
@@ -765,12 +805,16 @@ export function useMessageSending({
           }
         }
         console.log(`[Send] handleSubmit ENQUEUING (session is sending)`)
-        enqueueMessage(activeSessionId, queuedMessage)
+        // An explicit queue must not be steered by the backend queue drain.
+        const toEnqueue = options?.forceQueue
+          ? { ...queuedMessage, noSteer: true }
+          : queuedMessage
+        enqueueMessage(activeSessionId, toEnqueue)
         persistEnqueue(
           activeWorktreeId,
           activeWorktreePath,
           activeSessionId,
-          queuedMessage
+          toEnqueue
         )
         return
       }
@@ -792,6 +836,17 @@ export function useMessageSending({
       queryClient,
       refetchAuth,
       sendMessageNow,
+      inputRef,
+      mentionCandidatesRef,
+      selectedBackendRef,
+      selectedProviderRef,
+      executionModeRef,
+      selectedThinkingLevelRef,
+      usesEffortFor,
+      selectedModelRef,
+      selectedEffortLevelRef,
+      mcpServersDataRef,
+      enabledMcpServersRef,
     ]
   )
 

@@ -18,15 +18,14 @@ vi.mock('@/components/layout/SidebarWidthContext', () => ({
   // Session count badges only render at status-badge widths (>= 320px).
   useSidebarWidth: () => 320,
 }))
-vi.mock('@/hooks/useWorktreeTerminalStatus', () => ({
-  TerminalStatusIndicator: () => null,
-}))
 vi.mock('@/services/git-status', () => ({
   useGitStatus: () => ({ data: null }),
 }))
 vi.mock('@/services/chat', () => ({
   useSessions: () => ({ data: { sessions: mocks.sessions } }),
   useRenameSession: () => ({ mutate: vi.fn() }),
+  useCloseSession: () => ({ mutate: vi.fn() }),
+  useCloseSessions: () => vi.fn(),
 }))
 vi.mock('@/services/projects', () => ({
   useRenameWorktree: () => ({ mutate: vi.fn() }),
@@ -40,13 +39,9 @@ vi.mock('@/components/chat/session-card-utils', () => ({
   groupCardsByStatus: () => [],
   statusConfig: {},
 }))
-vi.mock('@/components/chat/hooks/useSessionArchive', () => ({
-  useSessionArchive: () => ({ handleDeleteSession: vi.fn() }),
-}))
 vi.mock('./useWorktreeMenuActions', () => ({
   useWorktreeMenuActions: () => ({
-    handleArchiveOrClose: vi.fn(),
-    preferences: {},
+    handleClose: vi.fn(),
   }),
 }))
 vi.mock('./WorktreeContextMenu', () => ({
@@ -96,6 +91,25 @@ describe('WorktreeItem count', () => {
     expect(
       screen.queryByRole('status', { name: '2 sessions' })
     ).not.toBeInTheDocument()
+  })
+
+  // #912: a badge after the sync control pushed it left when it appeared.
+  it('places the session count before the sync control', () => {
+    mocks.sessions = [{ id: 's1', messages: [] }]
+    render(
+      <WorktreeItem
+        worktree={{ ...worktree, cached_behind_count: 3 }}
+        projectId="project-1"
+        projectPath="/tmp/project"
+        defaultBranch="main"
+      />
+    )
+
+    const count = screen.getByRole('status', { name: '1 session' })
+    const sync = screen.getByRole('button', { name: '3' })
+    expect(
+      count.compareDocumentPosition(sync) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
   })
 
   it('does not show an empty count', () => {

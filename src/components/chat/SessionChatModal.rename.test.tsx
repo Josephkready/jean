@@ -50,6 +50,9 @@ vi.mock('@/services/chat', () => ({
   useSession: () => ({ data: null, isError: false }),
   useClearSessionHistory: () => ({ mutate: vi.fn() }),
   useRenameSession: () => ({ mutate: mocks.renameMutate }),
+  useCloseSession: () => ({ mutate: vi.fn() }),
+  useCloseSessions: () => vi.fn(),
+  prefetchSession: vi.fn(),
   canReconnectSession: () => false,
   reconnectNativeCliSession: vi.fn(),
 }))
@@ -73,6 +76,7 @@ vi.mock('@/services/github', () => ({
 
 vi.mock('@/services/git-status', () => ({
   useGitStatus: () => ({ data: null }),
+  useIsGitSyncing: () => false,
   performGitSync: vi.fn(),
 }))
 
@@ -109,13 +113,6 @@ vi.mock('@/components/projects/useWorktreeMenuActions', () => ({
 
 vi.mock('./hooks/useCanvasStoreState', () => ({
   useCanvasStoreState: () => ({}),
-}))
-
-vi.mock('./hooks/useSessionArchive', () => ({
-  useSessionArchive: () => ({
-    handleArchiveSession: vi.fn(),
-    handleDeleteSession: vi.fn(),
-  }),
 }))
 
 vi.mock('./hooks/useOpenInNativeClient', () => ({

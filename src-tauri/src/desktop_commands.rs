@@ -8,7 +8,12 @@ use tauri_plugin_dialog::DialogExt;
 use crate::CoreRuntime;
 
 async fn core_command(runtime: &CoreRuntime, command: &str, args: Value) -> Result<Value, String> {
-    jean_core::http_server::dispatch::dispatch_command(&runtime.0, command, args).await
+    jean_core::http_server::dispatch::dispatch_command_off_runtime(
+        runtime.0.clone(),
+        command.to_string(),
+        args,
+    )
+    .await
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -230,6 +235,7 @@ pub async fn open_worktree_in_terminal(
     ssh_host: Option<String>,
     ssh_port: Option<u16>,
     ssh_identity_file: Option<String>,
+    ssh_forward_agent: Option<bool>,
 ) -> Result<(), String> {
     let ssh_args = ssh_host.map(|host| {
         let destination = ssh_user
@@ -237,6 +243,9 @@ pub async fn open_worktree_in_terminal(
             .map(|user| format!("{user}@{host}"))
             .unwrap_or(host);
         let mut args = vec!["-t".to_string()];
+        if ssh_forward_agent == Some(true) {
+            args.push("-A".to_string());
+        }
         if let Some(path) = ssh_identity_file.filter(|path| !path.trim().is_empty()) {
             args.extend([
                 "-o".to_string(),

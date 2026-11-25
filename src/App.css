@@ -5,6 +5,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  --text-2xs: 0.7rem;
   /* Border radius */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -146,7 +147,7 @@ html[data-ipad-standalone='true'] {
   --accent: #282828; /* coolgray-400 */
   --accent-foreground: #fafafa;
   --destructive: #dc2626; /* error red */
-  --warning: #fcd452; /* yellow */
+  --warning: #f59e0b; /* amber: distinct from the yellow primary */
   --warning-foreground: #101010;
   --success: #22c55e; /* green */
   --success-foreground: #101010;
@@ -154,7 +155,7 @@ html[data-ipad-standalone='true'] {
   --info-foreground: #101010;
   --border: #323232; /* coolgray-500 */
   --input: #323232; /* coolgray-500 */
-  --ring: #fcd452; /* yellow focus ring */
+  --ring: #737373; /* neutral gray focus ring */
   --chart-1: #fcd452;
   --chart-2: #22c55e;
   --chart-3: #6b16ed;
@@ -167,9 +168,9 @@ html[data-ipad-standalone='true'] {
   --sidebar-accent: #282828; /* coolgray-400 */
   --sidebar-accent-foreground: #fafafa;
   --sidebar-border: #323232; /* coolgray-500 */
-  --sidebar-ring: #fcd452;
-  --toast-background: #2a2a2a; /* distinct from app bg (#101010) and chat input (#181818) */
-  --toast-border: #3a3a3a;
+  --sidebar-ring: #737373;
+  --toast-background: #181818; /* one step above the app bg (#101010) */
+  --toast-border: #262626;
 }
 
 /* Wave animation for vibing indicator */
@@ -249,6 +250,18 @@ html[data-ipad-standalone='true'] {
 
 .animate-border-spin {
   animation: border-spin 1s linear infinite;
+}
+
+/* Ring-and-arc Loader (reicon.ts): spin only the arc around the viewBox
+   center. Spinning the whole SVG also turns the track ring, which wobbles
+   when the icon box sits on a sub-pixel position. */
+.animate-spin:has(> .reicon-spinner-arc) {
+  animation: none;
+}
+.animate-spin > .reicon-spinner-arc {
+  transform-box: view-box;
+  transform-origin: center;
+  animation: spin 1s linear infinite;
 }
 
 /* Square spinner: rotating conic-gradient border */
@@ -556,11 +569,13 @@ html[data-ipad-standalone='true'] {
     }
   }
 
-  /* Links should always have pointer cursor */
+  /* Links and enabled buttons should always have pointer cursor */
   a,
   .select-text a,
   .select-text a *,
-  .select-text code[data-file-path] {
+  .select-text code[data-file-path],
+  .select-text button:enabled,
+  .select-text button:enabled * {
     cursor: pointer !important;
   }
 
@@ -615,12 +630,16 @@ body {
   line-height: var(--ui-line-height) !important;
 }
 
-/* Text size overrides - scale relative to UI font preference */
+/* Text size overrides - scale relative to UI font preference.
+   text-2xs replaces hard-coded text-[8-11px] so small labels follow the preference too. */
+.text-2xs {
+  font-size: calc(var(--ui-font-size) * 0.7) !important;
+}
 .text-xs {
   font-size: calc(var(--ui-font-size) * 0.85) !important;
 }
 .text-sm {
-  font-size: var(--ui-font-size) !important;
+  font-size: calc(var(--ui-font-size) * 0.93) !important;
 }
 .text-base {
   font-size: var(--ui-font-size) !important;
@@ -654,6 +673,68 @@ body:not(.native-app) kbd:not([data-web-visible]) {
   }
 }
 
+/* Modifier shortcut hints show only while the user holds ⌘/Ctrl/Alt. */
+html:not([data-mod-held]) [data-mod-hint] {
+  display: none !important;
+}
+
+/* Send button while ⌘/Ctrl is held: Mod+Enter sends in the background. */
+.send-background-label {
+  display: none;
+}
+html[data-primary-mod-held] .send-background-armable {
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    0 2px 0 var(--btn-edge),
+    0 0 0 2px color-mix(in oklab, var(--primary) 30%, transparent),
+    0 0 14px color-mix(in oklab, var(--primary) 45%, transparent);
+}
+html[data-primary-mod-held] .send-background-armable .send-label {
+  display: none;
+}
+html[data-primary-mod-held] .send-background-armable .send-background-label {
+  display: inline-flex;
+  animation: send-background-in 160ms ease-out;
+}
+html[data-primary-mod-held] .send-background-armable::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    transparent 30%,
+    color-mix(in oklab, var(--primary-foreground) 28%, transparent) 50%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
+  animation: send-background-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes send-background-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+@keyframes send-background-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-primary-mod-held] .send-background-armable::after,
+  html[data-primary-mod-held] .send-background-armable .send-background-label {
+    animation: none;
+  }
+  html[data-primary-mod-held] .send-background-armable::after {
+    display: none;
+  }
+}
+
 /* UI text styling - font-sans uses UI font preference */
 .font-sans {
   font-family: var(--font-family-sans) !important;
@@ -667,11 +748,14 @@ body:not(.native-app) kbd:not([data-web-visible]) {
 }
 
 /* Inside chat context (.font-mono), text sizes scale relative to chat font */
+.font-mono .text-2xs {
+  font-size: calc(var(--chat-font-size) * 0.7) !important;
+}
 .font-mono .text-xs {
   font-size: calc(var(--chat-font-size) * 0.85) !important;
 }
 .font-mono .text-sm {
-  font-size: var(--chat-font-size) !important;
+  font-size: calc(var(--chat-font-size) * 0.93) !important;
 }
 .font-mono .text-base {
   font-size: var(--chat-font-size) !important;
@@ -702,10 +786,10 @@ body:not(.native-app) kbd:not([data-web-visible]) {
     box-shadow: none;
   }
   15% {
-    background-color: color-mix(in srgb, var(--primary) 12%, transparent);
+    background-color: var(--accent);
     box-shadow:
-      0 0 0 8px color-mix(in srgb, var(--primary) 12%, transparent),
-      0 0 0 10px color-mix(in srgb, var(--primary) 25%, transparent);
+      0 0 0 8px var(--accent),
+      0 0 0 9px color-mix(in srgb, var(--foreground) 20%, transparent);
   }
 }
 .settings-search-highlight {
@@ -773,6 +857,7 @@ body:not(.native-app) kbd:not([data-web-visible]) {
   .animate-icon-glow,
   .animate-dots,
   .animate-spin,
+  .animate-spin > .reicon-spinner-arc,
   .animate-pulse,
   [class*='bell-ring'],
   .square-spinner::before,
@@ -788,6 +873,7 @@ body:not(.native-app) kbd:not([data-web-visible]) {
 .window-blurred .animate-icon-glow,
 .window-blurred .animate-dots,
 .window-blurred .animate-spin,
+.window-blurred .animate-spin > .reicon-spinner-arc,
 .window-blurred .animate-pulse,
 .window-blurred [class*='bell-ring'],
 .window-blurred .card-border-spin::before,

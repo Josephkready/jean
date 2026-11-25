@@ -1,8 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { Zap } from '@/components/icons/reicon'
+import { createRef } from 'react'
+import { act } from '@testing-library/react'
 import { fireEvent, render, screen, within } from '@/test/test-utils'
-import { MobileSettingsMenu } from './MobileSettingsMenu'
+import {
+  MobileSettingsMenu,
+  type MobileSettingsMenuHandle,
+} from './MobileSettingsMenu'
 import * as platform from '@/lib/platform'
 import { useTerminalStore } from '@/store/terminal-store'
 import type * as ProjectsService from '@/services/projects'
@@ -365,6 +370,59 @@ describe('MobileSettingsMenu', () => {
     await user.click(within(sheet).getByRole('button', { name: 'test:unit' }))
 
     expect(onRunPackageScript).toHaveBeenCalledWith(packageScript)
+  })
+
+  it('lists loaded contexts in their own sheet behind one menu item', async () => {
+    const user = userEvent.setup()
+    const handleViewIssue = vi.fn()
+    const openExternalSpy = vi
+      .spyOn(platform, 'openExternal')
+      .mockResolvedValue(undefined)
+    const issue = {
+      number: 12,
+      title: 'Crash on start',
+      commentCount: 0,
+      repoOwner: 'acme',
+      repoName: 'app',
+    }
+
+    render(
+      <MobileSettingsMenu
+        {...baseProps}
+        worktreeId="worktree-1"
+        loadedIssueContexts={[issue]}
+        attachedSavedContexts={[
+          { slug: 'notes', name: 'Notes', size: 1, createdAt: 0 },
+        ]}
+        handleViewIssue={handleViewIssue}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /settings/i }))
+    expect(
+      screen.queryByRole('menuitem', { name: /#12 Crash on start/ })
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole('menuitem', { name: 'Contexts (2)' }))
+
+    const sheet = screen.getByRole('dialog', { name: 'Contexts' })
+    expect(
+      within(sheet)
+        .getAllByRole('heading')
+        .map(heading => heading.textContent)
+    ).toEqual(['Contexts', 'Issues', 'Saved contexts'])
+    await user.click(
+      within(sheet).getByRole('button', {
+        name: 'Open #12 Crash on start in browser',
+      })
+    )
+    expect(openExternalSpy).toHaveBeenCalledWith(
+      'https://github.com/acme/app/issues/12'
+    )
+    await user.click(
+      within(sheet).getByRole('button', { name: '#12 Crash on start' })
+    )
+    expect(handleViewIssue).toHaveBeenCalledWith(issue)
+    openExternalSpy.mockRestore()
   })
 
   it('keeps Claude provider switcher available after messages exist', async () => {
@@ -820,92 +878,61 @@ describe('MobileSettingsMenu', () => {
     expect(screen.getByText('Effort')).toBeInTheDocument()
   })
 
-  it('auto-opens the effort sheet when openReasoningSheetSignal bumps', async () => {
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 390,
-    })
+  it('opens the effort sheet through the handle for effort models', async () => {
+    vi.stubGlobal('innerWidth', 390)
+    const ref = createRef<MobileSettingsMenuHandle>()
 
-    const { rerender } = render(
-      <MobileSettingsMenu
-        {...baseProps}
-        useAdaptiveThinking
-        openReasoningSheetSignal={0}
-      />
-    )
+    render(<MobileSettingsMenu {...baseProps} ref={ref} useAdaptiveThinking />)
 
     expect(
       screen.queryByRole('dialog', { name: 'Select effort' })
     ).not.toBeInTheDocument()
-
-    rerender(
-      <MobileSettingsMenu
-        {...baseProps}
-        useAdaptiveThinking
-        openReasoningSheetSignal={1}
-      />
-    )
+    act(() => ref.current?.openReasoningSheet())
 
     expect(
       await screen.findByRole('dialog', { name: 'Select effort' })
     ).toBeInTheDocument()
   })
 
-  it('auto-opens the thinking sheet for non-effort backends when signal bumps', async () => {
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 390,
-    })
+  it('opens the thinking sheet through the handle for thinking models', async () => {
+    vi.stubGlobal('innerWidth', 390)
+    const ref = createRef<MobileSettingsMenuHandle>()
 
-    const { rerender } = render(
+    render(
       <MobileSettingsMenu
         {...baseProps}
+        ref={ref}
         useAdaptiveThinking={false}
         isCodex={false}
         selectedBackend="claude"
-        openReasoningSheetSignal={0}
       />
     )
-
-    rerender(
-      <MobileSettingsMenu
-        {...baseProps}
-        useAdaptiveThinking={false}
-        isCodex={false}
-        selectedBackend="claude"
-        openReasoningSheetSignal={1}
-      />
-    )
+    act(() => ref.current?.openReasoningSheet())
 
     expect(
       await screen.findByRole('dialog', { name: 'Select thinking' })
     ).toBeInTheDocument()
   })
 
-  it('does not open a reasoning sheet when signal bumps for commandcode', async () => {
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 390,
-    })
+  it('does not open a reasoning sheet through the handle for commandcode', async () => {
+    vi.stubGlobal('innerWidth', 390)
+    const ref = createRef<MobileSettingsMenuHandle>()
 
     const { rerender } = render(
       <MobileSettingsMenu
         {...baseProps}
+        ref={ref}
         selectedBackend="commandcode"
         useAdaptiveThinking={false}
         isCodex={false}
-        openReasoningSheetSignal={0}
       />
     )
+    act(() => ref.current?.openReasoningSheet())
+    await new Promise(resolve => requestAnimationFrame(resolve))
 
+    // A later switch to a model with effort must not pop a stale sheet.
     rerender(
-      <MobileSettingsMenu
-        {...baseProps}
-        selectedBackend="commandcode"
-        useAdaptiveThinking={false}
-        isCodex={false}
-        openReasoningSheetSignal={1}
-      />
+      <MobileSettingsMenu {...baseProps} ref={ref} useAdaptiveThinking />
     )
 
     expect(

@@ -38,14 +38,15 @@ function JeanConfigWizardContent() {
   const patchPreferences = usePatchPreferences()
   const saveConfig = useSaveJeanConfig()
   const { data: existingConfig, isLoading: isConfigLoading } = useJeanConfig(
-    project?.path ?? null
+    project?.path ?? null,
+    project?.id
   )
 
   const [setupScript, setSetupScript] = useState('')
   const [teardownScript, setTeardownScript] = useState('')
-  const [runScripts, setRunScripts] = useState<
-    { id: string; value: string }[]
-  >(() => [{ id: generateId(), value: '' }])
+  const [runScripts, setRunScripts] = useState<{ id: string; value: string }[]>(
+    () => [{ id: generateId(), value: '' }]
+  )
   const [ports, setPorts] = useState<
     { id: string; port: string; label: string; host: string }[]
   >([])
@@ -82,6 +83,7 @@ function JeanConfigWizardContent() {
 
     await saveConfig.mutateAsync({
       projectPath: project.path,
+      projectId: project.id,
       config: {
         // Preserve any pre-existing fields (e.g. provider binding).
         ...existingConfig,
@@ -116,7 +118,7 @@ function JeanConfigWizardContent() {
         if (!open) handleSkip()
       }}
     >
-      <DialogContent className="!fixed !inset-0 !h-dvh !w-screen !max-w-none !max-h-none !translate-x-0 !translate-y-0 flex flex-col gap-0 overflow-hidden rounded-none border-0 p-0 shadow-none sm:!inset-auto sm:!top-[50%] sm:!left-[50%] sm:!h-auto sm:!max-h-[90dvh] sm:!w-full sm:!max-w-md sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:rounded-lg sm:border sm:shadow-lg [&>[data-slot=dialog-close]]:top-[calc(env(safe-area-inset-top)+1rem)] sm:[&>[data-slot=dialog-close]]:top-4">
+      <DialogContent className="!fixed !inset-0 !h-dvh !w-screen !max-w-none !max-h-none flex flex-col gap-0 overflow-hidden rounded-none border-0 p-0 shadow-none sm:!h-fit sm:!max-h-[90dvh] sm:!w-full sm:!max-w-md sm:rounded-lg sm:border sm:shadow-lg [&>[data-slot=dialog-close]]:top-[calc(env(safe-area-inset-top)+1rem)] sm:[&>[data-slot=dialog-close]]:top-4">
         <DialogHeader className="shrink-0 border-b px-4 pt-[calc(env(safe-area-inset-top)+1rem)] pr-14 pb-4 text-left sm:border-b-0 sm:px-6 sm:pt-6 sm:pb-0">
           <DialogTitle>Configure Automation</DialogTitle>
           <DialogDescription>
@@ -145,8 +147,8 @@ function JeanConfigWizardContent() {
                   is created (e.g. installing dependencies)
                 </li>
                 <li>
-                  <strong>Teardown</strong> runs before a worktree is
-                  deleted/archived (e.g. stopping services)
+                  <strong>Teardown</strong> runs before a worktree is deleted
+                  (e.g. stopping services)
                 </li>
                 <li>
                   <strong>Run</strong> launches your dev server via the run
@@ -241,10 +243,7 @@ function JeanConfigWizardContent() {
               size="sm"
               className="h-11 text-xs sm:h-7"
               onClick={() =>
-                setRunScripts([
-                  ...runScripts,
-                  { id: generateId(), value: '' },
-                ])
+                setRunScripts([...runScripts, { id: generateId(), value: '' }])
               }
             >
               <Plus className="mr-1 h-3 w-3" />
@@ -300,9 +299,7 @@ function JeanConfigWizardContent() {
                   variant="ghost"
                   size="icon"
                   className="size-11 shrink-0 sm:size-8"
-                  onClick={() =>
-                    setPorts(ports.filter(p => p.id !== entry.id))
-                  }
+                  onClick={() => setPorts(ports.filter(p => p.id !== entry.id))}
                 >
                   <X className="h-3.5 w-3.5" />
                 </Button>

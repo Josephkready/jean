@@ -57,6 +57,7 @@ export function CliLoginModal() {
     commandArgs,
     action,
     mcpContext,
+    serverId,
     closeModal,
   } = useUIStore(
     useShallow(state => ({
@@ -66,6 +67,7 @@ export function CliLoginModal() {
       commandArgs: state.cliLoginModalCommandArgs,
       action: state.cliLoginModalAction,
       mcpContext: state.cliLoginModalMcpContext,
+      serverId: state.cliLoginModalServerId,
       closeModal: state.closeCliLoginModal,
     }))
   )
@@ -81,6 +83,7 @@ export function CliLoginModal() {
       commandArgs={commandArgs}
       action={action}
       mcpContext={mcpContext}
+      serverId={serverId}
       onClose={closeModal}
       onRetry={() => setRetryKey(k => k + 1)}
     />
@@ -93,6 +96,7 @@ interface CliLoginModalContentProps {
   commandArgs: string[] | null
   action: 'login' | 'update' | 'install'
   mcpContext: McpLoginContext | null
+  serverId: string | null
   onClose: () => void
   onRetry: () => void
 }
@@ -103,9 +107,11 @@ function CliLoginModalContent({
   commandArgs,
   action,
   mcpContext,
+  serverId,
   onClose,
   onRetry,
 }: CliLoginModalContentProps) {
+  const ownerServerId = mcpContext?.serverId ?? serverId ?? undefined
   const queryClient = useQueryClient()
   const [exitStatus, setExitStatus] = useState<{
     exitCode: number | null
@@ -122,35 +128,33 @@ function CliLoginModalContent({
   }, [minimized])
 
   const cliName =
-    cliType === 'cliproxyapi'
-      ? 'CLIProxyAPI'
-      : cliType === 'claude'
-        ? 'Claude CLI'
-        : cliType === 'codex'
-          ? 'Codex CLI'
-          : cliType === 'coderabbit'
-            ? 'CodeRabbit CLI'
-            : cliType === 'opencode'
-              ? 'OpenCode CLI'
-              : cliType === 'cursor'
-                ? 'Cursor CLI'
-                : cliType === 'pi'
-                  ? 'PI CLI'
-                  : cliType === 'commandcode'
-                    ? 'Command Code CLI'
-                    : cliType === 'grok'
-                      ? 'Grok CLI'
-                      : cliType === 'kimi'
-                        ? 'Kimi Code'
-                        : cliType === 'devin'
-                          ? 'Devin CLI'
-                          : cliType === 'antigravity'
-                            ? 'Antigravity CLI'
-                            : cliType === 'muse'
-                              ? 'Muse CLI'
-                              : cliType === 'glab'
-                                ? 'GitLab CLI'
-                                : 'GitHub CLI'
+    cliType === 'claude'
+      ? 'Claude CLI'
+      : cliType === 'codex'
+        ? 'Codex CLI'
+        : cliType === 'coderabbit'
+          ? 'CodeRabbit CLI'
+          : cliType === 'opencode'
+            ? 'OpenCode CLI'
+            : cliType === 'cursor'
+              ? 'Cursor CLI'
+              : cliType === 'pi'
+                ? 'PI CLI'
+                : cliType === 'commandcode'
+                  ? 'Command Code CLI'
+                  : cliType === 'grok'
+                    ? 'Grok CLI'
+                    : cliType === 'kimi'
+                      ? 'Kimi Code'
+                      : cliType === 'devin'
+                        ? 'Devin CLI'
+                        : cliType === 'antigravity'
+                          ? 'Antigravity CLI'
+                          : cliType === 'muse'
+                            ? 'Muse CLI'
+                            : cliType === 'glab'
+                              ? 'GitLab CLI'
+                              : 'GitHub CLI'
   const cliTitle =
     cliType === 'cursor' ||
     cliType === 'pi' ||
@@ -169,13 +173,13 @@ function CliLoginModalContent({
       cliName
     )
 
-  const target = updateTargetLabel(mcpContext?.serverId)
+  const target = updateTargetLabel(ownerServerId)
 
   // Generate unique terminal ID for this login session
   const [terminalId] = useState(() => {
     const id = `cli-login-${generateId()}`
-    return mcpContext?.serverId && mcpContext.serverId !== 'local'
-      ? serverResourceKey({ serverId: mcpContext.serverId, resourceId: id })
+    return ownerServerId && ownerServerId !== 'local'
+      ? serverResourceKey({ serverId: ownerServerId, resourceId: id })
       : id
   })
 
@@ -349,10 +353,10 @@ function CliLoginModalContent({
           <Button
             type="button"
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             onClick={handleMinimize}
             aria-label={`Minimize ${cliName} update`}
-            className="absolute right-5 top-4 h-7 w-7"
+            className="absolute right-5 top-4"
           >
             <Minus className="size-4" />
           </Button>
@@ -376,14 +380,6 @@ function CliLoginModalContent({
             the full return URL from your browser and paste it here when asked.
             If the browser cannot load the return page, you can still copy its
             URL.
-          </p>
-        )}
-
-        {cliType === 'cliproxyapi' && (
-          <p className="text-sm text-muted-foreground">
-            CLIProxyAPI opens the provider login and saves the account in its
-            own auth directory. Jean does not store this subscription login and
-            does not switch accounts.
           </p>
         )}
 

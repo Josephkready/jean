@@ -138,7 +138,7 @@ const SidebarItem = forwardRef<
         <span className="truncate">{label}</span>
         <div className="flex items-center gap-1 shrink-0">
           <span
-            className={`rounded px-1 py-0.5 text-[10px] font-medium ${countBg}`}
+            className={`rounded px-1 py-0.5 text-2xs font-medium ${countBg}`}
           >
             {count}
           </span>
@@ -158,6 +158,9 @@ export function WorkflowRunsModal() {
   const setSessionProvider = useSetSessionProvider()
 
   const workflowRunsModalOpen = useUIStore(state => state.workflowRunsModalOpen)
+  const workflowRunsModalProjectId = useUIStore(
+    state => state.workflowRunsModalProjectId
+  )
   const workflowRunsModalProjectPath = useUIStore(
     state => state.workflowRunsModalProjectPath
   )
@@ -166,7 +169,7 @@ export function WorkflowRunsModal() {
   )
   const { data: projects } = useProjects()
   const targetServerId = projects?.find(
-    project => project.path === workflowRunsModalProjectPath
+    project => project.id === workflowRunsModalProjectId
   )?.serverId
   const { data: preferences } = usePreferences(targetServerId)
   const setWorkflowRunsModalOpen = useUIStore(
@@ -182,6 +185,7 @@ export function WorkflowRunsModal() {
     isFetching,
   } = useWorkflowRuns(
     workflowRunsModalOpen ? workflowRunsModalProjectPath : null,
+    workflowRunsModalProjectId,
     workflowRunsModalBranch ?? undefined
   )
 
@@ -330,7 +334,7 @@ export function WorkflowRunsModal() {
 
   const handleInvestigate = useCallback(
     async (run: WorkflowRun) => {
-      const projectPath = workflowRunsModalProjectPath
+      const projectId = workflowRunsModalProjectId
 
       // Close modal immediately
       setWorkflowRunsModalOpen(false)
@@ -388,13 +392,13 @@ export function WorkflowRunsModal() {
       let targetWorktreeId: string | null = null
       let targetWorktreePath: string | null = null
 
-      if (projectPath) {
+      if (projectId) {
         const projects = await queryClient.fetchQuery({
           queryKey: projectsQueryKeys.list(),
           queryFn: () => invoke<Project[]>('list_projects'),
           staleTime: 1000 * 60,
         })
-        const project = projects?.find(p => p.path === projectPath)
+        const project = projects?.find(p => p.id === projectId)
 
         if (project) {
           let worktrees: Worktree[] = []
@@ -615,7 +619,7 @@ export function WorkflowRunsModal() {
       }
     },
     [
-      workflowRunsModalProjectPath,
+      workflowRunsModalProjectId,
       setWorkflowRunsModalOpen,
       queryClient,
       createSession,
@@ -744,8 +748,8 @@ export function WorkflowRunsModal() {
                 <TooltipTrigger asChild>
                   <Button
                     variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 shrink-0 p-0"
+                    size="icon-sm"
+                    className="shrink-0 p-0"
                     onClick={handleRefresh}
                     disabled={isFetching}
                   >
@@ -826,6 +830,7 @@ export function WorkflowRunsModal() {
             >
               <div className="space-y-1 pb-2">
                 {displayedRuns.map((run, index) => (
+                  // react-doctor-disable-next-line react-doctor/no-static-element-interactions, react-doctor/click-events-have-key-events -- pointer mirror of the modal's arrow/Enter keyboard navigation over focusedIndex
                   <div
                     key={run.databaseId}
                     ref={el => {
@@ -845,11 +850,11 @@ export function WorkflowRunsModal() {
                           <span className="min-w-0 truncate text-sm font-medium">
                             {run.workflowName}
                           </span>
-                          <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                          <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-2xs text-muted-foreground">
                             {run.headBranch}
                           </span>
                           {unreadOnOpen.has(run.databaseId) && (
-                            <span className="shrink-0 rounded bg-info/15 px-1 py-0.5 text-[10px] font-medium text-info">
+                            <span className="shrink-0 rounded bg-info/15 px-1 py-0.5 text-2xs font-medium text-info">
                               New
                             </span>
                           )}
@@ -862,7 +867,7 @@ export function WorkflowRunsModal() {
                                     e.stopPropagation()
                                     handleInvestigate(run)
                                   }}
-                                  className="shrink-0 inline-flex items-center gap-0.5 rounded bg-primary px-1 py-0.5 text-[10px] text-primary-foreground transition-colors hover:bg-primary/80"
+                                  className="shrink-0 inline-flex items-center gap-0.5 rounded bg-primary px-1 py-0.5 text-2xs text-primary-foreground transition-colors hover:bg-primary/80"
                                 >
                                   <Wand2 className="h-3 w-3" />
                                   <span>M</span>

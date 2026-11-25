@@ -21,10 +21,16 @@ import {
   Play,
 } from '@/components/icons/reicon'
 import { Label } from '@/components/ui/label'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { BackendLabel } from '@/components/ui/backend-label'
+import {
+  currentDefaultBackendChoice,
+  defaultBackendChoices,
+  patchForDefaultBackendChoice,
+} from './default-backend-choice'
 import { BetaBadge } from '@/components/ui/badge'
 import {
   Command,
@@ -157,11 +163,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from '@/components/ui/tooltip'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import {
   getCatalogDefaultModelOptions,
@@ -178,10 +179,7 @@ import {
   backendOptions,
   getTerminalOptions,
   getEditorOptions,
-  archiveRetentionOptions,
-  removalBehaviorOptions,
   notificationSoundOptions,
-  type RemovalBehavior,
   type ClaudeModel,
   getClaudeModelOptionsForProvider,
   type CodexModel,
@@ -202,10 +200,7 @@ import {
   type OpenInDefault,
   newSessionKindOptions,
   type NewSessionKind,
-  CLOSE_CONFIRM_BYPASS_MODIFIERS,
-  type CloseConfirmBypassModifier,
 } from '@/types/preferences'
-import { closeConfirmBypassLabel } from '@/lib/confirm-bypass'
 import {
   COMMANDCODE_MODEL_OPTIONS,
   CURSOR_MODEL_OPTIONS,
@@ -242,10 +237,18 @@ import {
 import { isWindows, openExternal } from '@/lib/platform'
 import { isNewerVersion } from '@/lib/version-utils'
 import { cn } from '@/lib/utils'
-import { copyToClipboard } from '@/lib/clipboard'
-import { getPathUpdateAction } from '@/lib/cli-update'
+import {
+  getPathUpdateAction,
+  resolveCliPathUpdateAction,
+} from '@/lib/cli-update'
 import { SettingsSection } from '../SettingsSection'
-import { BackendCliSourceSelect } from '../BackendCliSourceSelect'
+import { InlineField } from '../InlineField'
+import { CliAuthActions } from '../CliAuthActions'
+import {
+  CliChangeVersionButton,
+  CliInstallFields,
+  CliUpdateButton,
+} from '../CliInstallFields'
 import { AiLanguageField } from './AiLanguageField'
 import { BrowserDefaultHostField } from './BrowserDefaultHostField'
 import { resolveOverrideReasoning } from './override-reasoning'
@@ -253,38 +256,6 @@ import {
   resolveDefaultModelForBackend,
   resolvePiDefaultModel,
 } from '@/lib/session-defaults'
-
-interface CleanupResult {
-  deleted_worktrees: number
-  deleted_sessions: number
-  deleted_orphan_indexes?: number
-}
-
-const InlineField: React.FC<{
-  label: string
-  description?: React.ReactNode
-  children: React.ReactNode
-}> = ({ label, description, children }) => (
-  <div className="settings-inline-field flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
-    <div className="space-y-0.5 sm:w-56 sm:shrink-0 lg:w-72">
-      <Label className="text-sm text-foreground">{label}</Label>
-      {description && (
-        <div className="text-xs text-muted-foreground break-words">
-          {description}
-        </div>
-      )}
-    </div>
-    {children}
-  </div>
-)
-
-// Module-level is safe: closeConfirmBypassLabel reads `isClientMacOS`, itself a
-// module-level const derived from `navigator`, so it is settled at import time.
-const BYPASS_MODIFIER_LABELS: Record<CloseConfirmBypassModifier, string> = {
-  shift: closeConfirmBypassLabel('shift') ?? 'Shift',
-  alt: closeConfirmBypassLabel('alt') ?? 'Alt',
-  none: 'Off',
-}
 
 type PreferencesPaneScope =
   | 'general'
@@ -317,6 +288,63 @@ function formatOpenCodeModelLabelForSettings(value: string) {
   return value.startsWith('opencode/')
     ? formatted.replace(/\s+\(OpenCode\)$/, '')
     : formatted
+}
+
+const CLAUDE_AUTO_COMPACT_WINDOW_OPTIONS = [
+  { value: 'default', label: 'Claude settings (default)' },
+  { value: 'auto', label: 'Auto (tuned for model)' },
+  { value: '200k', label: '200K tokens' },
+  { value: '300k', label: '300K tokens' },
+  { value: '400k', label: '400K tokens' },
+  { value: '500k', label: '500K tokens' },
+  { value: '750k', label: '750K tokens' },
+  { value: '1M', label: '1M tokens' },
+]
+
+const CODEX_AUTO_COMPACT_TOKEN_LIMIT_OPTIONS = [
+  { value: 'default', label: 'Codex settings (default)' },
+  { value: '100000', label: '100K tokens' },
+  { value: '150000', label: '150K tokens' },
+  { value: '200000', label: '200K tokens' },
+  { value: '250000', label: '250K tokens' },
+  { value: '300000', label: '300K tokens' },
+]
+
+const autoCompactToggleOptions = (backend: string) => [
+  { value: 'default', label: `${backend} settings (default)` },
+  { value: 'on', label: 'On' },
+  { value: 'off', label: 'Off' },
+]
+
+const toAutoCompactToggleValue = (value: boolean | null | undefined) =>
+  value == null ? 'default' : value ? 'on' : 'off'
+
+const fromAutoCompactToggleValue = (value: string) =>
+  value === 'default' ? null : value === 'on'
+
+function AutoCompactSelect({
+  value,
+  options,
+  onValueChange,
+}: {
+  value: string
+  options: { value: string; label: string }[]
+  onValueChange: (value: string) => void
+}) {
+  return (
+    <Select value={value} onValueChange={onValueChange}>
+      <SelectTrigger className="w-full sm:w-80">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map(option => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
 }
 
 export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
@@ -385,8 +413,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const isWebAccessView = !isNativeApp()
   const webAccessSoundsEnabled = preferences?.web_access_sounds_enabled ?? true
   const soundsEnabledInCurrentView = !isWebAccessView || webAccessSoundsEnabled
-  const [showDeleteAllDialog, setShowDeleteAllDialog] = useState(false)
-  const [isDeleting, setIsDeleting] = useState(false)
   const [deleteCliTarget, setDeleteCliTarget] = useState<
     | 'claude'
     | 'codex'
@@ -707,47 +733,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   // Use global ui-store for CLI modals
   const openCliUpdateModal = useUIStore(state => state.openCliUpdateModal)
   const openCliLoginModal = useUIStore(state => state.openCliLoginModal)
-
-  const handleDeleteAllArchives = useCallback(async () => {
-    setIsDeleting(true)
-    const toastId = toast.loading('Deleting all archives...')
-
-    try {
-      const result = await invoke<CleanupResult>('delete_all_archives')
-
-      // Invalidate archive queries to refresh UI
-      queryClient.invalidateQueries({ queryKey: ['archived-worktrees'] })
-      queryClient.invalidateQueries({ queryKey: ['all-archived-sessions'] })
-
-      const parts: string[] = []
-      if (result.deleted_worktrees > 0) {
-        parts.push(
-          `${result.deleted_worktrees} worktree${result.deleted_worktrees === 1 ? '' : 's'}`
-        )
-      }
-      if (result.deleted_sessions > 0) {
-        parts.push(
-          `${result.deleted_sessions} session${result.deleted_sessions === 1 ? '' : 's'}`
-        )
-      }
-      if ((result.deleted_orphan_indexes ?? 0) > 0) {
-        parts.push(
-          `${result.deleted_orphan_indexes} orphaned session index file${result.deleted_orphan_indexes === 1 ? '' : 's'}`
-        )
-      }
-
-      if (parts.length > 0) {
-        toast.success(`Deleted ${parts.join(' and ')}`, { id: toastId })
-      } else {
-        toast.info('No archives to delete', { id: toastId })
-      }
-    } catch (error) {
-      toast.error(`Failed to delete archives: ${error}`, { id: toastId })
-    } finally {
-      setIsDeleting(false)
-      setShowDeleteAllDialog(false)
-    }
-  }, [queryClient])
 
   const handleModelChange = (value: ClaudeModel) => {
     if (preferences) {
@@ -1112,24 +1097,33 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
-  const handleBackendChange = (value: CliBackend) => {
-    if (preferences) {
-      patchPreferences.mutate({ default_backend: value })
-    }
-  }
-
   // Default backend: show all installed CLIs (issue #627/#649). Auth is enforced
   // at send time / backend settings — hiding unauthenticated backends made Claude
   // (and others) disappear from Defaults when auth probes were false-negative.
   const stored = preferences?.default_backend ?? 'claude'
   const installedBackendOptions = useMemo(
     () =>
+      // react-doctor-disable-next-line react-doctor/js-set-map-lookups -- fixed handful of backends
       backendOptions.filter(option => installedBackends.includes(option.value)),
     [installedBackends]
   )
   const effectiveBackend = installedBackends.includes(stored)
     ? stored
     : (installedBackendOptions[0]?.value ?? stored)
+  const backendChoices = useMemo(
+    () =>
+      defaultBackendChoices(
+        installedBackendOptions.map(option => option.value),
+        preferences
+      ),
+    [installedBackendOptions, preferences]
+  )
+  const handleBackendChange = (value: string) => {
+    const choice = backendChoices.find(option => option.value === value)
+    if (preferences && choice) {
+      patchPreferences.mutate(patchForDefaultBackendChoice(choice))
+    }
+  }
 
   const handleCodexModelChange = (value: CodexModel) => {
     if (preferences) {
@@ -1481,13 +1475,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const handleAutoSessionNamingChange = (checked: boolean) => {
     if (preferences) {
       patchPreferences.mutate({ auto_session_naming: checked })
-    }
-  }
-
-  const handleArchiveRetentionChange = (value: string) => {
-    const days = parseInt(value, 10)
-    if (preferences && !isNaN(days)) {
-      patchPreferences.mutate({ archive_retention_days: days })
     }
   }
 
@@ -1922,159 +1909,72 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     openCliUpdateModal('devin')
   }, [openCliUpdateModal, patchPreferences, preferences?.devin_cli_source])
 
-  const handleCopyPath = useCallback((path: string | null | undefined) => {
-    if (!path) return
-    copyToClipboard(path)
-    toast.success('Path copied to clipboard')
-  }, [])
-
   return (
     <div
       className={cn('space-y-6', backendPaneScopes.includes(scope) && 'w-full')}
     >
       {hasBackend() && scope === 'claude' && (
         <SettingsSection
-          title="CLI source"
+          title="CLI"
           anchorId="pref-claude-section-cli"
-          variant="card"
           actions={
-            cliStatus?.installed ? (
-              checkingClaudeAuth || isClaudeAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : claudeAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button size="sm" onClick={handleClaudeRelogin}>
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button size="sm" onClick={handleClaudeLogin}>
-                  Login
-                </Button>
-              )
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                Not installed
-              </span>
-            )
+            <CliAuthActions
+              installed={!!cliStatus?.installed}
+              checking={checkingClaudeAuth || isClaudeAuthLoading}
+              authenticated={!!claudeAuth?.authenticated}
+              onSignIn={handleClaudeLogin}
+              onSignInAgain={handleClaudeRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField label={cliStatus?.installed ? 'Version' : 'Status'}>
-              {isCliLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : cliStatus?.installed ? (
-                isPathSource ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">
-                      {cliStatus.version ?? 'Installed'}
-                    </span>
-                    {isClaudeVersionsLoading ? (
-                      <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!claudeHasUpdate}
-                        onClick={() => {
-                          const action = getPathUpdateAction(
-                            cliStatus.path,
-                            pathDetection?.package_manager,
-                            'claude-code',
-                            ['update']
-                          )
-                          if (action) {
-                            openCliLoginModal(
-                              'claude',
-                              action[0],
-                              action[1],
-                              'update'
-                            )
-                          } else {
-                            openCliUpdateModal('claude')
-                          }
-                        }}
-                      >
-                        {claudeHasUpdate
-                          ? `Update to ${claudeLatestStable?.version}`
-                          : 'Up to date'}
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={() => openCliUpdateModal('claude')}
-                  >
-                    {cliStatus.version ?? 'Installed'}
-                  </Button>
-                )
+          <CliInstallFields
+            backendName="Claude CLI"
+            binary="claude"
+            source={preferences?.claude_cli_source ?? 'jean'}
+            onSourceChange={handleClaudeSourceChange}
+            pathDetection={pathDetection}
+            activePath={
+              preferences?.claude_cli_source === 'path'
+                ? pathDetection?.path
+                : cliStatus?.path
+            }
+            loading={isCliLoading}
+            installed={!!cliStatus?.installed}
+            version={cliStatus?.version}
+            onInstall={() => openCliUpdateModal('claude')}
+            onUninstall={() => setDeleteCliTarget('claude')}
+            actions={
+              isPathSource ? (
+                <CliUpdateButton
+                  checking={isClaudeVersionsLoading}
+                  hasUpdate={claudeHasUpdate}
+                  latestVersion={claudeLatestStable?.version}
+                  onUpdate={() => {
+                    const action = getPathUpdateAction(
+                      cliStatus?.path,
+                      pathDetection?.package_manager,
+                      'claude-code',
+                      ['update']
+                    )
+                    if (action) {
+                      openCliLoginModal(
+                        'claude',
+                        action[0],
+                        action[1],
+                        'update'
+                      )
+                    } else {
+                      openCliUpdateModal('claude')
+                    }
+                  }}
+                />
               ) : (
-                <Button
-                  className="w-full sm:w-40"
+                <CliChangeVersionButton
                   onClick={() => openCliUpdateModal('claude')}
-                >
-                  Install
-                </Button>
-              )}
-            </InlineField>
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.claude_cli_source === 'path'
-                            ? pathDetection?.path
-                            : cliStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.claude_cli_source === 'path'
-                        ? (pathDetection?.path ?? 'System PATH')
-                        : (cliStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <BackendCliSourceSelect
-                value={preferences?.claude_cli_source ?? 'jean'}
-                onValueChange={handleClaudeSourceChange}
-                backendName="Claude CLI"
-                path={pathDetection?.path}
-                pathVersion={pathDetection?.version}
-                pathFound={!!pathDetection?.found}
-                action={
-                  preferences?.claude_cli_source === 'jean' &&
-                  cliStatus?.installed && (
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setDeleteCliTarget('claude')}
-                    >
-                      Uninstall
-                    </Button>
-                  )
-                }
-              />
-            </InlineField>
-            {!cliStatus?.installed && !pathDetection?.found && (
-              <p className="text-xs text-muted-foreground px-1">
-                Install with Jean or add <code>claude</code> to your PATH.
-              </p>
-            )}
-          </div>
+                />
+              )
+            }
+          />
         </SettingsSection>
       )}
 
@@ -2083,139 +1983,58 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
           title="GitHub CLI"
           anchorId="pref-github-section-cli"
           actions={
-            ghStatus?.installed ? (
-              checkingGhAuth || isGhAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : ghAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button variant="outline" size="sm" onClick={handleGhRelogin}>
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button variant="outline" size="sm" onClick={handleGhLogin}>
-                  Login
-                </Button>
-              )
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                Not installed
-              </span>
-            )
+            <CliAuthActions
+              installed={!!ghStatus?.installed}
+              checking={checkingGhAuth || isGhAuthLoading}
+              authenticated={!!ghAuth?.authenticated}
+              onSignIn={handleGhLogin}
+              onSignInAgain={handleGhRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField label={ghStatus?.installed ? 'Version' : 'Status'}>
-              {isGhLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : ghStatus?.installed ? (
-                isGhPathSource ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">
-                      {ghStatus.version ?? 'Installed'}
-                    </span>
-                    {isGhVersionsLoading ? (
-                      <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!ghHasUpdate}
-                        onClick={() => {
-                          const action = getPathUpdateAction(
-                            ghStatus.path,
-                            ghPathDetection?.package_manager,
-                            'gh',
-                            null
-                          )
-                          if (action) {
-                            openCliLoginModal(
-                              'gh',
-                              action[0],
-                              action[1],
-                              'update'
-                            )
-                          } else {
-                            openCliUpdateModal('gh')
-                          }
-                        }}
-                      >
-                        {ghHasUpdate
-                          ? `Update to ${ghLatestStable?.version}`
-                          : 'Up to date'}
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={() => openCliUpdateModal('gh')}
-                  >
-                    {ghStatus.version ?? 'Installed'}
-                  </Button>
-                )
+          <CliInstallFields
+            backendName="GitHub CLI"
+            binary="gh"
+            source={preferences?.gh_cli_source ?? 'jean'}
+            onSourceChange={handleGhSourceChange}
+            pathDetection={ghPathDetection}
+            activePath={
+              preferences?.gh_cli_source === 'path'
+                ? ghPathDetection?.path
+                : ghStatus?.path
+            }
+            loading={isGhLoading}
+            installed={!!ghStatus?.installed}
+            version={ghStatus?.version}
+            onInstall={() => openCliUpdateModal('gh')}
+            onUninstall={() => setDeleteCliTarget('gh')}
+            actions={
+              isGhPathSource ? (
+                <CliUpdateButton
+                  checking={isGhVersionsLoading}
+                  hasUpdate={ghHasUpdate}
+                  latestVersion={ghLatestStable?.version}
+                  onUpdate={() => {
+                    const action = resolveCliPathUpdateAction(
+                      'gh',
+                      ghStatus?.path,
+                      ghPathDetection?.package_manager,
+                      ghLatestStable?.version
+                    )
+                    if (action) {
+                      openCliLoginModal('gh', action[0], action[1], 'update')
+                    } else {
+                      openCliUpdateModal('gh')
+                    }
+                  }}
+                />
               ) : (
-                <Button
-                  className="w-full sm:w-40"
+                <CliChangeVersionButton
                   onClick={() => openCliUpdateModal('gh')}
-                >
-                  Install
-                </Button>
-              )}
-            </InlineField>
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.gh_cli_source === 'path'
-                            ? ghPathDetection?.path
-                            : ghStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.gh_cli_source === 'path'
-                        ? (ghPathDetection?.path ?? 'System PATH')
-                        : (ghStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <Select
-                value={preferences?.gh_cli_source ?? 'jean'}
-                onValueChange={handleGhSourceChange}
-              >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="jean">Jean managed</SelectItem>
-                  <SelectItem value="path" disabled={!ghPathDetection?.found}>
-                    System PATH
-                    {!ghPathDetection?.found && ' (not found)'}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </InlineField>
-            {!ghStatus?.installed && !ghPathDetection?.found && (
-              <p className="text-xs text-muted-foreground px-1">
-                Install with Jean, or install <code>gh</code> yourself in your
-                environment — we&apos;ll detect it on your PATH.
-              </p>
-            )}
-          </div>
+                />
+              )
+            }
+          />
         </SettingsSection>
       )}
 
@@ -2229,149 +2048,63 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
           }
           anchorId="pref-gitlab-section-cli"
           actions={
-            glabStatus?.installed ? (
-              checkingGlabAuth || isGlabAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : glabAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleGlabRelogin}
-                  >
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button variant="outline" size="sm" onClick={handleGlabLogin}>
-                  Sign in to GitLab
-                </Button>
-              )
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                Not installed
-              </span>
-            )
+            <CliAuthActions
+              installed={!!glabStatus?.installed}
+              checking={checkingGlabAuth || isGlabAuthLoading}
+              authenticated={!!glabAuth?.authenticated}
+              onSignIn={handleGlabLogin}
+              onSignInAgain={handleGlabRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField
-              label={glabStatus?.installed ? 'Version' : 'Status'}
-              description={
-                glabStatus?.installed
-                  ? 'Enables GitLab issues and merge requests'
-                  : 'Optional — enables GitLab issues and merge requests'
-              }
-            >
-              {isGlabLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : glabStatus?.installed ? (
-                isGlabPathSource ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">
-                      {glabStatus.version ?? 'Installed'}
-                    </span>
-                    {isGlabVersionsLoading ? (
-                      <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!glabHasUpdate}
-                        onClick={() => {
-                          const action = getPathUpdateAction(
-                            glabStatus.path,
-                            glabPathDetection?.package_manager,
-                            'glab',
-                            null
-                          )
-                          if (action) {
-                            openCliLoginModal(
-                              'glab',
-                              action[0],
-                              action[1],
-                              'update'
-                            )
-                          } else {
-                            openCliUpdateModal('glab')
-                          }
-                        }}
-                      >
-                        {glabHasUpdate
-                          ? `Update to ${glabLatestStable?.version}`
-                          : 'Up to date'}
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={() => openCliUpdateModal('glab')}
-                  >
-                    {glabStatus.version ?? 'Installed'}
-                  </Button>
-                )
+          <CliInstallFields
+            backendName="GitLab CLI"
+            binary="glab"
+            source={preferences?.glab_cli_source ?? 'jean'}
+            onSourceChange={handleGlabSourceChange}
+            pathDetection={glabPathDetection}
+            activePath={
+              preferences?.glab_cli_source === 'path'
+                ? glabPathDetection?.path
+                : glabStatus?.path
+            }
+            loading={isGlabLoading}
+            installed={!!glabStatus?.installed}
+            version={glabStatus?.version}
+            description={
+              glabStatus?.installed
+                ? 'Enables GitLab issues and merge requests'
+                : 'Optional — enables GitLab issues and merge requests'
+            }
+            onInstall={() => openCliUpdateModal('glab')}
+            onUninstall={() => setDeleteCliTarget('glab')}
+            actions={
+              isGlabPathSource ? (
+                <CliUpdateButton
+                  checking={isGlabVersionsLoading}
+                  hasUpdate={glabHasUpdate}
+                  latestVersion={glabLatestStable?.version}
+                  onUpdate={() => {
+                    const action = getPathUpdateAction(
+                      glabStatus?.path,
+                      glabPathDetection?.package_manager,
+                      'glab',
+                      null
+                    )
+                    if (action) {
+                      openCliLoginModal('glab', action[0], action[1], 'update')
+                    } else {
+                      openCliUpdateModal('glab')
+                    }
+                  }}
+                />
               ) : (
-                <Button
-                  className="w-full sm:w-40"
+                <CliChangeVersionButton
                   onClick={() => openCliUpdateModal('glab')}
-                >
-                  Install
-                </Button>
-              )}
-            </InlineField>
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.glab_cli_source === 'path'
-                            ? glabPathDetection?.path
-                            : glabStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.glab_cli_source === 'path'
-                        ? (glabPathDetection?.path ?? 'System PATH')
-                        : (glabStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <Select
-                value={preferences?.glab_cli_source ?? 'jean'}
-                onValueChange={handleGlabSourceChange}
-              >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="jean">Jean (managed)</SelectItem>
-                  <SelectItem value="path" disabled={!glabPathDetection?.found}>
-                    System PATH
-                    {!glabPathDetection?.found && ' (not found)'}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </InlineField>
-            {!glabStatus?.installed && !glabPathDetection?.found && (
-              <p className="text-xs text-muted-foreground px-1">
-                Install with Jean, or install <code>glab</code> yourself in your
-                environment — we&apos;ll detect it on your PATH.
-              </p>
-            )}
-          </div>
+                />
+              )
+            }
+          />
         </SettingsSection>
       )}
 
@@ -2380,814 +2113,358 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
           title="CodeRabbit CLI"
           anchorId="pref-coderabbit-section-cli"
           actions={
-            coderabbitStatus?.installed ? (
-              checkingCodeRabbitAuth || isCodeRabbitAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : coderabbitAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleCodeRabbitRelogin}
-                  >
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCodeRabbitLogin}
-                >
-                  Login
-                </Button>
-              )
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                Not installed
-              </span>
-            )
+            <CliAuthActions
+              installed={!!coderabbitStatus?.installed}
+              checking={checkingCodeRabbitAuth || isCodeRabbitAuthLoading}
+              authenticated={!!coderabbitAuth?.authenticated}
+              onSignIn={handleCodeRabbitLogin}
+              onSignInAgain={handleCodeRabbitRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField
-              label={coderabbitStatus?.installed ? 'Version' : 'Status'}
-            >
-              {isCodeRabbitLoading || installCodeRabbitCli.isPending ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : coderabbitStatus?.installed ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm">
-                    {coderabbitStatus.version ?? 'Installed'}
-                  </span>
-                  {isCodeRabbitVersionsLoading ? (
-                    <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                  ) : (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={
-                        updateCodeRabbitCli.isPending || !coderabbitHasUpdate
-                      }
-                      onClick={() => {
-                        if (!coderabbitHasUpdate) return
-                        if (isCodeRabbitPathSource) {
-                          const action = getPathUpdateAction(
-                            coderabbitStatus.path,
-                            coderabbitPathDetection?.package_manager,
-                            'coderabbit',
-                            ['update'],
-                            undefined,
-                            coderabbitLatestStable?.version
-                          )
-                          if (action) {
-                            openCliLoginModal(
-                              'coderabbit',
-                              action[0],
-                              action[1],
-                              'update'
-                            )
-                            return
-                          }
-                        }
-                        updateCodeRabbitCli.mutate()
-                      }}
-                    >
-                      {updateCodeRabbitCli.isPending
-                        ? 'Updating...'
-                        : coderabbitHasUpdate
-                          ? `Update to ${coderabbitLatestStable?.version}`
-                          : 'Up to date'}
-                    </Button>
-                  )}
-                </div>
-              ) : (
-                <Button
-                  className="w-full sm:w-40"
-                  disabled={installCodeRabbitCli.isPending}
-                  onClick={() => installCodeRabbitCli.mutate(undefined)}
-                >
-                  {installCodeRabbitCli.isPending ? 'Installing...' : 'Install'}
-                </Button>
-              )}
-            </InlineField>
-            {(coderabbitStatus?.installed ||
-              coderabbitPathDetection?.found) && (
-              <InlineField
-                label="Source"
-                description={
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleCopyPath(
-                            preferences?.coderabbit_cli_source === 'path'
-                              ? coderabbitPathDetection?.path
-                              : coderabbitStatus?.path
-                          )
-                        }
-                        className="text-left hover:underline cursor-pointer"
-                      >
-                        {preferences?.coderabbit_cli_source === 'path'
-                          ? (coderabbitPathDetection?.path ?? 'System PATH')
-                          : (coderabbitStatus?.path ?? 'Not installed')}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Click to copy path</TooltipContent>
-                  </Tooltip>
-                }
-              >
-                <div className="flex items-center gap-2">
-                  <Select
-                    value={preferences?.coderabbit_cli_source ?? 'jean'}
-                    onValueChange={handleCodeRabbitSourceChange}
-                  >
-                    <SelectTrigger className="w-full sm:w-80">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="jean">Jean managed</SelectItem>
-                      <SelectItem
-                        value="path"
-                        disabled={!coderabbitPathDetection?.found}
-                      >
-                        System PATH
-                        {!coderabbitPathDetection?.found && ' (not found)'}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  {preferences?.coderabbit_cli_source === 'jean' &&
-                    coderabbitStatus?.installed && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => setDeleteCliTarget('coderabbit')}
-                      >
-                        Delete managed install
-                      </Button>
-                    )}
-                </div>
-              </InlineField>
-            )}
-          </div>
+          <CliInstallFields
+            backendName="CodeRabbit CLI"
+            binary="coderabbit"
+            source={preferences?.coderabbit_cli_source ?? 'jean'}
+            onSourceChange={handleCodeRabbitSourceChange}
+            pathDetection={coderabbitPathDetection}
+            activePath={
+              preferences?.coderabbit_cli_source === 'path'
+                ? coderabbitPathDetection?.path
+                : coderabbitStatus?.path
+            }
+            loading={isCodeRabbitLoading}
+            installed={!!coderabbitStatus?.installed}
+            version={coderabbitStatus?.version}
+            onInstall={() => installCodeRabbitCli.mutate(undefined)}
+            installing={installCodeRabbitCli.isPending}
+            onUninstall={() => setDeleteCliTarget('coderabbit')}
+            actions={
+              <CliUpdateButton
+                checking={isCodeRabbitVersionsLoading}
+                hasUpdate={coderabbitHasUpdate}
+                latestVersion={coderabbitLatestStable?.version}
+                pending={updateCodeRabbitCli.isPending}
+                onUpdate={() => {
+                  if (isCodeRabbitPathSource && coderabbitStatus) {
+                    const action = getPathUpdateAction(
+                      coderabbitStatus.path,
+                      coderabbitPathDetection?.package_manager,
+                      'coderabbit',
+                      ['update'],
+                      undefined,
+                      coderabbitLatestStable?.version
+                    )
+                    if (action) {
+                      openCliLoginModal(
+                        'coderabbit',
+                        action[0],
+                        action[1],
+                        'update'
+                      )
+                      return
+                    }
+                  }
+                  updateCodeRabbitCli.mutate()
+                }}
+              />
+            }
+          />
         </SettingsSection>
       )}
 
       {hasBackend() && scope === 'codex' && (
         <SettingsSection
-          title="CLI source"
+          title="CLI"
           anchorId="pref-codex-section-cli"
-          variant="card"
           actions={
-            codexStatus?.installed ? (
-              checkingCodexAuth || isCodexAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : codexAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button size="sm" onClick={handleCodexRelogin}>
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button size="sm" onClick={handleCodexLogin}>
-                  Login
-                </Button>
-              )
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                Not installed
-              </span>
-            )
+            <CliAuthActions
+              installed={!!codexStatus?.installed}
+              checking={checkingCodexAuth || isCodexAuthLoading}
+              authenticated={!!codexAuth?.authenticated}
+              onSignIn={handleCodexLogin}
+              onSignInAgain={handleCodexRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField label={codexStatus?.installed ? 'Version' : 'Status'}>
-              {isCodexLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : codexStatus?.installed ? (
-                isCodexPathSource ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">
-                      {codexStatus.version ?? 'Installed'}
-                    </span>
-                    {isCodexVersionsLoading ? (
-                      <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!codexHasUpdate}
-                        onClick={() => {
-                          const action = getPathUpdateAction(
-                            codexStatus.path,
-                            codexPathDetection?.package_manager,
-                            'codex',
-                            null,
-                            '@openai/codex',
-                            codexLatestStable?.version
-                          )
-                          if (action) {
-                            openCliLoginModal(
-                              'codex',
-                              action[0],
-                              action[1],
-                              'update'
-                            )
-                          } else {
-                            openCliUpdateModal('codex')
-                          }
-                        }}
-                      >
-                        {codexHasUpdate
-                          ? `Update to ${codexLatestStable?.version}`
-                          : 'Up to date'}
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={() => openCliUpdateModal('codex')}
-                  >
-                    {codexStatus.version ?? 'Installed'}
-                  </Button>
-                )
+          <CliInstallFields
+            backendName="Codex CLI"
+            binary="codex"
+            source={preferences?.codex_cli_source ?? 'jean'}
+            onSourceChange={handleCodexSourceChange}
+            pathDetection={codexPathDetection}
+            activePath={
+              preferences?.codex_cli_source === 'path'
+                ? codexPathDetection?.path
+                : codexStatus?.path
+            }
+            loading={isCodexLoading}
+            installed={!!codexStatus?.installed}
+            version={codexStatus?.version}
+            onInstall={() => openCliUpdateModal('codex')}
+            onUninstall={() => setDeleteCliTarget('codex')}
+            actions={
+              isCodexPathSource ? (
+                <CliUpdateButton
+                  checking={isCodexVersionsLoading}
+                  hasUpdate={codexHasUpdate}
+                  latestVersion={codexLatestStable?.version}
+                  onUpdate={() => {
+                    const action = getPathUpdateAction(
+                      codexStatus?.path,
+                      codexPathDetection?.package_manager,
+                      'codex',
+                      null,
+                      '@openai/codex',
+                      codexLatestStable?.version
+                    )
+                    if (action) {
+                      openCliLoginModal('codex', action[0], action[1], 'update')
+                    } else {
+                      openCliUpdateModal('codex')
+                    }
+                  }}
+                />
               ) : (
-                <Button
-                  className="w-full sm:w-40"
+                <CliChangeVersionButton
                   onClick={() => openCliUpdateModal('codex')}
-                >
-                  Install
-                </Button>
-              )}
-            </InlineField>
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.codex_cli_source === 'path'
-                            ? codexPathDetection?.path
-                            : codexStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.codex_cli_source === 'path'
-                        ? (codexPathDetection?.path ?? 'System PATH')
-                        : (codexStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <BackendCliSourceSelect
-                value={preferences?.codex_cli_source ?? 'jean'}
-                onValueChange={handleCodexSourceChange}
-                backendName="Codex CLI"
-                path={codexPathDetection?.path}
-                pathVersion={codexPathDetection?.version}
-                pathFound={!!codexPathDetection?.found}
-                action={
-                  preferences?.codex_cli_source === 'jean' &&
-                  codexStatus?.installed && (
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setDeleteCliTarget('codex')}
-                    >
-                      Uninstall
-                    </Button>
-                  )
-                }
-              />
-            </InlineField>
-            {!codexStatus?.installed && !codexPathDetection?.found && (
-              <p className="text-xs text-muted-foreground px-1">
-                Install with Jean or add <code>codex</code> to your PATH.
-              </p>
-            )}
-            {codexStatus?.installed && codexStatus.sandbox_ready === false && (
-              <p className="text-xs text-warning px-1">
-                {codexStatus.sandbox_message ??
-                  'Codex sandbox requires bubblewrap. Install it with: sudo apt install bubblewrap'}
-              </p>
-            )}
-          </div>
+                />
+              )
+            }
+          />
+          {codexStatus?.installed && codexStatus.sandbox_ready === false && (
+            <p className="text-xs text-warning">
+              {codexStatus.sandbox_message ??
+                'Codex sandbox requires bubblewrap. Install it with: sudo apt install bubblewrap'}
+            </p>
+          )}
         </SettingsSection>
       )}
 
       {hasBackend() && scope === 'opencode' && (
         <SettingsSection
-          title="CLI source"
+          title="CLI"
           anchorId="pref-opencode-section-cli"
-          variant="card"
           actions={
-            opencodeStatus?.installed ? (
-              checkingOpenCodeAuth || isOpenCodeAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : opencodeAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button size="sm" onClick={handleOpenCodeRelogin}>
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button size="sm" onClick={handleOpenCodeLogin}>
-                  Login
-                </Button>
-              )
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                Not installed
-              </span>
-            )
+            <CliAuthActions
+              installed={!!opencodeStatus?.installed}
+              checking={checkingOpenCodeAuth || isOpenCodeAuthLoading}
+              authenticated={!!opencodeAuth?.authenticated}
+              onSignIn={handleOpenCodeLogin}
+              onSignInAgain={handleOpenCodeRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField
-              label={opencodeStatus?.installed ? 'Version' : 'Status'}
-            >
-              {isOpenCodeLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : opencodeStatus?.installed ? (
-                isOpencodePathSource ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">
-                      {opencodeStatus.version ?? 'Installed'}
-                    </span>
-                    {isOpencodeVersionsLoading ? (
-                      <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!opencodeHasUpdate}
-                        onClick={() => {
-                          const action = getPathUpdateAction(
-                            opencodeStatus.path,
-                            opencodePathDetection?.package_manager,
-                            'opencode',
-                            ['upgrade']
-                          )
-                          if (action) {
-                            openCliLoginModal(
-                              'opencode',
-                              action[0],
-                              action[1],
-                              'update'
-                            )
-                          } else {
-                            openCliUpdateModal('opencode')
-                          }
-                        }}
-                      >
-                        {opencodeHasUpdate
-                          ? `Update to ${opencodeLatestStable?.version}`
-                          : 'Up to date'}
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={() => openCliUpdateModal('opencode')}
-                  >
-                    {opencodeStatus.version ?? 'Installed'}
-                  </Button>
-                )
+          <CliInstallFields
+            backendName="OpenCode CLI"
+            binary="opencode"
+            source={preferences?.opencode_cli_source ?? 'jean'}
+            onSourceChange={handleOpencodeSourceChange}
+            pathDetection={opencodePathDetection}
+            activePath={
+              preferences?.opencode_cli_source === 'path'
+                ? opencodePathDetection?.path
+                : opencodeStatus?.path
+            }
+            loading={isOpenCodeLoading}
+            installed={!!opencodeStatus?.installed}
+            version={opencodeStatus?.version}
+            onInstall={() => openCliUpdateModal('opencode')}
+            onUninstall={() => setDeleteCliTarget('opencode')}
+            actions={
+              isOpencodePathSource ? (
+                <CliUpdateButton
+                  checking={isOpencodeVersionsLoading}
+                  hasUpdate={opencodeHasUpdate}
+                  latestVersion={opencodeLatestStable?.version}
+                  onUpdate={() => {
+                    const action = getPathUpdateAction(
+                      opencodeStatus?.path,
+                      opencodePathDetection?.package_manager,
+                      'opencode',
+                      ['upgrade']
+                    )
+                    if (action) {
+                      openCliLoginModal(
+                        'opencode',
+                        action[0],
+                        action[1],
+                        'update'
+                      )
+                    } else {
+                      openCliUpdateModal('opencode')
+                    }
+                  }}
+                />
               ) : (
-                <Button
-                  className="w-full sm:w-40"
+                <CliChangeVersionButton
                   onClick={() => openCliUpdateModal('opencode')}
-                >
-                  Install
-                </Button>
-              )}
-            </InlineField>
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.opencode_cli_source === 'path'
-                            ? opencodePathDetection?.path
-                            : opencodeStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.opencode_cli_source === 'path'
-                        ? (opencodePathDetection?.path ?? 'System PATH')
-                        : (opencodeStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <BackendCliSourceSelect
-                value={preferences?.opencode_cli_source ?? 'jean'}
-                onValueChange={handleOpencodeSourceChange}
-                backendName="OpenCode CLI"
-                path={opencodePathDetection?.path}
-                pathVersion={opencodePathDetection?.version}
-                pathFound={!!opencodePathDetection?.found}
-                action={
-                  preferences?.opencode_cli_source === 'jean' &&
-                  opencodeStatus?.installed && (
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setDeleteCliTarget('opencode')}
-                    >
-                      Uninstall
-                    </Button>
-                  )
-                }
-              />
-            </InlineField>
-            {!opencodeStatus?.installed && !opencodePathDetection?.found && (
-              <p className="text-xs text-muted-foreground px-1">
-                Install with Jean or add <code>opencode</code> to your PATH.
-              </p>
-            )}
-          </div>
+                />
+              )
+            }
+          />
         </SettingsSection>
       )}
 
       {hasBackend() && scope === 'cursor' && (
         <SettingsSection
-          title="CLI source"
+          title="CLI"
           anchorId="pref-cursor-section-cli"
-          variant="card"
           actions={
-            cursorStatus?.installed ? (
-              checkingCursorAuth || isCursorAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : cursorAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button size="sm" onClick={handleCursorRelogin}>
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button size="sm" onClick={handleCursorLogin}>
-                  Login
-                </Button>
-              )
-            ) : (
-              <span className="text-sm text-muted-foreground">
-                Not installed
-              </span>
-            )
+            <CliAuthActions
+              installed={!!cursorStatus?.installed}
+              checking={checkingCursorAuth || isCursorAuthLoading}
+              authenticated={!!cursorAuth?.authenticated}
+              onSignIn={handleCursorLogin}
+              onSignInAgain={handleCursorRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField label={cursorStatus?.installed ? 'Version' : 'Status'}>
-              {isCursorLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : cursorStatus?.installed ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm">
-                    {cursorStatus.version ?? 'Installed'}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleCursorUpdate}
-                  >
-                    Run self-update
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  className="w-full sm:w-40"
-                  onClick={handleCursorInstall}
-                >
-                  Install
-                </Button>
-              )}
-            </InlineField>
-            {cursorStatus?.installed &&
-              !cursorAuth?.authenticated &&
-              cursorAuthMessage && (
-                <div className="text-xs text-muted-foreground">
-                  {cursorAuthMessage}
-                </div>
-              )}
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyPath(
-                          cursorPathDetection?.path ?? cursorStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {cursorPathDetection?.path ??
-                        cursorStatus?.path ??
-                        'Not installed'}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              {/* Cursor has no Jean-managed binary — the installer runs
-                  Cursor's own script and the result lives on PATH. The
-                  Select is disabled but kept for visual parity with the
-                  other CLI rows. */}
-              <Select value="path" disabled>
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="path">System PATH</SelectItem>
-                </SelectContent>
-              </Select>
-            </InlineField>
-            {!cursorStatus?.installed && !cursorPathDetection?.found && (
-              <p className="text-xs text-muted-foreground px-1">
-                Install with Jean or add <code>cursor-agent</code> to your PATH.
+          <CliInstallFields
+            backendName="Cursor CLI"
+            binary="cursor-agent"
+            pathDetection={cursorPathDetection}
+            activePath={cursorPathDetection?.path ?? cursorStatus?.path}
+            loading={isCursorLoading}
+            installed={!!cursorStatus?.installed}
+            version={cursorStatus?.version}
+            onInstall={handleCursorInstall}
+            actions={
+              <Button variant="outline" size="sm" onClick={handleCursorUpdate}>
+                Run self-update
+              </Button>
+            }
+          />
+          {cursorStatus?.installed &&
+            !cursorAuth?.authenticated &&
+            cursorAuthMessage && (
+              <p className="text-xs text-muted-foreground">
+                {cursorAuthMessage}
               </p>
             )}
-          </div>
         </SettingsSection>
       )}
 
       {hasBackend() && scope === 'pi' && (
         <SettingsSection
-          title="CLI source"
+          title="CLI"
           anchorId="pref-pi-section-cli"
-          variant="card"
           actions={
-            piStatus?.installed ? (
-              checkingPiAuth || isPiAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : piAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button size="sm" onClick={handlePiRelogin}>
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button size="sm" onClick={handlePiLogin}>
-                  Login
-                </Button>
-              )
-            ) : (
-              <Button size="sm" onClick={handlePiInstall}>
-                Install
-              </Button>
-            )
+            <CliAuthActions
+              installed={!!piStatus?.installed}
+              checking={checkingPiAuth || isPiAuthLoading}
+              authenticated={!!piAuth?.authenticated}
+              onSignIn={handlePiLogin}
+              onSignInAgain={handlePiRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField label={piStatus?.installed ? 'Version' : 'Status'}>
-              {isPiLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : piStatus?.installed ? (
-                <Button
-                  variant="outline"
-                  className="w-full sm:w-40 justify-between"
-                  onClick={handlePiInstall}
-                >
-                  {piStatus.version ?? 'Installed'}
-                </Button>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-muted-foreground">
-                    Not found in PATH
-                  </span>
-                  <Button variant="outline" size="sm" onClick={handlePiInstall}>
-                    Install now
-                  </Button>
-                </div>
-              )}
-            </InlineField>
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.pi_cli_source === 'path'
-                            ? piPathDetection?.path
-                            : piStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.pi_cli_source === 'path'
-                        ? (piPathDetection?.path ?? 'System PATH')
-                        : (piStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <BackendCliSourceSelect
-                value={preferences?.pi_cli_source ?? 'jean'}
-                onValueChange={handlePiSourceChange}
-                backendName="PI CLI"
-                path={piPathDetection?.path}
-                pathVersion={piPathDetection?.version}
-                pathFound={!!piPathDetection?.found}
-                action={
-                  preferences?.pi_cli_source === 'jean' &&
-                  piStatus?.installed && (
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setDeleteCliTarget('pi')}
-                    >
-                      Uninstall
-                    </Button>
-                  )
-                }
-              />
-            </InlineField>
-            {piStatus?.installed && !piAuth?.authenticated && piAuthMessage && (
-              <div className="text-xs text-muted-foreground">
-                {piAuthMessage}
-              </div>
-            )}
-          </div>
+          <CliInstallFields
+            backendName="PI CLI"
+            source={preferences?.pi_cli_source ?? 'jean'}
+            onSourceChange={handlePiSourceChange}
+            pathDetection={piPathDetection}
+            activePath={
+              preferences?.pi_cli_source === 'path'
+                ? piPathDetection?.path
+                : piStatus?.path
+            }
+            loading={isPiLoading}
+            installed={!!piStatus?.installed}
+            version={piStatus?.version}
+            onInstall={handlePiInstall}
+            onUninstall={() => setDeleteCliTarget('pi')}
+            actions={<CliChangeVersionButton onClick={handlePiInstall} />}
+          />
+          {piStatus?.installed && !piAuth?.authenticated && piAuthMessage && (
+            <p className="text-xs text-muted-foreground">{piAuthMessage}</p>
+          )}
         </SettingsSection>
       )}
 
       {hasBackend() && scope === 'commandcode' && (
         <SettingsSection
-          title="CLI source"
+          title="CLI"
           anchorId="pref-commandcode-section-cli"
-          variant="card"
           actions={
-            commandcodeStatus?.installed ? (
-              checkingCommandCodeAuth || isCommandCodeAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : commandcodeAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button size="sm" onClick={handleCommandCodeRelogin}>
-                    Relogin
-                  </Button>
-                </span>
-              ) : (
-                <Button size="sm" onClick={handleCommandCodeLogin}>
-                  Login
-                </Button>
-              )
-            ) : (
-              <Button size="sm" onClick={handleCommandCodeInstall}>
-                Install
-              </Button>
-            )
+            <CliAuthActions
+              installed={!!commandcodeStatus?.installed}
+              checking={checkingCommandCodeAuth || isCommandCodeAuthLoading}
+              authenticated={!!commandcodeAuth?.authenticated}
+              onSignIn={handleCommandCodeLogin}
+              onSignInAgain={handleCommandCodeRelogin}
+            />
           }
         >
-          <div className="space-y-4">
-            <InlineField
-              label={commandcodeStatus?.installed ? 'Version' : 'Status'}
-            >
-              {isCommandCodeLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : commandcodeStatus?.installed ? (
-                <Button
-                  variant="outline"
-                  className="w-full sm:w-40 justify-between"
-                  onClick={handleCommandCodeInstall}
-                >
-                  {commandcodeStatus.version ?? 'Installed'}
-                </Button>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-muted-foreground">
-                    Not found in PATH
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleCommandCodeInstall}
-                  >
-                    Install now
-                  </Button>
-                </div>
-              )}
-            </InlineField>
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.commandcode_cli_source === 'path'
-                            ? commandcodePathDetection?.path
-                            : commandcodeStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.commandcode_cli_source === 'path'
-                        ? (commandcodePathDetection?.path ?? 'System PATH')
-                        : (commandcodeStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <BackendCliSourceSelect
-                value={preferences?.commandcode_cli_source ?? 'jean'}
-                onValueChange={handleCommandCodeSourceChange}
-                backendName="Command Code CLI"
-                path={commandcodePathDetection?.path}
-                pathVersion={commandcodePathDetection?.version}
-                pathFound={!!commandcodePathDetection?.found}
-                action={
-                  preferences?.commandcode_cli_source === 'jean' &&
-                  commandcodeStatus?.installed && (
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setDeleteCliTarget('commandcode')}
-                    >
-                      Uninstall
-                    </Button>
-                  )
-                }
-              />
-            </InlineField>
-            {commandcodeStatus?.installed &&
-              !commandcodeAuth?.authenticated &&
-              commandCodeAuthMessage && (
-                <div className="text-xs text-muted-foreground">
-                  {commandCodeAuthMessage}
-                </div>
-              )}
-          </div>
+          <CliInstallFields
+            backendName="Command Code CLI"
+            source={preferences?.commandcode_cli_source ?? 'jean'}
+            onSourceChange={handleCommandCodeSourceChange}
+            pathDetection={commandcodePathDetection}
+            activePath={
+              preferences?.commandcode_cli_source === 'path'
+                ? commandcodePathDetection?.path
+                : commandcodeStatus?.path
+            }
+            loading={isCommandCodeLoading}
+            installed={!!commandcodeStatus?.installed}
+            version={commandcodeStatus?.version}
+            onInstall={handleCommandCodeInstall}
+            onUninstall={() => setDeleteCliTarget('commandcode')}
+            actions={
+              <CliChangeVersionButton onClick={handleCommandCodeInstall} />
+            }
+          />
+          {commandcodeStatus?.installed &&
+            !commandcodeAuth?.authenticated &&
+            commandCodeAuthMessage && (
+              <p className="text-xs text-muted-foreground">
+                {commandCodeAuthMessage}
+              </p>
+            )}
         </SettingsSection>
       )}
 
-      {isGeneralScope && isWindows && isNativeApp() && (
-        <WslSettingsSection
-          preferences={preferences}
-          patchPreferences={patchPreferences}
-        />
+      {hasBackend() && scope === 'commandcode' && (
+        <SettingsSection title="Runs" anchorId="pref-commandcode-section-runs">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">Max agent turns</p>
+              <p className="text-xs text-muted-foreground">
+                Command Code stops a run after this many turns. Raise it for
+                long tasks. Default: 30.
+              </p>
+            </div>
+            <Input
+              // Remount when the saved value changes (late load, other clients).
+              key={preferences?.commandcode_max_turns ?? 30}
+              type="number"
+              min={1}
+              max={200}
+              defaultValue={preferences?.commandcode_max_turns ?? 30}
+              aria-label="Command Code max agent turns"
+              className="h-8 w-24"
+              onBlur={event => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                if (!Number.isFinite(parsed)) return
+                const next = Math.min(Math.max(parsed, 1), 200)
+                event.target.value = String(next)
+                if (next !== preferences?.commandcode_max_turns) {
+                  patchPreferences.mutate({ commandcode_max_turns: next })
+                }
+              }}
+              onKeyDown={event => {
+                if (event.key === 'Enter') event.currentTarget.blur()
+              }}
+            />
+          </div>
+        </SettingsSection>
       )}
 
       {scope === 'claude' && (
         <SettingsSection
           title="Default model"
           anchorId="pref-claude-section-settings"
-          variant="card"
         >
           <div className="space-y-4">
             <InlineField
@@ -3278,11 +2555,30 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             </InlineField>
             <InlineField
               label="Steer running turn"
-              description="Inject new prompts into the running turn instead of queueing. Lands at the next tool call. macOS/Linux only; applies to new runs."
+              description="Send new prompts into the running turn"
+              help="Lands at the next tool call instead of queueing. macOS/Linux only; applies to new runs."
             >
               <Switch
                 checked={preferences?.claude_auto_steer_enabled ?? false}
                 onCheckedChange={handleClaudeAutoSteerToggle}
+              />
+            </InlineField>
+            <InlineField
+              label="Auto-compact window"
+              description="Context size that triggers auto-compaction"
+              help="Passed as --autocompact. Applies from the next message, also in running sessions. A CLAUDE_CODE_AUTO_COMPACT_WINDOW env var takes precedence."
+            >
+              <AutoCompactSelect
+                value={preferences?.claude_auto_compact_window ?? 'default'}
+                options={CLAUDE_AUTO_COMPACT_WINDOW_OPTIONS}
+                onValueChange={value => {
+                  if (preferences) {
+                    patchPreferences.mutate({
+                      claude_auto_compact_window:
+                        value === 'default' ? null : value,
+                    })
+                  }
+                }}
               />
             </InlineField>
           </div>
@@ -3293,7 +2589,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         <SettingsSection
           title="Default model"
           anchorId="pref-codex-section-settings"
-          variant="card"
         >
           <div className="space-y-4">
             <InlineField label="Model">
@@ -3382,6 +2677,27 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 onCheckedChange={handleCodexAutoSteerToggle}
               />
             </InlineField>
+            <InlineField
+              label="Auto-compact limit"
+              description="Context size that triggers auto-compaction"
+              help="Sets model_auto_compact_token_limit for Jean's Codex threads. Applies from the next message. A value above the model's context window has no effect."
+            >
+              <AutoCompactSelect
+                value={
+                  preferences?.codex_auto_compact_token_limit?.toString() ??
+                  'default'
+                }
+                options={CODEX_AUTO_COMPACT_TOKEN_LIMIT_OPTIONS}
+                onValueChange={value => {
+                  if (preferences) {
+                    patchPreferences.mutate({
+                      codex_auto_compact_token_limit:
+                        value === 'default' ? null : Number(value),
+                    })
+                  }
+                }}
+              />
+            </InlineField>
           </div>
         </SettingsSection>
       )}
@@ -3390,7 +2706,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         <SettingsSection
           title="Default model"
           anchorId="pref-opencode-section-settings"
-          variant="card"
         >
           <div className="space-y-4">
             <InlineField label="Model">
@@ -3460,6 +2775,25 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 onCheckedChange={handleOpenCodeAutoSteerToggle}
               />
             </InlineField>
+            <InlineField
+              label="Auto-compact"
+              description="Compact the session when the context is full"
+              help="Sets compaction.auto through OPENCODE_CONFIG_CONTENT. Applies when Jean next starts the OpenCode server (after all OpenCode sessions are idle). Has no effect on an OpenCode server that Jean did not start."
+            >
+              <AutoCompactSelect
+                value={toAutoCompactToggleValue(
+                  preferences?.opencode_auto_compact
+                )}
+                options={autoCompactToggleOptions('OpenCode')}
+                onValueChange={value => {
+                  if (preferences) {
+                    patchPreferences.mutate({
+                      opencode_auto_compact: fromAutoCompactToggleValue(value),
+                    })
+                  }
+                }}
+              />
+            </InlineField>
           </div>
         </SettingsSection>
       )}
@@ -3468,7 +2802,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         <SettingsSection
           title="Default model"
           anchorId="pref-cursor-section-settings"
-          variant="card"
         >
           <div className="space-y-4">
             <InlineField label="Model">
@@ -3537,7 +2870,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         <SettingsSection
           title="Default model"
           anchorId="pref-pi-section-settings"
-          variant="card"
         >
           <div className="space-y-4">
             <InlineField
@@ -3613,8 +2945,26 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               />
             </InlineField>
             <InlineField
+              label="Auto-compact"
+              description="Compact the session when the context is nearly full"
+              help="Sent as set_auto_compaction before each message. PI saves the value in its global settings, so it also applies outside Jean. macOS and Linux only."
+            >
+              <AutoCompactSelect
+                value={toAutoCompactToggleValue(preferences?.pi_auto_compact)}
+                options={autoCompactToggleOptions('PI')}
+                onValueChange={value => {
+                  if (preferences) {
+                    patchPreferences.mutate({
+                      pi_auto_compact: fromAutoCompactToggleValue(value),
+                    })
+                  }
+                }}
+              />
+            </InlineField>
+            <InlineField
               label="PI owns agent policy"
-              description="Keep PI's native tools, extensions, and project instructions. Jean only transports prompts and renders events without injecting a tool allowlist or system prompt."
+              description="Keep PI's own tools, extensions, and instructions"
+              help="Jean only sends prompts and renders events. It does not inject a tool allowlist or system prompt."
             >
               <Switch
                 checked={preferences?.pi_agent_owns_policy ?? false}
@@ -3629,7 +2979,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         <SettingsSection
           title="Default model"
           anchorId="pref-commandcode-section-settings"
-          variant="card"
         >
           <div className="space-y-4">
             <InlineField label="Model">
@@ -3656,111 +3005,43 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       {scope === 'grok' && (
         <>
           <SettingsSection
-            title="CLI source"
+            title="CLI"
             anchorId="pref-grok-section-cli"
-            variant="card"
             actions={
-              grokStatus?.installed ? (
-                checkingGrokAuth || isGrokAuthLoading ? (
-                  <span className="text-sm text-muted-foreground flex items-center gap-2">
-                    <Loader2 className="size-3 animate-spin" />
-                    Checking...
-                  </span>
-                ) : grokAuth?.authenticated ? (
-                  <span className="text-sm text-muted-foreground flex items-center gap-2">
-                    Logged in
-                    <Button size="sm" onClick={handleGrokRelogin}>
-                      Relogin
-                    </Button>
-                  </span>
-                ) : (
-                  <Button size="sm" onClick={handleGrokLogin}>
-                    Login
-                  </Button>
-                )
-              ) : (
-                <Button size="sm" onClick={handleGrokInstall}>
-                  Install
-                </Button>
-              )
+              <CliAuthActions
+                installed={!!grokStatus?.installed}
+                checking={checkingGrokAuth || isGrokAuthLoading}
+                authenticated={!!grokAuth?.authenticated}
+                onSignIn={handleGrokLogin}
+                onSignInAgain={handleGrokRelogin}
+              />
             }
           >
-            <div className="space-y-4">
-              <InlineField label={grokStatus?.installed ? 'Version' : 'Status'}>
-                {isGrokLoading ? (
-                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                ) : grokStatus?.installed ? (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={handleGrokInstall}
-                  >
-                    {grokStatus.version ?? 'Installed'}
-                  </Button>
-                ) : (
-                  <span className="text-sm text-muted-foreground">
-                    Not found in PATH
-                  </span>
-                )}
-              </InlineField>
-              {grokAuthMessage && (
-                <p className="text-xs text-muted-foreground">
-                  {grokAuthMessage}
-                </p>
-              )}
-              <InlineField
-                label="Source"
-                description={
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleCopyPath(
-                            preferences?.grok_cli_source === 'path'
-                              ? grokPathDetection?.path
-                              : grokStatus?.path
-                          )
-                        }
-                        className="text-left hover:underline cursor-pointer"
-                      >
-                        {preferences?.grok_cli_source === 'path'
-                          ? (grokPathDetection?.path ?? 'System PATH')
-                          : (grokStatus?.path ?? 'Not installed')}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Click to copy path</TooltipContent>
-                  </Tooltip>
-                }
-              >
-                <BackendCliSourceSelect
-                  value={preferences?.grok_cli_source ?? 'jean'}
-                  onValueChange={handleGrokSourceChange}
-                  backendName="Grok CLI"
-                  path={grokPathDetection?.path}
-                  pathVersion={grokPathDetection?.version}
-                  pathFound={!!grokPathDetection?.found}
-                  action={
-                    preferences?.grok_cli_source === 'jean' &&
-                    grokStatus?.installed && (
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => setDeleteCliTarget('grok')}
-                      >
-                        Uninstall
-                      </Button>
-                    )
-                  }
-                />
-              </InlineField>
-            </div>
+            <CliInstallFields
+              backendName="Grok CLI"
+              source={preferences?.grok_cli_source ?? 'jean'}
+              onSourceChange={handleGrokSourceChange}
+              pathDetection={grokPathDetection}
+              activePath={
+                preferences?.grok_cli_source === 'path'
+                  ? grokPathDetection?.path
+                  : grokStatus?.path
+              }
+              loading={isGrokLoading}
+              installed={!!grokStatus?.installed}
+              version={grokStatus?.version}
+              onInstall={handleGrokInstall}
+              onUninstall={() => setDeleteCliTarget('grok')}
+              actions={<CliChangeVersionButton onClick={handleGrokInstall} />}
+            />
+            {grokAuthMessage && (
+              <p className="text-xs text-muted-foreground">{grokAuthMessage}</p>
+            )}
           </SettingsSection>
 
           <SettingsSection
             title="Default model"
             anchorId="pref-grok-section-settings"
-            variant="card"
           >
             <div className="space-y-4">
               <InlineField label="Model">
@@ -3816,120 +3097,43 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       {scope === 'kimi' && (
         <>
           <SettingsSection
-            title="CLI source"
+            title="CLI"
             anchorId="pref-kimi-section-cli"
-            variant="card"
             actions={
-              kimiStatus?.installed ? (
-                checkingKimiAuth || isKimiAuthLoading ? (
-                  <span className="text-sm text-muted-foreground flex items-center gap-2">
-                    <Loader2 className="size-3 animate-spin" />
-                    Checking...
-                  </span>
-                ) : kimiAuth?.authenticated ? (
-                  <span className="text-sm text-muted-foreground flex items-center gap-2">
-                    Logged in
-                    <Button size="sm" onClick={handleKimiRelogin}>
-                      Relogin
-                    </Button>
-                  </span>
-                ) : (
-                  <Button size="sm" onClick={handleKimiLogin}>
-                    Login
-                  </Button>
-                )
-              ) : (
-                <Button size="sm" onClick={handleKimiInstall}>
-                  Install
-                </Button>
-              )
+              <CliAuthActions
+                installed={!!kimiStatus?.installed}
+                checking={checkingKimiAuth || isKimiAuthLoading}
+                authenticated={!!kimiAuth?.authenticated}
+                onSignIn={handleKimiLogin}
+                onSignInAgain={handleKimiRelogin}
+              />
             }
           >
-            <div className="space-y-4">
-              <InlineField label={kimiStatus?.installed ? 'Version' : 'Status'}>
-                {isKimiLoading ? (
-                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                ) : kimiStatus?.installed ? (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={handleKimiInstall}
-                  >
-                    {kimiStatus.version ?? 'Installed'}
-                  </Button>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-muted-foreground">
-                      Not found in PATH
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleKimiInstall}
-                    >
-                      Install now
-                    </Button>
-                  </div>
-                )}
-              </InlineField>
-              {kimiAuthMessage && (
-                <p className="text-xs text-muted-foreground">
-                  {kimiAuthMessage}
-                </p>
-              )}
-              <InlineField
-                label="Source"
-                description={
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleCopyPath(
-                            preferences?.kimi_cli_source === 'path'
-                              ? kimiPathDetection?.path
-                              : kimiStatus?.path
-                          )
-                        }
-                        className="text-left hover:underline cursor-pointer"
-                      >
-                        {preferences?.kimi_cli_source === 'path'
-                          ? (kimiPathDetection?.path ?? 'System PATH')
-                          : (kimiStatus?.path ?? 'Not installed')}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Click to copy path</TooltipContent>
-                  </Tooltip>
-                }
-              >
-                <BackendCliSourceSelect
-                  value={preferences?.kimi_cli_source ?? 'jean'}
-                  onValueChange={handleKimiSourceChange}
-                  backendName="Kimi Code CLI"
-                  path={kimiPathDetection?.path}
-                  pathVersion={kimiPathDetection?.version}
-                  pathFound={!!kimiPathDetection?.found}
-                  action={
-                    preferences?.kimi_cli_source === 'jean' &&
-                    kimiStatus?.installed && (
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => setDeleteCliTarget('kimi')}
-                      >
-                        Uninstall
-                      </Button>
-                    )
-                  }
-                />
-              </InlineField>
-            </div>
+            <CliInstallFields
+              backendName="Kimi Code CLI"
+              source={preferences?.kimi_cli_source ?? 'jean'}
+              onSourceChange={handleKimiSourceChange}
+              pathDetection={kimiPathDetection}
+              activePath={
+                preferences?.kimi_cli_source === 'path'
+                  ? kimiPathDetection?.path
+                  : kimiStatus?.path
+              }
+              loading={isKimiLoading}
+              installed={!!kimiStatus?.installed}
+              version={kimiStatus?.version}
+              onInstall={handleKimiInstall}
+              onUninstall={() => setDeleteCliTarget('kimi')}
+              actions={<CliChangeVersionButton onClick={handleKimiInstall} />}
+            />
+            {kimiAuthMessage && (
+              <p className="text-xs text-muted-foreground">{kimiAuthMessage}</p>
+            )}
           </SettingsSection>
 
           <SettingsSection
             title="Default model"
             anchorId="pref-kimi-section-settings"
-            variant="card"
           >
             <div className="space-y-4">
               <InlineField label="Model">
@@ -3968,126 +3172,50 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       {scope === 'devin' && (
         <>
           <SettingsSection
-            title="CLI source"
+            title="CLI"
             anchorId="pref-devin-section-cli"
-            variant="card"
             actions={
-              devinStatus?.installed ? (
-                checkingDevinAuth || isDevinAuthLoading ? (
-                  <span className="text-sm text-muted-foreground flex items-center gap-2">
-                    <Loader2 className="size-3 animate-spin" />
-                    Checking...
-                  </span>
-                ) : devinAuth?.authenticated ? (
-                  <span className="text-sm text-muted-foreground flex items-center gap-2">
-                    Logged in
-                    <Button size="sm" onClick={handleDevinRelogin}>
-                      Relogin
-                    </Button>
-                  </span>
-                ) : (
-                  <Button size="sm" onClick={handleDevinLogin}>
-                    Login
-                  </Button>
-                )
-              ) : (
-                <Button size="sm" onClick={handleDevinInstall}>
-                  Install
-                </Button>
-              )
+              <CliAuthActions
+                installed={!!devinStatus?.installed}
+                checking={checkingDevinAuth || isDevinAuthLoading}
+                authenticated={!!devinAuth?.authenticated}
+                onSignIn={handleDevinLogin}
+                onSignInAgain={handleDevinRelogin}
+              />
             }
           >
-            <div className="space-y-4">
-              <InlineField
-                label={devinStatus?.installed ? 'Version' : 'Status'}
-                description={
-                  devinStatus?.installed
-                    ? 'Enables Devin AI sessions through the Devin CLI ACP server.'
-                    : 'Install the official Devin CLI, then log in with your Devin account.'
-                }
-              >
-                {isDevinLoading ? (
-                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                ) : devinStatus?.installed ? (
-                  <Button
-                    variant="outline"
-                    className="w-full sm:w-40 justify-between"
-                    onClick={handleDevinInstall}
-                  >
-                    {devinStatus.version ?? 'Installed'}
-                  </Button>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-muted-foreground">
-                      Not found in PATH
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleDevinInstall}
-                    >
-                      Install now
-                    </Button>
-                  </div>
-                )}
-              </InlineField>
-              {devinAuthMessage && (
-                <p className="text-xs text-muted-foreground">
-                  {devinAuthMessage}
-                </p>
-              )}
-              <InlineField
-                label="Source"
-                description={
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        onClick={() =>
-                          handleCopyPath(
-                            preferences?.devin_cli_source === 'jean'
-                              ? devinStatus?.path
-                              : devinPathDetection?.path
-                          )
-                        }
-                        className="text-left hover:underline cursor-pointer"
-                      >
-                        {preferences?.devin_cli_source === 'jean'
-                          ? (devinStatus?.path ?? 'Jean-managed path')
-                          : (devinPathDetection?.path ?? 'System PATH')}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Click to copy path</TooltipContent>
-                  </Tooltip>
-                }
-              >
-                <BackendCliSourceSelect
-                  value={preferences?.devin_cli_source ?? 'jean'}
-                  onValueChange={handleDevinSourceChange}
-                  backendName="Devin CLI"
-                  path={devinPathDetection?.path}
-                  pathVersion={devinPathDetection?.version}
-                  pathFound={!!devinPathDetection?.found}
-                  action={
-                    preferences?.devin_cli_source === 'jean' &&
-                    devinStatus?.installed && (
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => setDeleteCliTarget('devin')}
-                      >
-                        Uninstall
-                      </Button>
-                    )
-                  }
-                />
-              </InlineField>
-            </div>
+            <CliInstallFields
+              backendName="Devin CLI"
+              source={preferences?.devin_cli_source ?? 'jean'}
+              onSourceChange={handleDevinSourceChange}
+              pathDetection={devinPathDetection}
+              activePath={
+                preferences?.devin_cli_source === 'jean'
+                  ? devinStatus?.path
+                  : devinPathDetection?.path
+              }
+              loading={isDevinLoading}
+              installed={!!devinStatus?.installed}
+              version={devinStatus?.version}
+              description={
+                devinStatus?.installed
+                  ? 'Enables Devin AI sessions through the Devin CLI ACP server.'
+                  : 'Install the official Devin CLI, then log in with your Devin account.'
+              }
+              onInstall={handleDevinInstall}
+              onUninstall={() => setDeleteCliTarget('devin')}
+              actions={<CliChangeVersionButton onClick={handleDevinInstall} />}
+            />
+            {devinAuthMessage && (
+              <p className="text-xs text-muted-foreground">
+                {devinAuthMessage}
+              </p>
+            )}
           </SettingsSection>
 
           <SettingsSection
             title="Default model"
             anchorId="pref-devin-section-settings"
-            variant="card"
           >
             <div className="space-y-4">
               <InlineField
@@ -4114,7 +3242,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               </InlineField>
               <InlineField
                 label="Steer running turn"
-                description="Reserved for Devin steering support; new prompts currently queue while Devin is working"
+                description="Not supported yet; prompts queue while Devin works"
               >
                 <Switch
                   checked={preferences?.devin_auto_steer_enabled ?? false}
@@ -4134,22 +3262,32 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
           <div className="space-y-4">
             <InlineField
               label="Default backend"
-              description="CLI to use for new sessions"
+              description="CLI and provider to use for new sessions"
             >
               <Select
-                value={effectiveBackend}
+                value={currentDefaultBackendChoice(
+                  effectiveBackend,
+                  preferences
+                )}
                 onValueChange={handleBackendChange}
               >
                 <SelectTrigger
                   className="w-full sm:w-80"
-                  hideIcon={installedBackendOptions.length <= 1}
+                  hideIcon={backendChoices.length <= 1}
                 >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {installedBackendOptions.map(option => (
-                    <SelectItem key={option.value} value={option.value}>
-                      <BackendLabel backend={option.value} />
+                  {backendChoices.map(choice => (
+                    <SelectItem key={choice.value} value={choice.value}>
+                      <span className="inline-flex items-center gap-1.5">
+                        <BackendLabel backend={choice.backend} />
+                        {choice.provider && (
+                          <span className="text-muted-foreground">
+                            · {choice.provider}
+                          </span>
+                        )}
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -4158,7 +3296,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
             <InlineField
               label="Default permissions"
-              description="Permission policy for new sessions. Plan mode is opt-in on each session, not a default."
+              description="Permission policy for new sessions"
+              help="Plan mode is opt-in on each session, not a default."
             >
               <Select
                 value={preferences?.default_execution_mode ?? 'yolo'}
@@ -4194,9 +3333,372 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               </Select>
             </InlineField>
 
+            <AiLanguageField preferences={preferences} />
+
+            {isNativeApp() && (
+              <InlineField
+                label="Editor"
+                description="App to open worktrees in"
+              >
+                <Select
+                  value={preferences?.editor ?? 'zed'}
+                  onValueChange={handleEditorChange}
+                >
+                  <SelectTrigger className="w-full sm:w-80">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {getEditorOptions().map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+            )}
+
+            {isNativeApp() && (
+              <InlineField
+                label="Terminal"
+                description="App to open terminals in"
+              >
+                <Select
+                  value={preferences?.terminal ?? 'terminal'}
+                  onValueChange={handleTerminalChange}
+                >
+                  <SelectTrigger className="w-full sm:w-80">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {getTerminalOptions().map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+            )}
+
+            {isNativeApp() && (
+              <InlineField
+                label="Open In"
+                description="Default app for Open button"
+              >
+                <Select
+                  value={preferences?.open_in ?? 'editor'}
+                  onValueChange={handleOpenInChange}
+                >
+                  <SelectTrigger className="w-full sm:w-80">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {openInDefaultOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+            )}
+
+            <InlineField
+              label="New Session"
+              description="Default action for CMD+T"
+            >
+              <Select
+                value={preferences?.default_new_session_kind ?? 'chat'}
+                onValueChange={handleNewSessionKindChange}
+              >
+                <SelectTrigger className="w-full sm:w-80">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {newSessionKindOptions.map(option => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </InlineField>
+          </div>
+        </SettingsSection>
+      )}
+
+      {isGeneralScope && (
+        <>
+          <SettingsSection
+            title="Notifications"
+            anchorId="pref-general-section-notifications"
+          >
+            <div className="space-y-4">
+              {isNativeApp() && (
+                <InlineField
+                  label="Desktop notifications"
+                  description="Banner when a session needs you or finishes"
+                  help="Shown only while Jean is in the background."
+                >
+                  <Switch
+                    checked={preferences?.desktop_notifications_enabled ?? true}
+                    onCheckedChange={handleDesktopNotificationsEnabledChange}
+                  />
+                </InlineField>
+              )}
+
+              {!isNativeApp() && <WebPushSettings />}
+
+              <InlineField
+                label="Web access sounds"
+                description="Browser and mobile web access only"
+                help="Turn off to keep phone music playing."
+              >
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="web-access-sounds-enabled"
+                    checked={webAccessSoundsEnabled}
+                    onCheckedChange={handleWebAccessSoundsEnabledChange}
+                  />
+                  <Label
+                    htmlFor="web-access-sounds-enabled"
+                    className="cursor-pointer text-sm"
+                  >
+                    Play Jean sounds in web access
+                  </Label>
+                </div>
+              </InlineField>
+
+              <InlineField
+                label="Waiting sound"
+                description="Play when session needs your input"
+              >
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={preferences?.waiting_sound ?? 'none'}
+                    onValueChange={handleWaitingSoundChange}
+                  >
+                    <SelectTrigger className="w-full sm:w-80">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {notificationSoundOptions.map(option => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    disabled={
+                      !preferences?.waiting_sound ||
+                      preferences.waiting_sound === 'none' ||
+                      !soundsEnabledInCurrentView
+                    }
+                    onClick={() =>
+                      playNotificationSound(
+                        preferences?.waiting_sound ?? 'none',
+                        { webAccessSoundsEnabled }
+                      )
+                    }
+                  >
+                    <Play className="h-4 w-4" />
+                  </Button>
+                </div>
+              </InlineField>
+
+              <InlineField
+                label="Review sound"
+                description="Play when session finishes"
+              >
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={preferences?.review_sound ?? 'none'}
+                    onValueChange={handleReviewSoundChange}
+                  >
+                    <SelectTrigger className="w-full sm:w-80">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {notificationSoundOptions.map(option => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    disabled={
+                      !preferences?.review_sound ||
+                      preferences.review_sound === 'none' ||
+                      !soundsEnabledInCurrentView
+                    }
+                    onClick={() =>
+                      playNotificationSound(
+                        preferences?.review_sound ?? 'none',
+                        {
+                          webAccessSoundsEnabled,
+                        }
+                      )
+                    }
+                  >
+                    <Play className="h-4 w-4" />
+                  </Button>
+                </div>
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title="Chat" anchorId="pref-general-section-chat">
+            <div className="space-y-4">
+              <InlineField
+                label="Show full file paths"
+                description="Show relative paths in file mention badges"
+              >
+                <Switch
+                  checked={preferences?.show_full_file_path ?? false}
+                  onCheckedChange={checked => {
+                    if (preferences) {
+                      patchPreferences.mutate({
+                        show_full_file_path: checked,
+                      })
+                    }
+                  }}
+                />
+              </InlineField>
+              <InlineField
+                label="Spellcheck"
+                description="Enable spellcheck in the chat input"
+              >
+                <Switch
+                  checked={preferences?.spellcheck_enabled ?? true}
+                  onCheckedChange={checked => {
+                    if (preferences) {
+                      patchPreferences.mutate({
+                        spellcheck_enabled: checked,
+                      })
+                    }
+                  }}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Auto-generate"
+            anchorId="pref-general-section-auto-generate"
+          >
+            <div className="space-y-4">
+              <InlineField
+                label="Branch names"
+                description="Generate branch names from your first message"
+              >
+                <Switch
+                  checked={preferences?.auto_branch_naming ?? true}
+                  onCheckedChange={handleAutoBranchNamingChange}
+                />
+              </InlineField>
+              <InlineField
+                label="Session names"
+                description="Generate session names from your first message"
+              >
+                <Switch
+                  checked={preferences?.auto_session_naming ?? true}
+                  onCheckedChange={handleAutoSessionNamingChange}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Worktrees"
+            anchorId="pref-general-section-worktrees"
+          >
+            <div className="space-y-4">
+              <InlineField
+                label="Auto-pull base branch"
+                description="Pull the latest changes before creating a new worktree"
+              >
+                <Switch
+                  checked={preferences?.auto_pull_base_branch ?? true}
+                  onCheckedChange={checked => {
+                    if (preferences) {
+                      patchPreferences.mutate({
+                        auto_pull_base_branch: checked,
+                      })
+                    }
+                  }}
+                />
+              </InlineField>
+
+              <InlineField
+                label="Delete worktree when PR is merged"
+                description="Remove the worktree after its linked pull request is merged"
+                help="Base sessions are kept: only the merged PR link is removed."
+              >
+                <Switch
+                  checked={
+                    preferences?.auto_delete_worktree_on_pr_merged ?? false
+                  }
+                  onCheckedChange={checked => {
+                    if (preferences) {
+                      patchPreferences.mutate({
+                        auto_delete_worktree_on_pr_merged: checked,
+                      })
+                    }
+                  }}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Browser"
+            anchorId="pref-general-section-browser"
+          >
+            <div className="space-y-4">
+              <BrowserDefaultHostField preferences={preferences} />
+            </div>
+          </SettingsSection>
+
+          {isWebAccessView && (
+            <SettingsSection
+              title="This browser"
+              description="You are signed in to this Jean server with an access token kept in this browser."
+              anchorId="pref-general-section-session"
+            >
+              <InlineField
+                label={webAccessServerLabel()}
+                description="Forgets the token on this device only"
+                help="The server keeps running and your other devices stay signed in."
+              >
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={signOutOfWebAccess}
+                >
+                  <LogOut className="size-3.5" />
+                  Sign out
+                </Button>
+              </InlineField>
+            </SettingsSection>
+          )}
+
+          <SettingsSection
+            title="Advanced"
+            anchorId="pref-general-section-advanced"
+            collapsible
+            defaultOpen={false}
+          >
             <InlineField
               label="Keep AI servers warm"
-              description="Keep Codex and OpenCode running for 10 minutes after a request so follow-up prompts start faster"
+              description="Keep Codex and OpenCode running for 10 minutes"
+              help="Follow-up prompts start faster."
             >
               <Switch
                 checked={preferences?.keep_ai_servers_warm ?? true}
@@ -4208,7 +3710,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
             <InlineField
               label="Plan approval"
-              description="Backend, model, thinking, and effort overrides when approving a plan with the selected permissions"
+              description="Overrides when approving a plan"
+              help="Backend, model, thinking, and effort used when you approve a plan with the selected permissions."
             >
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
                 <div>
@@ -4457,7 +3960,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
             <InlineField
               label="Full-access plan approval"
-              description="Backend, model, thinking, and effort overrides when approving a plan with Full access"
+              description="Overrides when approving with Full access"
+              help="Backend, model, thinking, and effort used when you approve a plan with Full access."
             >
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
                 <div>
@@ -4704,101 +4208,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               </div>
             </InlineField>
 
-            <AiLanguageField preferences={preferences} />
-
-            {isNativeApp() && (
-              <InlineField
-                label="Editor"
-                description="App to open worktrees in"
-              >
-                <Select
-                  value={preferences?.editor ?? 'zed'}
-                  onValueChange={handleEditorChange}
-                >
-                  <SelectTrigger className="w-full sm:w-80">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {getEditorOptions().map(option => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </InlineField>
-            )}
-
-            {isNativeApp() && (
-              <InlineField
-                label="Terminal"
-                description="App to open terminals in"
-              >
-                <Select
-                  value={preferences?.terminal ?? 'terminal'}
-                  onValueChange={handleTerminalChange}
-                >
-                  <SelectTrigger className="w-full sm:w-80">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {getTerminalOptions().map(option => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </InlineField>
-            )}
-
-            {isNativeApp() && (
-              <InlineField
-                label="Open In"
-                description="Default app for Open button"
-              >
-                <Select
-                  value={preferences?.open_in ?? 'editor'}
-                  onValueChange={handleOpenInChange}
-                >
-                  <SelectTrigger className="w-full sm:w-80">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {openInDefaultOptions.map(option => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </InlineField>
-            )}
-
-            <InlineField
-              label="New Session"
-              description="Default action for CMD+T"
-            >
-              <Select
-                value={preferences?.default_new_session_kind ?? 'chat'}
-                onValueChange={handleNewSessionKindChange}
-              >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {newSessionKindOptions.map(option => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </InlineField>
-
             <InlineField
               label="Auto-update AI backends"
-              description="Install supported AI backend CLI updates, including Command Code, in the background as soon as a new version is detected."
+              description="Install CLI and Agent Browser updates in the background"
             >
               <Switch
                 checked={preferences?.auto_update_ai_backends ?? true}
@@ -4811,525 +4223,119 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 }}
               />
             </InlineField>
-          </div>
-        </SettingsSection>
-      )}
 
-      {isGeneralScope && (
-        <>
-          <SettingsSection
-            title="Notifications"
-            anchorId="pref-general-section-notifications"
-          >
-            <div className="space-y-4">
-              {isNativeApp() && (
-                <InlineField
-                  label="Desktop notifications"
-                  description="Show a native system banner when a session needs your input or finishes, but only while Jean is in the background."
-                >
-                  <Switch
-                    checked={preferences?.desktop_notifications_enabled ?? true}
-                    onCheckedChange={handleDesktopNotificationsEnabledChange}
-                  />
-                </InlineField>
-              )}
+            {isWindows && isNativeApp() && (
+              <WslSettingsFields
+                preferences={preferences}
+                patchPreferences={patchPreferences}
+              />
+            )}
 
-              {!isNativeApp() && <WebPushSettings />}
+            <InlineField
+              id="pref-general-debug-mode"
+              label="Debug mode"
+              description="Show the session debug panel"
+            >
+              <Switch
+                checked={preferences?.debug_mode_enabled ?? false}
+                onCheckedChange={checked => {
+                  patchPreferences.mutate({ debug_mode_enabled: checked })
+                }}
+              />
+            </InlineField>
 
+            {isNativeApp() && (
               <InlineField
-                label="Web access sounds"
-                description="Applies only when using Jean in browser or mobile web access. Turn off to keep phone music uninterrupted."
-              >
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="web-access-sounds-enabled"
-                    checked={webAccessSoundsEnabled}
-                    onCheckedChange={handleWebAccessSoundsEnabledChange}
-                  />
-                  <Label
-                    htmlFor="web-access-sounds-enabled"
-                    className="cursor-pointer text-sm"
-                  >
-                    Play Jean sounds in web access
-                  </Label>
-                </div>
-              </InlineField>
-
-              <InlineField
-                label="Waiting sound"
-                description="Play when session needs your input"
-              >
-                <div className="flex items-center gap-2">
-                  <Select
-                    value={preferences?.waiting_sound ?? 'none'}
-                    onValueChange={handleWaitingSoundChange}
-                  >
-                    <SelectTrigger className="w-full sm:w-80">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {notificationSoundOptions.map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    disabled={
-                      !preferences?.waiting_sound ||
-                      preferences.waiting_sound === 'none' ||
-                      !soundsEnabledInCurrentView
-                    }
-                    onClick={() =>
-                      playNotificationSound(
-                        preferences?.waiting_sound ?? 'none',
-                        { webAccessSoundsEnabled }
-                      )
-                    }
-                  >
-                    <Play className="h-4 w-4" />
-                  </Button>
-                </div>
-              </InlineField>
-
-              <InlineField
-                label="Review sound"
-                description="Play when session finishes"
-              >
-                <div className="flex items-center gap-2">
-                  <Select
-                    value={preferences?.review_sound ?? 'none'}
-                    onValueChange={handleReviewSoundChange}
-                  >
-                    <SelectTrigger className="w-full sm:w-80">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {notificationSoundOptions.map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    disabled={
-                      !preferences?.review_sound ||
-                      preferences.review_sound === 'none' ||
-                      !soundsEnabledInCurrentView
-                    }
-                    onClick={() =>
-                      playNotificationSound(
-                        preferences?.review_sound ?? 'none',
-                        {
-                          webAccessSoundsEnabled,
-                        }
-                      )
-                    }
-                  >
-                    <Play className="h-4 w-4" />
-                  </Button>
-                </div>
-              </InlineField>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection title="Chat" anchorId="pref-general-section-chat">
-            <div className="space-y-4">
-              <InlineField
-                label="Show full file paths"
-                description="Display full relative paths in file mention badges instead of just filenames (useful for monorepos)"
-              >
-                <Switch
-                  checked={preferences?.show_full_file_path ?? false}
-                  onCheckedChange={checked => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        show_full_file_path: checked,
-                      })
-                    }
-                  }}
-                />
-              </InlineField>
-              <InlineField
-                label="Spellcheck"
-                description="Enable spellcheck in the chat input"
-              >
-                <Switch
-                  checked={preferences?.spellcheck_enabled ?? true}
-                  onCheckedChange={checked => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        spellcheck_enabled: checked,
-                      })
-                    }
-                  }}
-                />
-              </InlineField>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Auto-generate"
-            anchorId="pref-general-section-auto-generate"
-          >
-            <div className="space-y-4">
-              <InlineField
-                label="Branch names"
-                description="Generate branch names from your first message"
-              >
-                <Switch
-                  checked={preferences?.auto_branch_naming ?? true}
-                  onCheckedChange={handleAutoBranchNamingChange}
-                />
-              </InlineField>
-              <InlineField
-                label="Session names"
-                description="Generate session names from your first message"
-              >
-                <Switch
-                  checked={preferences?.auto_session_naming ?? true}
-                  onCheckedChange={handleAutoSessionNamingChange}
-                />
-              </InlineField>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Worktrees"
-            anchorId="pref-general-section-worktrees"
-          >
-            <div className="space-y-4">
-              <InlineField
-                label="Auto-pull base branch"
-                description="Pull the latest changes before creating a new worktree"
-              >
-                <Switch
-                  checked={preferences?.auto_pull_base_branch ?? true}
-                  onCheckedChange={checked => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        auto_pull_base_branch: checked,
-                      })
-                    }
-                  }}
-                />
-              </InlineField>
-
-              <InlineField
-                label="Auto-save context"
-                description="Automatically save session context after each AI response"
-              >
-                <Switch
-                  checked={preferences?.auto_save_context ?? false}
-                  onCheckedChange={checked => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        auto_save_context: checked,
-                      })
-                    }
-                  }}
-                />
-              </InlineField>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Browser"
-            anchorId="pref-general-section-browser"
-          >
-            <div className="space-y-4">
-              <BrowserDefaultHostField preferences={preferences} />
-            </div>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Archive"
-            anchorId="pref-general-section-archive"
-          >
-            <div className="space-y-4">
-              <InlineField
-                label="Confirm before closing"
-                description="Show confirmation dialog when closing sessions or worktrees"
-              >
-                <Switch
-                  checked={preferences?.confirm_session_close ?? true}
-                  onCheckedChange={checked => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        confirm_session_close: checked,
-                      })
-                    }
-                  }}
-                />
-              </InlineField>
-
-              <InlineField
-                label="Skip close confirmation"
-                description="Hold this modifier while closing a session or worktree to skip the confirmation dialog."
-              >
-                <Select
-                  value={preferences?.close_confirm_bypass_modifier ?? 'none'}
-                  onValueChange={(value: CloseConfirmBypassModifier) => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        close_confirm_bypass_modifier: value,
-                      })
-                    }
-                  }}
-                  disabled={patchPreferences.isPending}
-                >
-                  <SelectTrigger className="w-full sm:w-48">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {CLOSE_CONFIRM_BYPASS_MODIFIERS.map(modifier => (
-                      <SelectItem key={modifier} value={modifier}>
-                        {BYPASS_MODIFIER_LABELS[modifier]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </InlineField>
-
-              <InlineField
-                label="Archive original session on clear context"
-                description="Archive the original planning session when a plan is approved with Clear context or in a new worktree. You can restore it from archived sessions."
-              >
-                <Switch
-                  checked={preferences?.close_original_on_clear_context ?? true}
-                  onCheckedChange={checked => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        close_original_on_clear_context: checked,
-                      })
-                    }
-                  }}
-                />
-              </InlineField>
-
-              <InlineField
-                label="Removal behavior"
-                description="What happens when closing sessions or worktrees"
-              >
-                <Select
-                  value={preferences?.removal_behavior ?? 'delete'}
-                  onValueChange={(value: RemovalBehavior) => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        removal_behavior: value,
-                      })
-                    }
-                  }}
-                >
-                  <SelectTrigger className="w-full sm:w-80">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {removalBehaviorOptions.map(option => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </InlineField>
-
-              <InlineField
-                label="Auto-archive on PR merge"
-                description="Archive worktrees when their PR is merged"
-              >
-                <Switch
-                  checked={preferences?.auto_archive_on_pr_merged ?? true}
-                  onCheckedChange={checked => {
-                    if (preferences) {
-                      patchPreferences.mutate({
-                        auto_archive_on_pr_merged: checked,
-                      })
-                    }
-                  }}
-                />
-              </InlineField>
-
-              <InlineField
-                label="Auto-delete archives"
-                description="Delete archived items older than this"
-              >
-                <Select
-                  value={String(preferences?.archive_retention_days ?? 30)}
-                  onValueChange={handleArchiveRetentionChange}
-                >
-                  <SelectTrigger className="w-full sm:w-80">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {archiveRetentionOptions.map(option => (
-                      <SelectItem
-                        key={option.value}
-                        value={String(option.value)}
-                      >
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </InlineField>
-
-              <InlineField
-                label="Delete all archives"
-                description="Permanently delete all archived worktrees and sessions"
+                id="pref-general-section-troubleshooting"
+                label="Application logs"
+                description="Open the log directory"
               >
                 <Button
-                  variant="destructive"
+                  variant="outline"
                   size="sm"
-                  onClick={() => setShowDeleteAllDialog(true)}
-                  disabled={isDeleting}
+                  className="w-fit"
+                  onClick={async () => {
+                    try {
+                      await invoke('open_log_directory')
+                    } catch (error) {
+                      toast.error(`Failed to open logs: ${error}`)
+                    }
+                  }}
                 >
-                  Delete All
+                  Show Logs
                 </Button>
               </InlineField>
-            </div>
+            )}
           </SettingsSection>
 
-          {isNativeApp() && (
+          {/* Agents are closed to new users. Users who already turned them on
+              keep the switch until they turn it off. */}
+          {preferences?.agents_enabled && (
             <SettingsSection
-              title="Troubleshooting"
-              anchorId="pref-general-section-troubleshooting"
+              title="Experimental"
+              anchorId="pref-general-section-experimental"
+              collapsible
+              defaultOpen={false}
             >
-              <div className="space-y-4">
-                <InlineField
-                  label="Application logs"
-                  description="Open the log directory for troubleshooting"
-                >
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      try {
-                        await invoke('open_log_directory')
-                      } catch (error) {
-                        toast.error(`Failed to open logs: ${error}`)
-                      }
-                    }}
-                  >
-                    Show Logs
-                  </Button>
-                </InlineField>
-              </div>
+              <InlineField
+                id="pref-general-agents"
+                label="Agents"
+                description="Show the Agents tab with Jean, the coordinator agent. Agents are no longer available to turn on: if you turn this off, you cannot turn it on again."
+              >
+                <Switch
+                  checked={preferences?.agents_enabled ?? false}
+                  onCheckedChange={checked => {
+                    patchPreferences.mutate({ agents_enabled: checked })
+                    // Leave the Agents page when the feature is turned off
+                    if (!checked)
+                      useUIStore.getState().setRailSection('workspace')
+                  }}
+                />
+              </InlineField>
             </SettingsSection>
           )}
 
-          <SettingsSection
-            title="Version"
-            anchorId="pref-general-section-version"
+          <div
+            id="pref-general-section-version"
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-muted-foreground"
           >
-            <div className="space-y-4">
-              <InlineField
-                label={activeRemoteConnection ? 'Jean Client' : 'Jean'}
-                description="Application version"
-              >
-                <span className="font-mono text-sm text-muted-foreground">
-                  v{CLIENT_BUILD_INFO.appVersion}
-                </span>
-              </InlineField>
-
-              {activeRemoteConnection && (
-                <InlineField
-                  label="Jean Server"
-                  description="Connected remote server version"
+            <span>
+              {activeRemoteConnection ? 'Jean Client' : 'Jean'} v
+              {CLIENT_BUILD_INFO.appVersion}
+            </span>
+            {activeRemoteConnection && (
+              <span>
+                · Jean Server{' '}
+                {isRemoteServerInfoLoading
+                  ? 'Loading…'
+                  : formatJeanVersionLabel(remoteServerVersion)}
+              </span>
+            )}
+            {CLIENT_BUILD_INFO.gitSha && (
+              <span>
+                ·{' '}
+                <button
+                  type="button"
+                  title="Source commit used for this build"
+                  onClick={() =>
+                    openExternal(
+                      `https://github.com/coollabsio/jean/commit/${CLIENT_BUILD_INFO.gitSha}`
+                    )
+                  }
+                  className="hover:text-foreground hover:underline"
                 >
-                  <span className="font-mono text-sm text-muted-foreground">
-                    {isRemoteServerInfoLoading
-                      ? 'Loading…'
-                      : formatJeanVersionLabel(remoteServerVersion)}
-                  </span>
-                </InlineField>
-              )}
-
-              {CLIENT_BUILD_INFO.gitSha && (
-                <InlineField
-                  label="Commit"
-                  description="Source commit used for this build"
-                >
-                  <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openExternal(
-                          `https://github.com/coollabsio/jean/commit/${CLIENT_BUILD_INFO.gitSha}`
-                        )
-                      }
-                      className="font-mono hover:text-foreground hover:underline"
-                    >
-                      {CLIENT_BUILD_INFO.gitSha}
-                    </button>
-                    {CLIENT_BUILD_INFO.builtAt && (
-                      <span>
-                        · {new Date(CLIENT_BUILD_INFO.builtAt).toLocaleString()}
-                      </span>
-                    )}
-                  </div>
-                </InlineField>
-              )}
-            </div>
-          </SettingsSection>
+                  {CLIENT_BUILD_INFO.gitSha}
+                </button>
+              </span>
+            )}
+            {CLIENT_BUILD_INFO.builtAt && (
+              <span>
+                · {new Date(CLIENT_BUILD_INFO.builtAt).toLocaleString()}
+              </span>
+            )}
+          </div>
         </>
       )}
-
-      {isGeneralScope && isWebAccessView && (
-        <SettingsSection
-          title="This browser"
-          description="You are signed in to this Jean server with an access token kept in this browser."
-          anchorId="pref-general-section-session"
-          variant="card"
-        >
-          <InlineField
-            label={webAccessServerLabel()}
-            description="Signing out forgets the token on this device only. The server keeps running and your other devices stay signed in."
-          >
-            <Button
-              variant="outline"
-              size="sm"
-              className="sm:ml-auto"
-              onClick={signOutOfWebAccess}
-            >
-              <LogOut className="size-3.5" />
-              Sign out
-            </Button>
-          </InlineField>
-        </SettingsSection>
-      )}
-
-      <AlertDialog
-        open={showDeleteAllDialog}
-        onOpenChange={setShowDeleteAllDialog}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete all archives?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently delete all archived worktrees and sessions,
-              including their git branches and worktree directories. This action
-              cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleDeleteAllArchives}
-              disabled={isDeleting}
-              variant="destructive"
-            >
-              {isDeleting ? 'Deleting...' : 'Delete All'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <AlertDialog
         open={deleteCliTarget !== null}
@@ -5358,8 +4364,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                             : deleteCliTarget === 'devin'
                               ? 'Devin CLI'
                               : deleteCliTarget === 'pi'
-                              ? 'PI CLI'
-                              : 'GitHub CLI'}
+                                ? 'PI CLI'
+                                : 'GitHub CLI'}
               ?
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -5410,7 +4416,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   )
 }
 
-export const WslSettingsSection: FC<{
+const WslSettingsFields: FC<{
   preferences: AppPreferences | undefined
   patchPreferences: ReturnType<typeof usePatchPreferences>
 }> = ({ preferences, patchPreferences }) => {
@@ -5461,100 +4467,98 @@ export const WslSettingsSection: FC<{
   }, [preferences?.wsl_enabled, preferences?.wsl_distro])
 
   return (
-    <SettingsSection title="WSL">
-      <div className="space-y-4">
-        <InlineField
-          label="Use WSL"
-          description="Route commands through Windows Subsystem for Linux"
-        >
-          <Switch
-            checked={showWslDistroSelect}
-            onCheckedChange={checked => {
-              if (checked) {
-                setIsChoosingWsl(true)
-                return
-              }
-              setIsChoosingWsl(false)
-              patchPreferences.mutate(
-                {
-                  wsl_enabled: false,
-                  wsl_mode_chosen: true,
-                },
-                { onSuccess: invalidateCliCaches }
-              )
-            }}
-          />
-        </InlineField>
+    <>
+      <InlineField
+        label="Use WSL"
+        description="Route commands through Windows Subsystem for Linux"
+      >
+        <Switch
+          checked={showWslDistroSelect}
+          onCheckedChange={checked => {
+            if (checked) {
+              setIsChoosingWsl(true)
+              return
+            }
+            setIsChoosingWsl(false)
+            patchPreferences.mutate(
+              {
+                wsl_enabled: false,
+                wsl_mode_chosen: true,
+              },
+              { onSuccess: invalidateCliCaches }
+            )
+          }}
+        />
+      </InlineField>
 
-        {showWslDistroSelect && (
-          <>
-            <InlineField
-              label="Distribution"
-              description={toolStatus || 'Select your WSL distribution'}
-            >
-              {loadingDistros ? (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading...
-                </div>
-              ) : (
-                <Select
-                  value={wslEnabled ? preferences?.wsl_distro || '' : ''}
-                  onValueChange={async value => {
-                    if (!value || !distros.includes(value)) {
+      {showWslDistroSelect && (
+        <>
+          <InlineField
+            label="Distribution"
+            description={toolStatus || 'Select your WSL distribution'}
+          >
+            {loadingDistros ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading...
+              </div>
+            ) : (
+              <Select
+                value={wslEnabled ? preferences?.wsl_distro || '' : ''}
+                onValueChange={async value => {
+                  if (!value || !distros.includes(value)) {
+                    return
+                  }
+                  setToolStatus('Checking for git...')
+                  try {
+                    const hasGit = await invoke<boolean>('check_wsl_tool', {
+                      distro: value,
+                      tool: 'git',
+                    })
+                    if (!hasGit) {
+                      setToolStatus(
+                        'git not found. Install it inside WSL: sudo apt install git'
+                      )
                       return
                     }
-                    setToolStatus('Checking for git...')
-                    try {
-                      const hasGit = await invoke<boolean>('check_wsl_tool', {
-                        distro: value,
-                        tool: 'git',
-                      })
-                      if (!hasGit) {
-                        setToolStatus(
-                          'git not found. Install it inside WSL: sudo apt install git'
-                        )
-                        return
-                      }
-                    } catch {
-                      setToolStatus('Failed to check WSL distro')
-                      return
-                    }
-                    patchPreferences.mutate(
-                      {
-                        wsl_enabled: true,
-                        wsl_distro: value,
-                        wsl_mode_chosen: true,
+                  } catch {
+                    setToolStatus('Failed to check WSL distro')
+                    return
+                  }
+                  patchPreferences.mutate(
+                    {
+                      wsl_enabled: true,
+                      wsl_distro: value,
+                      wsl_mode_chosen: true,
+                    },
+                    {
+                      onSuccess: () => {
+                        setIsChoosingWsl(false)
+                        invalidateCliCaches()
                       },
-                      {
-                        onSuccess: () => {
-                          setIsChoosingWsl(false)
-                          invalidateCliCaches()
-                        },
-                      }
-                    )
-                  }}
-                >
-                  <SelectTrigger className="w-full sm:w-48">
-                    <SelectValue placeholder="Select distro" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {distros.map(d => (
-                      <SelectItem key={d} value={d}>
-                        {d}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </InlineField>
+                    }
+                  )
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-48">
+                  <SelectValue placeholder="Select distro" />
+                </SelectTrigger>
+                <SelectContent>
+                  {distros.map(d => (
+                    <SelectItem key={d} value={d}>
+                      {d}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+          </InlineField>
 
-            <div className="text-xs text-muted-foreground">
-              CLI tools must be installed inside your WSL distribution.
-            </div>
-          </>
-        )}
-      </div>
-    </SettingsSection>
+          <div className="text-xs text-muted-foreground">
+            CLI tools must be installed inside your WSL distribution.
+          </div>
+        </>
+      )}
+    </>
   )
 }

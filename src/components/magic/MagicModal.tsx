@@ -1,33 +1,19 @@
 import { copyActiveSessionInfo } from '@/lib/session-info'
 import { useCallback, useState, useRef, useEffect, useMemo } from 'react'
-import { Wand2, Loader2 } from '@/components/icons/reicon'
+import { Loader2 } from '@/components/icons/reicon'
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import { Button, edgeNeutral } from '@/components/ui/button'
+import { RevertLastCommitDialog } from '@/components/shared/RevertLastCommitDialog'
+import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useChatStore } from '@/store/chat-store'
@@ -57,6 +43,7 @@ import { toast } from 'sonner'
 import {
   gitPush,
   triggerImmediateGitPoll,
+  triggerImmediateRemotePoll,
   fetchWorktreesStatus,
   performGitPull,
   performGitSync,
@@ -77,6 +64,7 @@ import {
   PREDEFINED_CLI_PROFILES,
   resolveMagicPromptBackend,
   resolveMagicPromptProvider,
+  getProviderAliasModelOptions,
 } from '@/types/preferences'
 import { useRemotePicker } from '@/hooks/useRemotePicker'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -113,13 +101,13 @@ import {
   getCatalogModelOptions,
   useModelCatalog,
 } from '@/services/model-catalog'
-import { BackendLabel } from '@/components/ui/backend-label'
 import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBackendModelPicker'
 import { ReviewMethodModal } from '@/components/chat/ReviewMethodModal'
+import { startJeanReviewSession } from '@/lib/jean-review'
 import {
-  resolveCodeReviewConfigs,
-  startCodeReviewsSequentially,
-} from '@/lib/code-review-configs'
+  ResolveConflictsDialog,
+  type ResolveConflictsOverride,
+} from '@/components/magic/ResolveConflictsDialog'
 import { resolveMcpConfigForSend } from '@/services/mcp'
 import {
   buildMagicColumns,
@@ -169,7 +157,10 @@ const DIRECT_MAGIC_GIT_OPTIONS = new Set<MagicOption>([
 
 type InvestigateType = 'issue' | 'pr' | 'advisory' | 'sentry-issue'
 type InvestigateSelectionMode = 'settings-default' | 'custom'
-type ResolveSelectionMode = 'settings-default' | 'custom'
+
+const RESOLVE_CONFLICTS_MODEL_KEY = 'resolve_conflicts_model'
+const RESOLVE_CONFLICTS_PROVIDER_KEY = 'resolve_conflicts_provider'
+const RESOLVE_CONFLICTS_BACKEND_KEY = 'resolve_conflicts_backend'
 
 const INVESTIGATE_MODEL_KEYS = {
   issue: 'investigate_issue_model',
@@ -192,10 +183,6 @@ const INVESTIGATE_BACKEND_KEYS = {
   'sentry-issue': 'investigate_sentry_issue_backend',
 } as const
 
-const RESOLVE_CONFLICTS_MODEL_KEY = 'resolve_conflicts_model'
-const RESOLVE_CONFLICTS_PROVIDER_KEY = 'resolve_conflicts_provider'
-const RESOLVE_CONFLICTS_BACKEND_KEY = 'resolve_conflicts_backend'
-
 function formatMagicModalOpencodeLabel(value: string): string {
   const formatted = formatOpencodeModelLabel(value)
   return value.startsWith('opencode/')
@@ -205,7 +192,6 @@ function formatMagicModalOpencodeLabel(value: string): string {
 
 /** Keyboard shortcut to option ID mapping */
 const KEY_TO_OPTION: Record<string, MagicOption> = {
-  s: 'save-context',
   j: 'inject-session',
   k: 'linked-projects',
   w: 'fork-session',
@@ -253,7 +239,7 @@ export function MagicModal() {
   const investigateContentRef = useRef<HTMLDivElement>(null)
   const hasInitializedRef = useRef(false)
   const [selectedOption, setSelectedOption] =
-    useState<MagicMenuOption>('save-context')
+    useState<MagicMenuOption>('inject-session')
   const [investigateDialogOpen, setInvestigateDialogOpen] = useState(false)
   const [investigateType, setInvestigateType] =
     useState<InvestigateType | null>(null)
@@ -274,11 +260,6 @@ export function MagicModal() {
   const [isDetectingLinkPr, setIsDetectingLinkPr] = useState(false)
   const [isLinkingPr, setIsLinkingPr] = useState(false)
   const [isUnlinkingPr, setIsUnlinkingPr] = useState(false)
-  const [resolveSelectionMode, setResolveSelectionMode] =
-    useState<ResolveSelectionMode>('settings-default')
-  const [customResolveBackend, setCustomResolveBackend] =
-    useState<CliBackend>('claude')
-  const [customResolveModel, setCustomResolveModel] = useState<string>('sonnet')
   const [revertConfirmOpen, setRevertConfirmOpen] = useState(false)
 
   // PR checkouts may have pr_number before pr_url is filled; treat either as open.
@@ -321,12 +302,22 @@ export function MagicModal() {
   const hasSentryContexts = (sentryContexts?.length ?? 0) > 0
   const hasPrContexts = (prContexts?.length ?? 0) > 0
   const hasAdvisoryContexts = (advisoryContexts?.length ?? 0) > 0
+  // Loaded items that "Investigate separately" splits into one session each
+  const separateInvestigateCount =
+    investigateType === 'issue'
+      ? (issueContexts?.length ?? 0)
+      : investigateType === 'pr'
+        ? (prContexts?.length ?? 0)
+        : 0
 
   const sessionModalOpen = useUIStore(state => state.sessionChatModalOpen)
   // Whether MagicModal was opened from ProjectCanvasView (no active chat session)
   const isOnCanvas =
     !useChatStore(state => state.activeWorktreePath) && !sessionModalOpen
-  const pickRemoteOrRun = useRemotePicker(worktree?.path)
+  const pickRemoteOrRun = useRemotePicker(
+    worktree?.path,
+    worktree ? { worktreeId: worktree.id } : null
+  )
   const targetServerId = selectedWorktreeId
     ? parseServerResourceKey(selectedWorktreeId)?.serverId
     : undefined
@@ -376,7 +367,7 @@ export function MagicModal() {
   const handleOpenChange = useCallback(
     (open: boolean) => {
       if (open && !hasInitializedRef.current) {
-        setSelectedOption(isOnCanvas ? 'commit' : 'save-context')
+        setSelectedOption(isOnCanvas ? 'commit' : 'inject-session')
         hasInitializedRef.current = true
       }
       setMagicModalOpen(open)
@@ -480,58 +471,14 @@ export function MagicModal() {
     return { backend, model, provider }
   }, [investigateType, preferences, project?.default_backend])
 
-  const resolveDefaults = useMemo(() => {
-    const defaultBackend =
-      project?.default_backend ?? preferences?.default_backend ?? 'claude'
-    const backend =
-      resolveMagicPromptBackend(
-        preferences?.magic_prompt_backends,
-        RESOLVE_CONFLICTS_BACKEND_KEY,
-        defaultBackend
-      ) ?? 'claude'
-    const model =
-      preferences?.magic_prompt_models?.[RESOLVE_CONFLICTS_MODEL_KEY] ??
-      resolveDefaultModelForBackend(backend, preferences)
-    const provider = resolveMagicPromptProvider(
-      preferences?.magic_prompt_providers,
-      RESOLVE_CONFLICTS_PROVIDER_KEY,
-      preferences?.default_provider
-    )
-    return { backend, model, provider }
-  }, [preferences, project?.default_backend])
-
   const getClaudeModelOptionsForProvider = useCallback(
     (provider: string | null) => {
       const profile = [
         ...PREDEFINED_CLI_PROFILES,
         ...(preferences?.custom_cli_profiles ?? []),
       ].find(item => item.name === provider)
-      let opusModel: string | undefined
-      let sonnetModel: string | undefined
-      let haikuModel: string | undefined
-      if (profile?.settings_json) {
-        try {
-          const settings = JSON.parse(profile.settings_json)
-          const env = settings?.env
-          if (env) {
-            opusModel = env.ANTHROPIC_DEFAULT_OPUS_MODEL || env.ANTHROPIC_MODEL
-            sonnetModel =
-              env.ANTHROPIC_DEFAULT_SONNET_MODEL || env.ANTHROPIC_MODEL
-            haikuModel =
-              env.ANTHROPIC_DEFAULT_HAIKU_MODEL || env.ANTHROPIC_MODEL
-          }
-        } catch {
-          // ignore invalid custom profile json
-        }
-      }
-
-      const suffix = (model?: string) => (model ? ` (${model})` : '')
       return provider
-        ? [
-            { value: 'opus', label: `Opus${suffix(opusModel)}` },
-            { value: 'sonnet', label: `Sonnet${suffix(sonnetModel)}` },
-            { value: 'haiku', label: `Haiku${suffix(haikuModel)}` },
-          ]
+        ? getProviderAliasModelOptions(profile?.settings_json)
         : claudeModelOptions
     },
     [claudeModelOptions, preferences?.custom_cli_profiles]
@@ -542,18 +489,10 @@ export function MagicModal() {
     investigateDefaults.provider !== '__anthropic__'
       ? investigateDefaults.provider
       : null
-  const resolveClaudeProvider =
-    resolveDefaults.provider && resolveDefaults.provider !== '__anthropic__'
-      ? resolveDefaults.provider
-      : null
 
   const investigateClaudeModelOptions = useMemo(
     () => getClaudeModelOptionsForProvider(investigateClaudeProvider),
     [getClaudeModelOptionsForProvider, investigateClaudeProvider]
-  )
-  const resolveClaudeModelOptions = useMemo(
-    () => getClaudeModelOptionsForProvider(resolveClaudeProvider),
-    [getClaudeModelOptionsForProvider, resolveClaudeProvider]
   )
 
   const getInvestigateModelOptions = useCallback(
@@ -624,107 +563,41 @@ export function MagicModal() {
     customInvestigateBackend
   )} · ${formatModelLabel(customInvestigateBackend, customInvestigateModel)}`
 
-  const getResolveModelOptions = useCallback(
-    (backend: CliBackend) => {
-      switch (backend) {
-        case 'codex':
-          return CODEX_MODEL_OPTIONS
-        case 'opencode':
-          return opencodeModelOptions
-        case 'grok':
-          return grokModelOptions
-        case 'kimi':
-          return kimiModelOptions
-        case 'antigravity':
-          return antigravityModelOptions
-        case 'muse':
-          return museModelOptions
-        default:
-          return resolveClaudeModelOptions
-      }
-    },
-    [
-      antigravityModelOptions,
-      grokModelOptions,
-      kimiModelOptions,
-      museModelOptions,
-      opencodeModelOptions,
-      resolveClaudeModelOptions,
-    ]
-  )
-
-  const customResolveModelOptions = useMemo(
-    () => getResolveModelOptions(customResolveBackend),
-    [customResolveBackend, getResolveModelOptions]
-  )
-
-  const effectiveCustomResolveModel = useMemo(() => {
-    return (
-      customResolveModelOptions.find(
-        option => option.value === customResolveModel
-      )?.value ??
-      customResolveModelOptions[0]?.value ??
-      ''
-    )
-  }, [customResolveModel, customResolveModelOptions])
-
-  const resolveSettingsDefaultSummary = `${formatBackendLabel(
-    resolveDefaults.backend
-  )} · ${(() => {
-    const options = getResolveModelOptions(resolveDefaults.backend)
-    return (
-      options.find(option => option.value === resolveDefaults.model)?.label ??
-      resolveDefaults.model
-    )
-  })()}`
-  const resolveCustomSelectionSummary = `${formatBackendLabel(
-    customResolveBackend
-  )} · ${(() => {
-    const options = getResolveModelOptions(customResolveBackend)
-    return (
-      options.find(option => option.value === effectiveCustomResolveModel)
-        ?.label ?? effectiveCustomResolveModel
-    )
-  })()}`
-
-  const handleCustomResolveBackendChange = useCallback(
-    (backend: string) => {
-      const nextBackend = backend as CliBackend
-      setCustomResolveBackend(nextBackend)
-      const nextOptions = getResolveModelOptions(nextBackend)
-      setCustomResolveModel(nextOptions[0]?.value ?? '')
-    },
-    [getResolveModelOptions]
-  )
-
-  const dispatchInvestigateCommand = useCallback(() => {
-    if (!investigateType) return
-    const detail =
-      investigateSelectionMode === 'custom'
-        ? {
-            command: 'investigate',
-            type: investigateType,
-            override: {
-              backend: customInvestigateBackend,
-              model: customInvestigateModel,
-            },
-          }
-        : { command: 'investigate', type: investigateType }
-    window.dispatchEvent(new CustomEvent('magic-command', { detail }))
-    setInvestigateDialogOpen(false)
-  }, [
-    investigateType,
-    investigateSelectionMode,
-    customInvestigateBackend,
-    customInvestigateModel,
-  ])
-
-  useEffect(() => {
-    if (!investigateDialogOpen) {
+  const handleInvestigateDialogOpenChange = useCallback((open: boolean) => {
+    setInvestigateDialogOpen(open)
+    if (!open) {
       setInvestigateSelectionMode('settings-default')
       setInvestigateType(null)
     }
-  }, [investigateDialogOpen])
+  }, [])
+
+  const dispatchInvestigateCommand = useCallback(
+    (separate = false) => {
+      if (!investigateType) return
+      const detail = {
+        command: 'investigate',
+        type: investigateType,
+        separate,
+        ...(investigateSelectionMode === 'custom'
+          ? {
+              override: {
+                backend: customInvestigateBackend,
+                model: customInvestigateModel,
+              },
+            }
+          : {}),
+      }
+      window.dispatchEvent(new CustomEvent('magic-command', { detail }))
+      handleInvestigateDialogOpenChange(false)
+    },
+    [
+      investigateType,
+      investigateSelectionMode,
+      customInvestigateBackend,
+      customInvestigateModel,
+      handleInvestigateDialogOpenChange,
+    ]
+  )
 
   useEffect(() => {
     if (!investigateDefaults || investigateSelectionMode === 'custom') return
@@ -754,28 +627,6 @@ export function MagicModal() {
     sessionModel,
     preferences,
   ])
-
-  useEffect(() => {
-    if (!resolveDialogOpen) {
-      setResolveSelectionMode('settings-default')
-    }
-  }, [resolveDialogOpen])
-
-  useEffect(() => {
-    const nextBackend = installedBackends.includes(resolveDefaults.backend)
-      ? resolveDefaults.backend
-      : (installedBackends[0] ?? 'claude')
-    const nextOptions = getResolveModelOptions(nextBackend)
-    const nextModel =
-      nextOptions.find(option => option.value === resolveDefaults.model)
-        ?.value ??
-      nextOptions[0]?.value ??
-      resolveDefaults.model
-    setCustomResolveBackend(nextBackend)
-    setCustomResolveModel(nextModel)
-  }, [getResolveModelOptions, installedBackends, resolveDefaults])
-
-  // Invalid customResolveModel is handled by effectiveCustomResolveModel
 
   // Direct git execution for when ChatWindow isn't rendered (project canvas)
   const executeGitDirectly = useCallback(
@@ -882,7 +733,7 @@ export function MagicModal() {
           try {
             const result = await invoke<RevertCommitResponse>(
               'revert_last_local_commit',
-              { worktreePath: worktree.path }
+              { worktreeId: worktree.id, worktreePath: worktree.path }
             )
             triggerImmediateGitPoll()
             if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
@@ -944,6 +795,7 @@ export function MagicModal() {
                 worktree.id
               )
               triggerImmediateGitPoll()
+              triggerImmediateRemotePoll()
               if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
               if (result.permissionDenied) {
                 opToast.error(
@@ -1012,6 +864,7 @@ export function MagicModal() {
             const result = await invoke<CreatePrResponse>(
               'create_pr_with_ai_content',
               {
+                worktreeId: worktree.id,
                 worktreePath: worktree.path,
                 customPrompt: preferences?.magic_prompts?.pr_content,
                 model: preferences?.magic_prompt_models?.pr_content_model,
@@ -1070,37 +923,28 @@ export function MagicModal() {
           const mergePrToastId = toast.loading('Merging PR...')
           try {
             const result = await invoke<MergePrResponse>('merge_github_pr', {
+              worktreeId: worktree.id,
               worktreePath: worktree.path,
             })
             toast.success(result.message, { id: mergePrToastId })
 
-            // Archive or delete the worktree (same as auto-archive on merge)
-            const shouldDelete = preferences?.removal_behavior === 'delete'
-            const action = shouldDelete ? 'Deleting' : 'Archiving'
-            const cleanupToastId = toast.loading(`${action} worktree...`)
+            const cleanupToastId = toast.loading('Deleting worktree...')
             try {
-              await invoke(
-                shouldDelete ? 'delete_worktree' : 'archive_worktree',
-                {
-                  worktreeId: selectedWorktreeId,
-                }
-              )
+              await invoke('delete_worktree', {
+                worktreeId: selectedWorktreeId,
+              })
               queryClient.invalidateQueries({
                 queryKey: projectsQueryKeys.worktrees(worktree.project_id),
               })
               triggerImmediateGitPoll()
               if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
-              const pastAction = shouldDelete ? 'Deleted' : 'Archived'
-              toast.success(`${pastAction} "${worktree.name}"`, {
+              toast.success(`Deleted "${worktree.name}"`, {
                 id: cleanupToastId,
               })
             } catch (cleanupError) {
-              toast.error(
-                `Failed to ${action.toLowerCase()} worktree: ${cleanupError}`,
-                {
-                  id: cleanupToastId,
-                }
-              )
+              toast.error(`Failed to delete worktree: ${cleanupError}`, {
+                id: cleanupToastId,
+              })
             }
           } catch (error) {
             toast.error(`Failed to merge PR: ${error}`, { id: mergePrToastId })
@@ -1127,6 +971,13 @@ export function MagicModal() {
               if (!prResult.has_conflicts) {
                 toast.success('No conflicts — base branch merged cleanly', {
                   id: toastId,
+                  description:
+                    'Push the merge commit to clear the conflict on the PR.',
+                  duration: 10000,
+                  action: {
+                    label: toastActionLabel('Push'),
+                    onClick: () => executeGitDirectly('push'),
+                  },
                 })
                 triggerImmediateGitPoll()
                 return
@@ -1256,6 +1107,7 @@ ${resolveInstructions}`
                 mcpConfig: prConflictMcpConfig,
                 enabledServers: prConflictEnabledMcp,
               } = await resolveMcpConfigForSend({
+                worktreeId: worktree.id,
                 worktreePath: worktree.path,
                 backend: resolvedBackend as CliBackend,
                 projectEnabled: project?.enabled_mcp_servers,
@@ -1450,6 +1302,7 @@ ${resolveInstructions}`
               mcpConfig: conflictMcpConfig,
               enabledServers: conflictEnabledMcp,
             } = await resolveMcpConfigForSend({
+              worktreeId: worktree.id,
               worktreePath: worktree.path,
               backend: resolvedBackend as CliBackend,
               projectEnabled: project?.enabled_mcp_servers,
@@ -1501,6 +1354,25 @@ ${resolveInstructions}`
           const projectName = project?.name ?? 'project'
           const worktreeName = worktree.name ?? worktree.branch ?? ''
           const reviewTarget = `${projectName}/${worktreeName}`
+          if (reviewSource === 'ai') {
+            const baseBranch =
+              worktree.base_branch || project?.default_branch || 'main'
+            const baseRemote = worktree.base_remote || 'origin'
+            try {
+              await startJeanReviewSession({
+                worktreeId: selectedWorktreeId,
+                worktreePath: worktree.path,
+                baseRef: `${baseRemote}/${baseBranch}`,
+                preferences,
+                queryClient,
+              })
+            } catch (error) {
+              toast.error(`Failed to start review: ${error}`)
+            } finally {
+              clearWorktreeLoading(selectedWorktreeId)
+            }
+            break
+          }
           if (reviewSource === 'coderabbit-pr') {
             const toastId = toast.loading(
               `Triggering CodeRabbit review for ${reviewTarget}...`
@@ -1555,22 +1427,6 @@ ${resolveInstructions}`
             break
           }
 
-          const reviewConfigs =
-            reviewSource === 'ai'
-              ? resolveCodeReviewConfigs({
-                  configured: preferences?.magic_code_review_configs,
-                  fallbackBackend:
-                    resolveMagicPromptBackend(
-                      preferences?.magic_prompt_backends,
-                      'code_review_backend',
-                      preferences?.default_backend
-                    ) ?? 'claude',
-                  fallbackModel:
-                    preferences?.magic_prompt_models?.code_review_model ??
-                    'sonnet',
-                })
-              : [undefined]
-
           // Fire-and-forget: detect and link PR if not already linked
           if (!worktree.pr_number) {
             invoke<DetectPrResponse | null>('detect_and_link_pr', {
@@ -1596,190 +1452,161 @@ ${resolveInstructions}`
               })
           }
 
-          let reviewSessionId: string | undefined
-          await startCodeReviewsSequentially(
-            reviewConfigs,
-            async reviewConfig => {
-              const reviewRunId = generateId()
-              const reviewLabel =
-                reviewSource === 'coderabbit-cli'
-                  ? 'CodeRabbit CLI review'
-                  : reviewConfig
-                    ? `Review (${reviewConfig.backend} / ${reviewConfig.model})`
-                    : 'Review'
-              const toastId = toast.loading(
-                `Starting ${reviewLabel} for ${reviewTarget}...`
+          {
+            const reviewRunId = generateId()
+            const reviewLabel = 'CodeRabbit CLI review'
+            const toastId = toast.loading(
+              `Starting ${reviewLabel} for ${reviewTarget}...`
+            )
+
+            try {
+              const { job } = await invoke<StartReviewJobResponse>(
+                'start_review_job',
+                {
+                  worktreeId: selectedWorktreeId,
+                  worktreePath: worktree.path,
+                  source: reviewSource,
+                  reviewRunId,
+                  reviewType: 'all',
+                }
               )
 
-              try {
-                const { job } = await invoke<StartReviewJobResponse>(
-                  'start_review_job',
-                  {
-                    worktreeId: selectedWorktreeId,
-                    worktreePath: worktree.path,
-                    source: reviewSource,
-                    backend:
-                      reviewConfig?.backend ??
-                      resolveMagicPromptBackend(
-                        preferences?.magic_prompt_backends,
-                        'code_review_backend',
-                        preferences?.default_backend
-                      ),
-                    customPrompt: preferences?.magic_prompts?.code_review,
-                    model:
-                      reviewConfig?.model ??
-                      preferences?.magic_prompt_models?.code_review_model,
-                    customProfileName: resolveMagicPromptProvider(
-                      preferences?.magic_prompt_providers,
-                      'code_review_provider',
-                      preferences?.default_provider
-                    ),
-                    reasoningEffort:
-                      reviewConfig?.reasoning_effort ??
-                      preferences?.magic_prompt_efforts?.code_review_effort ??
-                      null,
-                    reviewRunId,
-                    reviewType:
-                      reviewSource === 'coderabbit-cli' ? 'all' : null,
-                    sessionId: reviewSessionId,
-                  }
-                )
-
-                reviewSessionId ??= job.sessionId
-
-                if (job.sessionId) {
-                  const { setActiveSession, clearActiveWorktree } =
-                    useChatStore.getState()
-                  setActiveSession(selectedWorktreeId, job.sessionId)
-                  useProjectsStore.getState().selectWorktree(selectedWorktreeId)
-                  clearActiveWorktree()
-                  useUIStore
-                    .getState()
-                    .markWorktreeForAutoOpenSession(
-                      selectedWorktreeId,
-                      job.sessionId
-                    )
-                  queryClient.invalidateQueries({
-                    queryKey: chatQueryKeys.sessions(selectedWorktreeId),
-                  })
-                }
-
-                // Sonner ignores `duration` for loading toasts — dismiss explicitly.
-                toast.loading(`${reviewLabel} running for ${reviewTarget}...`, {
-                  id: toastId,
-                  cancel: {
-                    label: 'Cancel',
-                    onClick: () => {
-                      invoke<boolean>('cancel_review_job', {
-                        jobId: job.id,
-                      }).catch(error => {
-                        toast.error(`Failed to cancel review: ${error}`, {
-                          id: toastId,
-                        })
-                      })
-                    },
-                  },
+              if (job.sessionId) {
+                const { setActiveSession, clearActiveWorktree } =
+                  useChatStore.getState()
+                setActiveSession(selectedWorktreeId, job.sessionId)
+                useProjectsStore.getState().selectWorktree(selectedWorktreeId)
+                clearActiveWorktree()
+                useUIStore
+                  .getState()
+                  .markWorktreeForAutoOpenSession(
+                    selectedWorktreeId,
+                    job.sessionId
+                  )
+                queryClient.invalidateQueries({
+                  queryKey: chatQueryKeys.sessions(selectedWorktreeId),
                 })
-                const autoDismissTimer = window.setTimeout(() => {
-                  toast.dismiss(toastId)
-                }, 5000)
+              }
 
-                let unlistenReviewJob: (() => void) | null = null
-                let handledTerminalReviewJob = false
-                const handleTerminalReviewJob = (reviewJob: ReviewJob) => {
-                  if (reviewJob.id !== job.id) return
-                  if (reviewJob.status === 'running') return
-                  if (handledTerminalReviewJob) return
-
-                  handledTerminalReviewJob = true
-                  window.clearTimeout(autoDismissTimer)
-                  unlistenReviewJob?.()
-                  if (reviewJob.status === 'completed') {
-                    const completedSessionId = reviewJob.sessionId
-                    void refreshWorktreeSessionsCaches(
-                      queryClient,
-                      selectedWorktreeId,
-                      worktree.path
-                    ).finally(() => {
-                      queryClient.invalidateQueries({
-                        queryKey: chatQueryKeys.sessions(selectedWorktreeId),
-                      })
-                      queryClient.invalidateQueries({
-                        queryKey: ['all-sessions'],
-                      })
-                      queryClient.invalidateQueries({
-                        queryKey: chatQueryKeys.unreadSessionCount(),
+              // Sonner ignores `duration` for loading toasts — dismiss explicitly.
+              toast.loading(`${reviewLabel} running for ${reviewTarget}...`, {
+                id: toastId,
+                cancel: {
+                  label: 'Cancel',
+                  onClick: () => {
+                    invoke<boolean>('cancel_review_job', {
+                      jobId: job.id,
+                      worktreeId: selectedWorktreeId,
+                      worktreePath: worktree.path,
+                    }).catch(error => {
+                      toast.error(`Failed to cancel review: ${error}`, {
+                        id: toastId,
                       })
                     })
-                    toast.dismiss(toastId)
-                    toast.success(
-                      `${reviewLabel} done on ${reviewTarget} (${reviewJob.findingCount ?? 0} findings)`,
-                      {
-                        action: completedSessionId
-                          ? {
-                              label: toastActionLabel('Open'),
-                              onClick: () => {
-                                const {
-                                  setActiveSession,
-                                  clearActiveWorktree,
-                                } = useChatStore.getState()
-                                useProjectsStore
-                                  .getState()
-                                  .selectWorktree(selectedWorktreeId)
-                                clearActiveWorktree()
-                                setActiveSession(
-                                  selectedWorktreeId,
-                                  completedSessionId
-                                )
-                                setTimeout(() => {
-                                  window.dispatchEvent(
-                                    new CustomEvent('open-session-modal', {
-                                      detail: {
-                                        sessionId: completedSessionId,
-                                        worktreeId: selectedWorktreeId,
-                                        worktreePath: worktree.path,
-                                      },
-                                    })
-                                  )
-                                }, 50)
-                              },
-                            }
-                          : undefined,
-                      }
-                    )
-                  } else if (reviewJob.status === 'cancelled') {
-                    toast.dismiss(toastId)
-                    toast.info(`Review cancelled for ${reviewTarget}`)
-                  } else {
-                    toast.dismiss(toastId)
-                    toast.error(
-                      `Review failed: ${reviewJob.error ?? 'Unknown error'}`
-                    )
-                  }
-                }
+                  },
+                },
+              })
+              const autoDismissTimer = window.setTimeout(() => {
+                toast.dismiss(toastId)
+              }, 5000)
 
-                unlistenReviewJob = await listen<ReviewJob>(
-                  'review-job:updated',
-                  event => handleTerminalReviewJob(event.payload)
-                )
-                if (handledTerminalReviewJob) {
-                  unlistenReviewJob()
+              let unlistenReviewJob: (() => void) | null = null
+              let handledTerminalReviewJob = false
+              const handleTerminalReviewJob = (reviewJob: ReviewJob) => {
+                if (reviewJob.id !== job.id) return
+                if (reviewJob.status === 'running') return
+                if (handledTerminalReviewJob) return
+
+                handledTerminalReviewJob = true
+                window.clearTimeout(autoDismissTimer)
+                unlistenReviewJob?.()
+                if (reviewJob.status === 'completed') {
+                  const completedSessionId = reviewJob.sessionId
+                  void refreshWorktreeSessionsCaches(
+                    queryClient,
+                    selectedWorktreeId,
+                    worktree.path
+                  ).finally(() => {
+                    queryClient.invalidateQueries({
+                      queryKey: chatQueryKeys.sessions(selectedWorktreeId),
+                    })
+                    queryClient.invalidateQueries({
+                      queryKey: ['all-sessions'],
+                    })
+                    queryClient.invalidateQueries({
+                      queryKey: chatQueryKeys.unreadSessionCount(),
+                    })
+                  })
+                  toast.dismiss(toastId)
+                  toast.success(
+                    `${reviewLabel} done on ${reviewTarget} (${reviewJob.findingCount ?? 0} findings)`,
+                    {
+                      action: completedSessionId
+                        ? {
+                            label: toastActionLabel('Open'),
+                            onClick: () => {
+                              const { setActiveSession, clearActiveWorktree } =
+                                useChatStore.getState()
+                              useProjectsStore
+                                .getState()
+                                .selectWorktree(selectedWorktreeId)
+                              clearActiveWorktree()
+                              setActiveSession(
+                                selectedWorktreeId,
+                                completedSessionId
+                              )
+                              setTimeout(() => {
+                                window.dispatchEvent(
+                                  new CustomEvent('open-session-modal', {
+                                    detail: {
+                                      sessionId: completedSessionId,
+                                      worktreeId: selectedWorktreeId,
+                                      worktreePath: worktree.path,
+                                    },
+                                  })
+                                )
+                              }, 50)
+                            },
+                          }
+                        : undefined,
+                    }
+                  )
+                } else if (reviewJob.status === 'cancelled') {
+                  toast.dismiss(toastId)
+                  toast.info(`Review cancelled for ${reviewTarget}`)
                 } else {
-                  const currentJob = await invoke<ReviewJob | null>(
-                    'get_review_job',
-                    { jobId: job.id }
-                  ).catch(() => null)
-                  if (currentJob) handleTerminalReviewJob(currentJob)
+                  toast.dismiss(toastId)
+                  toast.error(
+                    `Review failed: ${reviewJob.error ?? 'Unknown error'}`
+                  )
                 }
-              } catch (error) {
-                toast.error(`Failed to start review: ${error}`, {
-                  id: toastId,
-                })
-              } finally {
-                clearWorktreeLoading(selectedWorktreeId)
               }
+
+              unlistenReviewJob = await listen<ReviewJob>(
+                'review-job:updated',
+                event => handleTerminalReviewJob(event.payload)
+              )
+              if (handledTerminalReviewJob) {
+                unlistenReviewJob()
+              } else {
+                const currentJob = await invoke<ReviewJob | null>(
+                  'get_review_job',
+                  {
+                    jobId: job.id,
+                    worktreeId: selectedWorktreeId,
+                    worktreePath: worktree.path,
+                  }
+                ).catch(() => null)
+                if (currentJob) handleTerminalReviewJob(currentJob)
+              }
+            } catch (error) {
+              toast.error(`Failed to start review: ${error}`, {
+                id: toastId,
+              })
+            } finally {
+              clearWorktreeLoading(selectedWorktreeId)
             }
-          )
+          }
           break
         }
       }
@@ -1794,37 +1621,25 @@ ${resolveInstructions}`
     ]
   )
 
-  const dispatchResolveConflictsCommand = useCallback(() => {
-    const override =
-      resolveSelectionMode === 'custom'
-        ? {
-            backend: customResolveBackend,
-            model: effectiveCustomResolveModel,
-          }
-        : undefined
+  const dispatchResolveConflictsCommand = useCallback(
+    (override?: ResolveConflictsOverride) => {
+      if (
+        CANVAS_ALLOWED_OPTIONS.has('resolve-conflicts') &&
+        !CANVAS_NAVIGATE_AND_DISPATCH_OPTIONS.has('resolve-conflicts') &&
+        !useChatStore.getState().activeWorktreePath
+      ) {
+        executeGitDirectly('resolve-conflicts', override)
+        return
+      }
 
-    if (
-      CANVAS_ALLOWED_OPTIONS.has('resolve-conflicts') &&
-      !CANVAS_NAVIGATE_AND_DISPATCH_OPTIONS.has('resolve-conflicts') &&
-      !useChatStore.getState().activeWorktreePath
-    ) {
-      setResolveDialogOpen(false)
-      executeGitDirectly('resolve-conflicts', override)
-      return
-    }
-
-    window.dispatchEvent(
-      new CustomEvent('magic-command', {
-        detail: { command: 'resolve-conflicts', override },
-      })
-    )
-    setResolveDialogOpen(false)
-  }, [
-    resolveSelectionMode,
-    customResolveBackend,
-    effectiveCustomResolveModel,
-    executeGitDirectly,
-  ])
+      window.dispatchEvent(
+        new CustomEvent('magic-command', {
+          detail: { command: 'resolve-conflicts', override },
+        })
+      )
+    },
+    [executeGitDirectly]
+  )
 
   const detectLinkPrForCurrentBranch = useCallback(async () => {
     if (!selectedWorktreeId || !worktree?.path) return
@@ -2175,7 +1990,6 @@ ${resolveInstructions}`
       hasSentryContexts,
       hasPrContexts,
       hasAdvisoryContexts,
-      activeSessionId,
       worktree?.path,
       worktree?.pr_number,
       detectLinkPrForCurrentBranch,
@@ -2227,20 +2041,13 @@ ${resolveInstructions}`
     (e: React.KeyboardEvent) => {
       if (e.key === 'Enter') {
         e.preventDefault()
-        dispatchInvestigateCommand()
+        // Mod+Enter: one session per loaded issue/PR
+        dispatchInvestigateCommand(
+          (e.metaKey || e.ctrlKey) && separateInvestigateCount > 1
+        )
       }
     },
-    [dispatchInvestigateCommand]
-  )
-
-  const handleResolveKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter') {
-        e.preventDefault()
-        dispatchResolveConflictsCommand()
-      }
-    },
-    [dispatchResolveConflictsCommand]
+    [dispatchInvestigateCommand, separateInvestigateCount]
   )
 
   const renderOption = (option: MagicOptionItem, mobile = false) => {
@@ -2277,17 +2084,7 @@ ${resolveInstructions}`
           <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className="leading-tight">{option.label}</span>
         </span>
-        {!mobile && (
-          <kbd
-            data-web-visible
-            className={cn(
-              'rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground shadow-[0_2px_0_var(--btn-edge)] transition-[translate,box-shadow] duration-[80ms] group-active:translate-y-0.5 group-active:shadow-none',
-              edgeNeutral
-            )}
-          >
-            {option.key}
-          </kbd>
-        )}
+        {!mobile && <Kbd data-web-visible>{option.key}</Kbd>}
       </button>
     )
   }
@@ -2306,32 +2103,17 @@ ${resolveInstructions}`
         }
         codeRabbitPrAvailable={Boolean(worktree?.pr_number)}
       />
-      <AlertDialog open={revertConfirmOpen} onOpenChange={setRevertConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Revert last commit?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will undo the latest local commit on{' '}
-              <span className="font-medium text-foreground">
-                {worktree?.branch ?? worktree?.name ?? 'this worktree'}
-              </span>
-              . Your working tree changes from that commit will be restored, but
-              this action can be disruptive.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmRevertLastCommit}>
-              Revert last commit
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <RevertLastCommitDialog
+        open={revertConfirmOpen}
+        onOpenChange={setRevertConfirmOpen}
+        onConfirm={confirmRevertLastCommit}
+        branchName={worktree?.branch ?? worktree?.name}
+      />
       <Dialog open={magicModalOpen} onOpenChange={handleOpenChange}>
         <DialogContent
           ref={contentRef}
           tabIndex={-1}
-          className="max-h-[calc(100dvh-5.5rem-env(safe-area-inset-bottom))] overflow-hidden p-0 outline-none max-md:top-auto max-md:bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-md:w-[calc(100%-1rem)] max-md:max-w-none max-md:translate-y-0 max-md:rounded-xl sm:max-h-[min(90vh,760px)] sm:max-w-[560px]"
+          className="max-h-[calc(100dvh-5.5rem-env(safe-area-inset-bottom))] overflow-hidden p-0 outline-none max-md:top-auto max-md:bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-md:w-[calc(100%-1rem)] max-md:max-w-none max-md:rounded-xl sm:max-h-[min(90vh,760px)] sm:max-w-lg"
           onOpenAutoFocus={e => {
             e.preventDefault()
             contentRef.current?.focus()
@@ -2339,10 +2121,7 @@ ${resolveInstructions}`
           onKeyDown={handleKeyDown}
         >
           <DialogHeader className="shrink-0 border-b border-border/60 px-4 py-4 text-left sm:border-b-0 sm:pt-5 sm:pb-2">
-            <DialogTitle className="flex items-center gap-2">
-              <Wand2 className="h-4 w-4" />
-              Magic
-            </DialogTitle>
+            <DialogTitle>Magic</DialogTitle>
           </DialogHeader>
 
           {isMobile ? (
@@ -2352,7 +2131,7 @@ ${resolveInstructions}`
             >
               {magicColumns.all.map(section => (
                 <section key={section.header}>
-                  <h3 className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <h3 className="mb-2 px-1 text-xs text-muted-foreground">
                     {section.header}
                   </h3>
                   <div className="grid grid-cols-2 gap-2">
@@ -2372,19 +2151,13 @@ ${resolveInstructions}`
                         ? 'magic-column-left'
                         : 'magic-column-right'
                     }
-                    className={cn(colIndex === 0 && 'border-r border-border')}
                   >
-                    {columnSections.map((section, sectionIndex) => (
-                      <div key={section.header}>
-                        <div className="px-4 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    {columnSections.map(section => (
+                      <div key={section.header} className="pb-2">
+                        <div className="px-4 py-1.5 text-xs text-muted-foreground">
                           {section.header}
                         </div>
-
                         {section.options.map(option => renderOption(option))}
-
-                        {sectionIndex < columnSections.length - 1 && (
-                          <div className="my-1 mx-4 border-t border-border" />
-                        )}
                       </div>
                     ))}
                   </div>
@@ -2396,7 +2169,7 @@ ${resolveInstructions}`
       </Dialog>
 
       <Dialog open={linkPrDialogOpen} onOpenChange={setLinkPrDialogOpen}>
-        <DialogContent className="sm:max-w-[420px]">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Link pull request</DialogTitle>
           </DialogHeader>
@@ -2443,7 +2216,7 @@ ${resolveInstructions}`
               </p>
             </div>
 
-            <div className="flex justify-between gap-2">
+            <DialogFooter className="sm:justify-between">
               <div>
                 {hasOpenPr && (
                   <Button
@@ -2474,19 +2247,19 @@ ${resolveInstructions}`
                       : 'Link PR'}
                 </Button>
               </div>
-            </div>
+            </DialogFooter>
           </div>
         </DialogContent>
       </Dialog>
 
       <Dialog
         open={investigateDialogOpen}
-        onOpenChange={setInvestigateDialogOpen}
+        onOpenChange={handleInvestigateDialogOpenChange}
       >
         <DialogContent
           ref={investigateContentRef}
           tabIndex={-1}
-          className="sm:max-w-[520px] outline-none"
+          className="sm:max-w-lg outline-none"
           onOpenAutoFocus={e => {
             e.preventDefault()
             investigateContentRef.current?.focus()
@@ -2600,196 +2373,36 @@ ${resolveInstructions}`
               </div>
             </RadioGroup>
 
-            <div className="flex justify-end gap-2">
+            <DialogFooter>
               <Button
                 variant="outline"
-                onClick={() => setInvestigateDialogOpen(false)}
+                onClick={() => handleInvestigateDialogOpenChange(false)}
               >
                 Cancel
               </Button>
-              <Button onClick={dispatchInvestigateCommand}>Investigate</Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={resolveDialogOpen} onOpenChange={setResolveDialogOpen}>
-        <DialogContent
-          tabIndex={-1}
-          className="sm:max-w-[520px] outline-none"
-          onKeyDown={handleResolveKeyDown}
-        >
-          <DialogHeader>
-            <DialogTitle>Resolve conflicts</DialogTitle>
-          </DialogHeader>
-
-          <div className="space-y-4">
-            <RadioGroup
-              value={resolveSelectionMode}
-              onValueChange={value =>
-                setResolveSelectionMode(value as ResolveSelectionMode)
-              }
-              className="space-y-3"
-            >
-              <div
-                className={cn(
-                  'flex items-start gap-3 rounded-lg border p-3 transition-colors',
-                  resolveSelectionMode === 'settings-default'
-                    ? 'border-primary/40 bg-primary/5'
-                    : 'border-border'
-                )}
-              >
-                <RadioGroupItem
-                  value="settings-default"
-                  id="resolve-settings-default"
-                  className="mt-0.5"
-                />
-                <Label
-                  htmlFor="resolve-settings-default"
-                  className="flex-1 cursor-pointer"
+              {separateInvestigateCount > 1 && (
+                <Button
+                  variant="outline"
+                  onClick={() => dispatchInvestigateCommand(true)}
                 >
-                  <div className="text-sm font-medium">
-                    Use Magic Prompt settings
-                  </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {resolveSettingsDefaultSummary}
-                  </div>
-                </Label>
-              </div>
-
-              <div
-                className={cn(
-                  'space-y-3 rounded-lg border p-3 transition-colors',
-                  resolveSelectionMode === 'custom'
-                    ? 'border-primary/40 bg-primary/5'
-                    : 'border-border'
-                )}
-              >
-                <div className="flex items-start gap-3">
-                  <RadioGroupItem
-                    value="custom"
-                    id="resolve-custom"
-                    className="mt-0.5"
-                  />
-                  <Label
-                    htmlFor="resolve-custom"
-                    className="flex-1 cursor-pointer"
-                  >
-                    <div className="text-sm font-medium">
-                      Choose backend + model
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {resolveCustomSelectionSummary}
-                    </div>
-                  </Label>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 pl-7">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">
-                      Backend
-                    </Label>
-                    <Select
-                      value={customResolveBackend}
-                      onValueChange={handleCustomResolveBackendChange}
-                    >
-                      <SelectTrigger
-                        size="sm"
-                        hideIcon={
-                          installedBackends.filter(backend =>
-                            [
-                              'claude',
-                              'codex',
-                              'opencode',
-                              'grok',
-                              'kimi',
-                              'antigravity',
-                              'muse',
-                            ].includes(backend)
-                          ).length <= 1
-                        }
-                        onClick={() => setResolveSelectionMode('custom')}
-                      >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {installedBackends.includes('claude') && (
-                          <SelectItem value="claude">Claude</SelectItem>
-                        )}
-                        {installedBackends.includes('codex') && (
-                          <SelectItem value="codex">Codex</SelectItem>
-                        )}
-                        {installedBackends.includes('opencode') && (
-                          <SelectItem value="opencode">OpenCode</SelectItem>
-                        )}
-                        {installedBackends.includes('grok') && (
-                          <SelectItem value="grok">
-                            <BackendLabel backend="grok" />
-                          </SelectItem>
-                        )}
-                        {installedBackends.includes('kimi') && (
-                          <SelectItem value="kimi">
-                            <BackendLabel backend="kimi" />
-                          </SelectItem>
-                        )}
-                        {installedBackends.includes('antigravity') && (
-                          <SelectItem value="antigravity">
-                            <BackendLabel backend="antigravity" />
-                          </SelectItem>
-                        )}
-                        {installedBackends.includes('muse') && (
-                          <SelectItem value="muse">
-                            <BackendLabel backend="muse" />
-                          </SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">
-                      Model
-                    </Label>
-                    <Select
-                      value={effectiveCustomResolveModel}
-                      onValueChange={value => {
-                        setResolveSelectionMode('custom')
-                        setCustomResolveModel(value)
-                      }}
-                    >
-                      <SelectTrigger
-                        size="sm"
-                        hideIcon={customResolveModelOptions.length <= 1}
-                      >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {customResolveModelOptions.map(option => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-              </div>
-            </RadioGroup>
-
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setResolveDialogOpen(false)}
-              >
-                Cancel
+                  Investigate Separately ({separateInvestigateCount})
+                </Button>
+              )}
+              <Button onClick={() => dispatchInvestigateCommand()}>
+                {separateInvestigateCount > 1
+                  ? 'Investigate Together'
+                  : 'Investigate'}
               </Button>
-              <Button onClick={dispatchResolveConflictsCommand}>
-                Resolve conflicts
-              </Button>
-            </div>
+            </DialogFooter>
           </div>
         </DialogContent>
       </Dialog>
+
+      <ResolveConflictsDialog
+        open={resolveDialogOpen}
+        onOpenChange={setResolveDialogOpen}
+        onConfirm={dispatchResolveConflictsCommand}
+      />
     </>
   )
 }

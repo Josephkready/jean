@@ -17,7 +17,7 @@ import {
   extractInstruction,
   type Instruction,
 } from '@atlaskit/pragmatic-drag-and-drop-hitbox/list-item'
-import { ChevronDown, ChevronUp } from '@/components/icons/reicon'
+import { DisclosureChevron } from './DisclosureChevron'
 import { SectionHeaderContextMenu } from './SectionHeaderContextMenu'
 import { SidebarEmptySpaceMenu } from './SidebarEmptySpaceMenu'
 import { isContextMenuNearElement } from './sidebar-context-menu'
@@ -77,7 +77,6 @@ function getMaxSubtreeDepth(projects: Project[], itemId: string): number {
 interface ProjectTreeProps {
   projects: Project[]
   groupByServer?: boolean
-  searchQuery?: string
   onNewProject?: () => void
   onNewFolder?: () => void
 }
@@ -157,7 +156,6 @@ interface SortableItemProps {
   overFolderId: string | null
   insertBeforeId: string | null
   activeId: string | null
-  searchQuery: string
 }
 
 function SortableItem({
@@ -169,7 +167,6 @@ function SortableItem({
   overFolderId,
   insertBeforeId,
   activeId,
-  searchQuery,
 }: SortableItemProps) {
   const elementRef = useRef<HTMLDivElement | null>(null)
   // draggable="true" makes mobile browsers lift the row on long-press, which
@@ -178,7 +175,7 @@ function SortableItem({
 
   useEffect(() => {
     const element = elementRef.current
-    if (!element || item.offline || searchQuery || isTouchDevice) return
+    if (!element || item.offline || isTouchDevice) return
 
     return combine(
       draggable({
@@ -232,7 +229,7 @@ function SortableItem({
         },
       })
     )
-  }, [allProjects, item, searchQuery, isTouchDevice])
+  }, [allProjects, item, isTouchDevice])
 
   const style: React.CSSProperties = {
     opacity: activeId === item.id ? 0.35 : 1,
@@ -247,7 +244,7 @@ function SortableItem({
         : null
 
   if (isFolder(item)) {
-    const isExpanded = Boolean(searchQuery) || expandedFolderIds.has(item.id)
+    const isExpanded = expandedFolderIds.has(item.id)
 
     return (
       <div
@@ -278,7 +275,6 @@ function SortableItem({
               overFolderId={overFolderId}
               insertBeforeId={insertBeforeId}
               activeId={activeId}
-              searchQuery={searchQuery}
             />
           )}
         </FolderTreeItem>
@@ -298,7 +294,7 @@ function SortableItem({
       )}
     >
       <DropIndicator edge={closestEdge} insetClassName="left-2 right-2" />
-      <ProjectTreeItem project={item} searchQuery={searchQuery} />
+      <ProjectTreeItem project={item} />
     </div>
   )
 }
@@ -312,7 +308,6 @@ interface NestedItemsProps {
   overFolderId: string | null
   insertBeforeId: string | null
   activeId: string | null
-  searchQuery: string
 }
 
 function NestedItems({
@@ -323,7 +318,6 @@ function NestedItems({
   overFolderId,
   insertBeforeId,
   activeId,
-  searchQuery,
 }: NestedItemsProps) {
   const items = projects
     .filter(p => p.parent_id === parentId)
@@ -346,7 +340,6 @@ function NestedItems({
           overFolderId={overFolderId}
           insertBeforeId={insertBeforeId}
           activeId={activeId}
-          searchQuery={searchQuery}
         />
       ))}
     </>
@@ -380,7 +373,7 @@ function RootDropZone({ isOver }: { isOver: boolean }) {
         isOver ? 'border-primary/50 bg-primary/5' : 'border-muted-foreground/25'
       )}
     >
-      <span className="text-[11px] text-muted-foreground/50 select-none">
+      <span className="text-2xs text-muted-foreground/50 select-none">
         Drop here to move to root level
       </span>
     </div>
@@ -390,7 +383,6 @@ function RootDropZone({ isOver }: { isOver: boolean }) {
 export function ProjectTree({
   projects,
   groupByServer = false,
-  searchQuery = '',
   onNewProject,
   onNewFolder,
 }: ProjectTreeProps) {
@@ -449,8 +441,7 @@ export function ProjectTree({
     () => projects.flatMap(p => (isFolder(p) ? [p.id] : [])),
     [projects]
   )
-  const showFolders = !foldersSectionCollapsed || Boolean(searchQuery)
-  const searching = Boolean(searchQuery)
+  const showFolders = !foldersSectionCollapsed
   const handleNewProject = useCallback(() => {
     if (onNewProject) {
       onNewProject()
@@ -833,7 +824,6 @@ export function ProjectTree({
         {rootFolders.length > 0 && (
           <div ref={foldersSectionRef}>
             <SectionHeaderContextMenu
-              categoryDisabled={searching}
               onExpandAll={() => {
                 setFoldersSectionCollapsed(false)
                 expandAllFolders(allFolderIds)
@@ -850,13 +840,8 @@ export function ProjectTree({
                   onClick={() => setFoldersSectionCollapsed(value => !value)}
                   aria-label={showFolders ? 'Hide folders' : 'Show folders'}
                   aria-expanded={showFolders}
-                  disabled={searching}
                 >
-                  {showFolders ? (
-                    <ChevronUp className="size-3.5" />
-                  ) : (
-                    <ChevronDown className="size-3.5" />
-                  )}
+                  <DisclosureChevron open={showFolders} />
                 </button>
               </div>
             </SectionHeaderContextMenu>
@@ -872,14 +857,13 @@ export function ProjectTree({
                   overFolderId={overFolderId}
                   insertBeforeId={insertBeforeId}
                   activeId={activeId}
-                  searchQuery={searchQuery}
                 />
               ))}
           </div>
         )}
         {hasBothTypes && (
           <div className="px-3 py-2">
-            <Separator />
+            <Separator className="bg-border/20" />
           </div>
         )}
         {projectSections.map(section => {
@@ -888,13 +872,11 @@ export function ProjectTree({
             expandedProjectIds.has(item.id)
           )
           const actionLabel = areAllProjectsExpanded ? 'Collapse' : 'Expand'
-          const showSection =
-            searching || !collapsedProjectSectionIds.has(section.id)
+          const showSection = !collapsedProjectSectionIds.has(section.id)
 
           return (
             <div key={section.id}>
               <SectionHeaderContextMenu
-                categoryDisabled={searching}
                 onExpandAll={() => {
                   setProjectSectionCollapsed(section.id, false)
                   setProjectsExpanded(sectionProjectIds, true)
@@ -940,11 +922,7 @@ export function ProjectTree({
                               : `${actionLabel} all projects on ${section.title}`
                           }
                         >
-                          {areAllProjectsExpanded ? (
-                            <ChevronUp className="size-3.5" />
-                          ) : (
-                            <ChevronDown className="size-3.5" />
-                          )}
+                          <DisclosureChevron open={areAllProjectsExpanded} />
                         </button>
                       </TooltipTrigger>
                       <TooltipContent>{actionLabel} all</TooltipContent>
@@ -964,7 +942,6 @@ export function ProjectTree({
                     overFolderId={overFolderId}
                     insertBeforeId={insertBeforeId}
                     activeId={activeId}
-                    searchQuery={searchQuery}
                   />
                 ))}
             </div>

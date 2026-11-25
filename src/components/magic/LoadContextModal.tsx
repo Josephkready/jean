@@ -21,6 +21,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Markdown } from '@/components/ui/markdown'
 import { cn } from '@/lib/utils'
+import { Kbd } from '@/components/ui/kbd'
 import { usePreferences } from '@/services/preferences'
 import { parseServerResourceKey } from '@/lib/server-resource'
 import { useGhLogin } from '@/hooks/useGhLogin'
@@ -35,6 +36,7 @@ import { LinearItemsTab } from './LinearItemsTab'
 import { SentryItemsTab } from './SentryItemsTab'
 import { ContextsTab } from './ContextsTab'
 import { useLoadContextData } from './hooks/useLoadContextData'
+import { useContextLinkUsage } from '@/hooks/useContextLinkUsage'
 import { useLoadContextHandlers } from './hooks/useLoadContextHandlers'
 import { useLoadContextKeyboard } from './hooks/useLoadContextKeyboard'
 
@@ -85,14 +87,13 @@ export function LoadContextModal({
 
   // Resolve the project's git host provider for provider-aware auth + wording.
   const { data: providerInfo, isLoading: isProviderLoading } =
-    useProjectGitProvider(worktreePath)
+    useProjectGitProvider(worktreePath, { worktreeId })
   const provider = providerInfo?.provider ?? 'github'
   // Until the provider resolves it defaults to `github`; auth-error UI must wait
   // for this so a GitLab project never flashes the GitHub sign-in prompt.
   const providerResolved = !isProviderLoading
   const labels = providerLabels(provider)
-  const triggerLogin =
-    provider === 'gitlab' ? triggerGlabLogin : triggerGhLogin
+  const triggerLogin = provider === 'gitlab' ? triggerGlabLogin : triggerGhLogin
   const isCliInstalled = provider === 'gitlab' ? isGlabInstalled : isGhInstalled
   // Security (Dependabot/advisories) is GitHub-only; hide it for GitLab.
   const securityTabEnabled = provider !== 'gitlab'
@@ -118,6 +119,14 @@ export function LoadContextModal({
     activeSessionId,
     searchQuery,
     includeClosed,
+  })
+
+  // Other worktrees/sessions that already use an item (this session excluded)
+  const contextLinks = useContextLinkUsage({
+    enabled: open,
+    projectId,
+    projectPath: worktreePath,
+    currentSessionId: activeSessionId ?? undefined,
   })
 
   // Stable callback for handlers to reset search/selection
@@ -174,12 +183,12 @@ export function LoadContextModal({
     onTabChange: setActiveTab,
   })
 
-  // Track the previous open state to detect when modal opens
-  const prevOpenRef = useRef(false)
-
-  // Determine default tab and reset state when modal opens/closes
-  useEffect(() => {
-    if (open && !prevOpenRef.current) {
+  // Determine default tab and reset state when modal opens (adjusted during
+  // render so the previous open's tab/search never paints)
+  const [prevOpen, setPrevOpen] = useState(false)
+  if (open !== prevOpen) {
+    setPrevOpen(open)
+    if (open) {
       // Dynamic default tab based on loaded data
       if (data.hasLoadedIssueContexts) {
         setActiveTab('issues')
@@ -202,7 +211,15 @@ export function LoadContextModal({
       setIncludeClosed(false)
       setSelectedIndex(0)
       handlers.resetState()
+    }
+  }
 
+  // Track the previous open state to detect when modal opens
+  const prevOpenRef = useRef(false)
+
+  // Refresh caches when modal opens/closes
+  useEffect(() => {
+    if (open && !prevOpenRef.current) {
       // Invalidate caches to fetch fresh data
       if (worktreePath) {
         queryClient.invalidateQueries({
@@ -278,21 +295,7 @@ export function LoadContextModal({
     }
 
     prevOpenRef.current = open
-  }, [
-    open,
-    worktreePath,
-    activeSessionId,
-    projectId,
-    queryClient,
-    data.hasLoadedIssueContexts,
-    data.hasLoadedPRContexts,
-    data.hasLoadedSecurityContexts,
-    data.hasLoadedAdvisoryContexts,
-    data.hasLoadedLinearContexts,
-    data.hasLoadedSentryContexts,
-    data.hasAttachedContexts,
-    handlers.resetState,
-  ])
+  }, [open, worktreePath, activeSessionId, projectId, queryClient])
 
   // Focus search input when tab changes
   useEffect(() => {
@@ -301,19 +304,18 @@ export function LoadContextModal({
     }
   }, [open, activeTab])
 
-  // Reset selection and search when switching tabs
-  useEffect(() => {
+  // Reset selection and search when switching tabs (adjusted during render)
+  const [prevActiveTab, setPrevActiveTab] = useState(activeTab)
+  if (prevActiveTab !== activeTab) {
+    setPrevActiveTab(activeTab)
     setSelectedIndex(0)
     setSearchQuery('')
-  }, [activeTab])
+  }
 
   // Reset to a safe tab when the current one is hidden (e.g. Security on GitLab).
+  // Adjusted during render; the activeTab guard keeps it from looping.
   const activeTabAvailable = displayTabs.some(tab => tab.id === activeTab)
-  useEffect(() => {
-    if (!activeTabAvailable) {
-      setActiveTab('issues')
-    }
-  }, [activeTabAvailable])
+  if (!activeTabAvailable && activeTab !== 'issues') setActiveTab('issues')
 
   // Focus edit input when editing starts
   useEffect(() => {
@@ -321,7 +323,7 @@ export function LoadContextModal({
       handlers.editInputRef.current.focus()
       handlers.editInputRef.current.select()
     }
-  }, [handlers.editingFilename])
+  }, [handlers.editingFilename, handlers.editInputRef])
 
   // Clear editing state when modal closes
   useEffect(() => {
@@ -333,7 +335,7 @@ export function LoadContextModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="overflow-hidden p-0 !w-screen !h-dvh !max-w-screen !max-h-none !rounded-none sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-[calc(100vh-4rem)] sm:!rounded-xl font-sans flex flex-col"
+        className="overflow-hidden p-0 !w-screen !h-dvh !max-w-screen !max-h-none !rounded-none sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-[85vh] sm:!rounded-lg font-sans flex flex-col"
         onOpenAutoFocus={e => {
           e.preventDefault()
           searchInputRef.current?.focus()
@@ -341,10 +343,7 @@ export function LoadContextModal({
         onKeyDown={handleKeyDown}
       >
         <DialogHeader className="px-4 pt-5 pb-2">
-          <DialogTitle className="flex items-center gap-2">
-            <FolderOpen className="h-4 w-4" />
-            Load Context
-          </DialogTitle>
+          <DialogTitle>Load Context</DialogTitle>
         </DialogHeader>
 
         {/* Tabs */}
@@ -367,9 +366,9 @@ export function LoadContextModal({
             >
               <tab.icon className="h-4 w-4" />
               <span className="text-xs sm:text-sm">{tab.label}</span>
-              <kbd className="hidden sm:inline ml-0.5 text-xs text-muted-foreground bg-muted px-1 py-0.5 rounded">
+              <Kbd modHint className="ml-0.5">
                 {getModifierSymbol()}+{tab.key}
-              </kbd>
+              </Kbd>
             </button>
           ))}
         </div>
@@ -378,6 +377,7 @@ export function LoadContextModal({
         <div className="flex flex-col flex-1 min-h-0">
           {activeTab === 'issues' && (
             <GitHubItemsTab
+              contextLinks={contextLinks}
               config={{
                 kind: 'issues',
                 loadedContexts: data.loadedIssueContexts ?? [],
@@ -414,6 +414,7 @@ export function LoadContextModal({
 
           {activeTab === 'prs' && (
             <GitHubItemsTab
+              contextLinks={contextLinks}
               config={{
                 kind: 'prs',
                 loadedContexts: data.loadedPRContexts ?? [],
@@ -450,6 +451,7 @@ export function LoadContextModal({
 
           {activeTab === 'security' && (
             <SecurityAlertsTab
+              contextLinks={contextLinks}
               loadedContexts={data.loadedSecurityContexts ?? []}
               filteredAlerts={data.filteredSecurityAlerts}
               searchQuery={searchQuery}
@@ -500,6 +502,7 @@ export function LoadContextModal({
 
           {activeTab === 'linear' && (
             <LinearItemsTab
+              contextLinks={contextLinks}
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
               searchInputRef={searchInputRef}
@@ -601,6 +604,7 @@ export function LoadContextModal({
                 if (!open) handlers.setViewingContext(null)
               }}
               projectPath={worktreePath}
+              projectId={projectId}
               type={handlers.viewingContext.type}
               number={handlers.viewingContext.number}
             />
@@ -617,7 +621,7 @@ export function LoadContextModal({
               open={true}
               onOpenChange={() => handlers.setViewingContext(null)}
             >
-              <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none sm:!w-[calc(100vw-8rem)] sm:!max-w-[calc(100vw-8rem)] sm:!h-[calc(100vh-8rem)] sm:!rounded-lg flex flex-col">
+              <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-[85vh] sm:!rounded-lg flex flex-col">
                 <DialogHeader>
                   <DialogTitle className="flex items-center gap-2">
                     {handlers.viewingContext.type === 'security' ? (

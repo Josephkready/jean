@@ -20,6 +20,7 @@ import {
   useWorktreePolling,
   performGitPull,
   performGitSync,
+  useIsGitSyncing,
   type WorktreePollingInfo,
   type GitStatusEvent,
 } from './git-status'
@@ -314,10 +315,11 @@ describe('git-status service', () => {
     it('calls invoke and returns output', async () => {
       mockInvoke.mockResolvedValueOnce('Already up to date.')
 
-      const result = await gitPull('/path/to/repo', 'main')
+      const result = await gitPull('wt-1', '/path/to/repo', 'main')
 
       expect(result).toBe('Already up to date.')
       expect(mockInvoke).toHaveBeenCalledWith('git_pull', {
+        worktreeId: 'wt-1',
         worktreePath: '/path/to/repo',
         baseBranch: 'main',
         remote: null,
@@ -328,7 +330,7 @@ describe('git-status service', () => {
       const { isTauri } = vi.mocked(await import('@/services/projects'))
       isTauri.mockReturnValue(false)
 
-      await expect(gitPull('/path', 'main')).rejects.toThrow(
+      await expect(gitPull('wt-1', '/path', 'main')).rejects.toThrow(
         'Git pull only available in Tauri'
       )
     })
@@ -342,7 +344,10 @@ describe('git-status service', () => {
         { name: 'fork' },
       ])
 
-      const result = await getGitRemotes('/path/to/repo')
+      const result = await getGitRemotes(
+        { projectId: 'proj-1' },
+        '/path/to/repo'
+      )
 
       expect(result).toEqual([
         { name: 'origin' },
@@ -350,6 +355,8 @@ describe('git-status service', () => {
         { name: 'fork' },
       ])
       expect(mockInvoke).toHaveBeenCalledWith('get_git_remotes', {
+        worktreeId: undefined,
+        projectId: 'proj-1',
         repoPath: '/path/to/repo',
       })
     })
@@ -357,7 +364,10 @@ describe('git-status service', () => {
     it('keeps order unchanged when origin is missing', async () => {
       mockInvoke.mockResolvedValueOnce([{ name: 'upstream' }, { name: 'fork' }])
 
-      const result = await getGitRemotes('/path/to/repo')
+      const result = await getGitRemotes(
+        { worktreeId: 'wt-1' },
+        '/path/to/repo'
+      )
 
       expect(result).toEqual([{ name: 'upstream' }, { name: 'fork' }])
     })
@@ -430,6 +440,38 @@ describe('git-status service', () => {
         baseRemote: 'origin',
       })
     })
+
+    it('writes fresh totals into the polled status so the header matches the diff', async () => {
+      const { queryClient: appQueryClient } = await import('@/lib/query-client')
+      const key = gitStatusQueryKeys.worktree('wt-1')
+      appQueryClient.setQueryData(
+        key,
+        createGitStatus({ uncommitted_added: 973, uncommitted_removed: 336 })
+      )
+      mockInvoke.mockResolvedValueOnce({
+        diff_type: 'uncommitted',
+        base_ref: 'HEAD',
+        total_additions: 1069,
+        total_deletions: 401,
+        files: [],
+      })
+      await getGitDiff('/srv/project', 'uncommitted', 'main', undefined, 'wt-1')
+
+      mockInvoke.mockResolvedValueOnce({
+        diff_type: 'branch',
+        base_ref: 'fork/main',
+        total_additions: 99,
+        total_deletions: 99,
+        files: [],
+      })
+      await getGitDiff('/srv/project', 'branch', 'main', 'fork', 'wt-1')
+
+      const status = appQueryClient.getQueryData<GitStatusEvent>(key)
+      expect(status?.uncommitted_added).toBe(1069)
+      expect(status?.uncommitted_removed).toBe(401)
+      // Branch diff against another base than the poll must not overwrite it
+      expect(status?.branch_diff_added).toBe(10)
+    })
   })
 
   describe('performGitPull', () => {
@@ -471,6 +513,31 @@ describe('git-status service', () => {
   })
 
   describe('performGitSync', () => {
+    it('reports the worktree as syncing for the whole pull and push, then clears', async () => {
+      const { result } = renderHook(() => useIsGitSyncing('wt-sync'))
+      const seen: boolean[] = []
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'git_pull' || cmd === 'git_push') seen.push(result.current)
+        if (cmd === 'git_pull') return 'Already up to date.'
+        if (cmd === 'git_push') throw new Error('rejected')
+        return undefined
+      })
+
+      expect(result.current).toBe(false)
+      await performGitSync({
+        needsPull: true,
+        needsPush: true,
+        pull: {
+          worktreeId: 'wt-sync',
+          worktreePath: '/path/to/repo',
+          baseBranch: 'main',
+        },
+      })
+
+      expect(seen).toEqual([true, true])
+      await waitFor(() => expect(result.current).toBe(false))
+    })
+
     it('pulls then pushes when both are needed with sync toasts', async () => {
       mockInvoke.mockImplementation(async (cmd: string) => {
         if (cmd === 'git_pull') return 'Already up to date.'

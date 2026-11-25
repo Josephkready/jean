@@ -8,8 +8,10 @@ import type {
   GitHubIssueListResult,
   GitHubPullRequest,
   GitHubPullRequestDetail,
+  IssueContext,
   LoadedIssueContext,
   LoadedPullRequestContext,
+  PullRequestContext,
   DependabotAlert,
   LoadedSecurityAlertContext,
   RepositoryAdvisory,
@@ -79,7 +81,13 @@ export const githubQueryKeys = {
   issues: (projectPath: string, state: string) =>
     [...githubQueryKeys.all, 'issues', projectPath, state] as const,
   issue: (projectPath: string, issueNumber: number, repo?: string) =>
-    [...githubQueryKeys.all, 'issue', projectPath, issueNumber, repo ?? ''] as const,
+    [
+      ...githubQueryKeys.all,
+      'issue',
+      projectPath,
+      issueNumber,
+      repo ?? '',
+    ] as const,
   loadedContexts: (sessionId: string, worktreeId?: string | null) =>
     worktreeId
       ? ([
@@ -186,6 +194,7 @@ export const githubQueryKeys = {
 
 export function useGitHubLabels(
   projectPath: string | null,
+  projectId: string | null | undefined,
   options?: { enabled?: boolean; staleTime?: number }
 ) {
   return useQuery({
@@ -197,6 +206,7 @@ export function useGitHubLabels(
         logger.debug('Fetching GitHub labels', { projectPath })
         return await invoke<GitHubLabel[]>('list_github_labels', {
           projectPath,
+          projectId,
         })
       } catch (error) {
         logger.error('Failed to load GitHub labels', { error, projectPath })
@@ -266,6 +276,7 @@ export function useGitHubIssues(
  */
 export function useGitHubIssue(
   projectPath: string | null,
+  projectId: string | null | undefined,
   issueNumber: number | null,
   repo?: string | null
 ) {
@@ -288,6 +299,7 @@ export function useGitHubIssue(
         })
         const issue = await invoke<GitHubIssueDetail>('get_github_issue', {
           projectPath,
+          projectId,
           issueNumber,
           ...(repo ? { repo } : {}),
         })
@@ -419,6 +431,7 @@ export function filterIssues(
  */
 export function useSearchGitHubIssues(
   projectPath: string | null,
+  projectId: string | null | undefined,
   query: string
 ) {
   return useQuery({
@@ -432,6 +445,7 @@ export function useSearchGitHubIssues(
         logger.debug('Searching GitHub issues', { projectPath, query })
         const issues = await invoke<GitHubIssue[]>('search_github_issues', {
           projectPath,
+          projectId,
           query,
         })
         logger.info('GitHub issue search results', {
@@ -579,6 +593,7 @@ export function useGitHubPRs(
  */
 export function useGitHubPR(
   projectPath: string | null,
+  projectId: string | null | undefined,
   prNumber: number | null,
   repo?: string | null
 ) {
@@ -601,6 +616,7 @@ export function useGitHubPR(
         })
         const pr = await invoke<GitHubPullRequestDetail>('get_github_pr', {
           projectPath,
+          projectId,
           prNumber,
           ...(repo ? { repo } : {}),
         })
@@ -657,6 +673,104 @@ export function useLoadedPRContexts(
     staleTime: 1000 * 60, // 1 minute
     gcTime: 1000 * 60 * 5, // 5 minutes
   })
+}
+
+/**
+ * Fetch an issue with its comments as the context for a new worktree
+ */
+export async function fetchIssueContext(
+  projectPath: string,
+  projectId: string,
+  issue: Pick<GitHubIssue, 'number' | 'repo'>
+): Promise<IssueContext> {
+  const repoArgs = issue.repo ? { repo: issue.repo } : {}
+  const issueDetail = await invoke<GitHubIssueDetail>('get_github_issue', {
+    projectPath,
+    projectId,
+    issueNumber: issue.number,
+    ...repoArgs,
+  })
+
+  return {
+    number: issueDetail.number,
+    title: issueDetail.title,
+    body: issueDetail.body,
+    comments: (issueDetail.comments ?? []).flatMap(c =>
+      c && c.created_at && c.author
+        ? [
+            {
+              body: c.body ?? '',
+              author: { login: c.author.login ?? '' },
+              createdAt: c.created_at,
+            },
+          ]
+        : []
+    ),
+    ...repoArgs,
+  }
+}
+
+/**
+ * Fetch a PR with its comments and reviews as the context for a new worktree
+ */
+export async function fetchPullRequestContext(
+  projectPath: string,
+  projectId: string,
+  pr: Pick<GitHubPullRequest, 'number' | 'repo'>
+): Promise<PullRequestContext> {
+  const repoArgs = pr.repo ? { repo: pr.repo } : {}
+  const prDetail = await invoke<
+    GitHubPullRequest & {
+      comments: {
+        body: string
+        author: { login: string }
+        created_at: string
+      }[]
+      reviews: {
+        body: string
+        state: string
+        author: { login: string }
+        submittedAt?: string
+      }[]
+    }
+  >('get_github_pr', {
+    projectPath,
+    projectId,
+    prNumber: pr.number,
+    ...repoArgs,
+  })
+
+  return {
+    number: prDetail.number,
+    title: prDetail.title,
+    body: prDetail.body,
+    headRefName: prDetail.headRefName,
+    baseRefName: prDetail.baseRefName,
+    comments: (prDetail.comments ?? []).flatMap(c =>
+      c && c.created_at && c.author
+        ? [
+            {
+              body: c.body ?? '',
+              author: { login: c.author.login ?? '' },
+              createdAt: c.created_at,
+            },
+          ]
+        : []
+    ),
+    reviews: (prDetail.reviews ?? []).flatMap(r =>
+      r && r.author
+        ? [
+            {
+              body: r.body ?? '',
+              state: r.state,
+              author: { login: r.author.login ?? '' },
+              submittedAt: r.submittedAt,
+            },
+          ]
+        : []
+    ),
+    ...repoArgs,
+  }
 }
 
 /**
@@ -797,7 +911,11 @@ export function filterPRs(
  * @param projectPath - Path to the git repository
  * @param query - Search query (should be debounced by caller)
  */
-export function useSearchGitHubPRs(projectPath: string | null, query: string) {
+export function useSearchGitHubPRs(
+  projectPath: string | null,
+  projectId: string | null | undefined,
+  query: string
+) {
   return useQuery({
     queryKey: githubQueryKeys.prSearch(projectPath ?? '', query),
     queryFn: async (): Promise<GitHubPullRequest[]> => {
@@ -809,6 +927,7 @@ export function useSearchGitHubPRs(projectPath: string | null, query: string) {
         logger.debug('Searching GitHub PRs', { projectPath, query })
         const prs = await invoke<GitHubPullRequest[]>('search_github_prs', {
           projectPath,
+          projectId,
           query,
         })
         logger.info('GitHub PR search results', { count: prs.length, query })
@@ -906,6 +1025,7 @@ export function prependExactMatch<T extends NumberedGitHubItem>(
  */
 export function useListGitHubIssuesByNumber(
   projectPath: string | null,
+  projectId: string | null | undefined,
   query: string
 ) {
   const itemNumber = parseItemNumber(query)
@@ -919,6 +1039,7 @@ export function useListGitHubIssuesByNumber(
       try {
         return await invoke<GitHubIssue[]>('list_github_issues_by_number', {
           projectPath,
+          projectId,
           issueNumber: itemNumber,
         })
       } catch {
@@ -934,6 +1055,7 @@ export function useListGitHubIssuesByNumber(
 
 export function useGetGitHubIssueByNumber(
   projectPath: string | null,
+  projectId: string | null | undefined,
   query: string
 ) {
   const itemNumber = parseItemNumber(query)
@@ -944,6 +1066,7 @@ export function useGetGitHubIssueByNumber(
       try {
         return await invoke<GitHubIssue>('get_github_issue_by_number', {
           projectPath,
+          projectId,
           issueNumber: itemNumber,
         })
       } catch {
@@ -967,6 +1090,7 @@ export function useGetGitHubIssueByNumber(
  */
 export function useListGitHubPRsByNumber(
   projectPath: string | null,
+  projectId: string | null | undefined,
   query: string
 ) {
   const itemNumber = parseItemNumber(query)
@@ -980,6 +1104,7 @@ export function useListGitHubPRsByNumber(
       try {
         return await invoke<GitHubPullRequest[]>('list_github_prs_by_number', {
           projectPath,
+          projectId,
           prNumber: itemNumber,
         })
       } catch {
@@ -995,6 +1120,7 @@ export function useListGitHubPRsByNumber(
 
 export function useGetGitHubPRByNumber(
   projectPath: string | null,
+  projectId: string | null | undefined,
   query: string
 ) {
   const itemNumber = parseItemNumber(query)
@@ -1005,6 +1131,7 @@ export function useGetGitHubPRByNumber(
       try {
         return await invoke<GitHubPullRequest>('get_github_pr_by_number', {
           projectPath,
+          projectId,
           prNumber: itemNumber,
         })
       } catch {
@@ -1028,6 +1155,7 @@ export function useGetGitHubPRByNumber(
  */
 export function useGitHubDiscussions(
   projectPath: string | null,
+  projectId: string | null | undefined,
   state: 'open' | 'closed' | 'all' = 'open',
   options?: { enabled?: boolean; staleTime?: number }
 ) {
@@ -1047,7 +1175,7 @@ export function useGitHubDiscussions(
         logger.debug('Fetching GitHub discussions', { projectPath, state })
         const page = await invoke<GitHubDiscussionPage>(
           'list_github_discussions',
-          { projectPath, state, after: pageParam }
+          { projectPath, projectId, state, after: pageParam }
         )
         logger.info('GitHub discussions loaded', {
           count: page.discussions.length,
@@ -1080,6 +1208,7 @@ export function useGitHubDiscussions(
  */
 export function useSearchGitHubDiscussions(
   projectPath: string | null,
+  projectId: string | null | undefined,
   query: string
 ) {
   return useQuery({
@@ -1090,6 +1219,7 @@ export function useSearchGitHubDiscussions(
       try {
         return await invoke<GitHubDiscussion[]>('search_github_discussions', {
           projectPath,
+          projectId,
           query,
         })
       } catch (error) {
@@ -1113,6 +1243,7 @@ export function useSearchGitHubDiscussions(
  */
 export function useGetGitHubDiscussionByNumber(
   projectPath: string | null,
+  projectId: string | null | undefined,
   query: string
 ) {
   const itemNumber = parseItemNumber(query)
@@ -1121,7 +1252,7 @@ export function useGetGitHubDiscussionByNumber(
     queryFn: async (): Promise<GitHubDiscussionDetail | null> => {
       if (!isTauri() || !projectPath || !itemNumber) return null
       try {
-        return await getGitHubDiscussion(projectPath, itemNumber)
+        return await getGitHubDiscussion(projectPath, projectId, itemNumber)
       } catch {
         return null
       }
@@ -1138,10 +1269,12 @@ export function useGetGitHubDiscussionByNumber(
  */
 export async function getGitHubDiscussion(
   projectPath: string,
+  projectId: string | null | undefined,
   discussionNumber: number
 ): Promise<GitHubDiscussionDetail> {
   return invoke<GitHubDiscussionDetail>('get_github_discussion', {
     projectPath,
+    projectId,
     discussionNumber,
   })
 }
@@ -1257,6 +1390,7 @@ export function filterDiscussions(
  */
 export function useDependabotAlerts(
   projectPath: string | null,
+  projectId: string | null | undefined,
   state: 'open' | 'all' = 'open',
   options?: { enabled?: boolean; staleTime?: number }
 ) {
@@ -1275,6 +1409,7 @@ export function useDependabotAlerts(
           'list_dependabot_alerts',
           {
             projectPath,
+            projectId,
             state: stateParam,
           }
         )
@@ -1306,6 +1441,7 @@ export function useDependabotAlerts(
  */
 export function useDependabotAlert(
   projectPath: string | null,
+  projectId: string | null | undefined,
   alertNumber: number | null
 ) {
   return useQuery({
@@ -1325,6 +1461,7 @@ export function useDependabotAlert(
         })
         const alert = await invoke<DependabotAlert>('get_dependabot_alert', {
           projectPath,
+          projectId,
           alertNumber,
         })
         logger.info('Dependabot alert loaded', {
@@ -1463,6 +1600,22 @@ export function filterSecurityAlerts(
 // Repository Security Advisory Hooks and Functions
 // =============================================================================
 
+const ADVISORY_STATE_ORDER = ['triage', 'draft', 'published', 'closed']
+
+/**
+ * Sort advisories by workflow state: triage, draft, published, closed.
+ * Keeps GitHub's order (newest first) inside each state.
+ */
+export function sortAdvisoriesByState(
+  advisories: RepositoryAdvisory[]
+): RepositoryAdvisory[] {
+  const rank = (a: RepositoryAdvisory) => {
+    const i = ADVISORY_STATE_ORDER.indexOf(a.state.toLowerCase())
+    return i === -1 ? ADVISORY_STATE_ORDER.length : i
+  }
+  return [...advisories].sort((a, b) => rank(a) - rank(b))
+}
+
 /**
  * Hook to list repository security advisories for a project
  *
@@ -1471,6 +1624,7 @@ export function filterSecurityAlerts(
  */
 export function useRepositoryAdvisories(
   projectPath: string | null,
+  projectId: string | null | undefined,
   state?: string,
   options?: { enabled?: boolean; staleTime?: number }
 ) {
@@ -1487,13 +1641,14 @@ export function useRepositoryAdvisories(
           'list_repository_advisories',
           {
             projectPath,
+            projectId,
             state: state ?? null,
           }
         )
         logger.info('Repository advisories loaded', {
           count: advisories.length,
         })
-        return advisories
+        return sortAdvisoriesByState(advisories)
       } catch (error) {
         // Auth errors should propagate so GhAuthError UI is shown
         if (isGhAuthError(error)) throw error
@@ -1520,6 +1675,7 @@ export function useRepositoryAdvisories(
  */
 export function useRepositoryAdvisory(
   projectPath: string | null,
+  projectId: string | null | undefined,
   ghsaId: string | null
 ) {
   return useQuery({
@@ -1535,6 +1691,7 @@ export function useRepositoryAdvisory(
           'get_repository_advisory',
           {
             projectPath,
+            projectId,
             ghsaId,
           }
         )
@@ -1683,6 +1840,7 @@ export function filterAdvisories(
  */
 export function useWorkflowRuns(
   projectPath: string | null,
+  projectId: string | null | undefined,
   branch?: string,
   options?: { enabled?: boolean; staleTime?: number }
 ) {
@@ -1697,6 +1855,7 @@ export function useWorkflowRuns(
         logger.debug('Fetching workflow runs', { projectPath, branch })
         const result = await invoke<WorkflowRunsResult>('list_workflow_runs', {
           projectPath,
+          projectId,
           branch: branch ?? null,
         })
         logger.info('Workflow runs loaded', {

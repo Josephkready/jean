@@ -22,6 +22,8 @@ interface UseChatWindowEventsParams {
   activeWorktreeId: string | null | undefined
   activeWorktreePath: string | null | undefined
   isModal: boolean
+  /** False in agent chats: Shift+Tab does not toggle Plan mode */
+  allowPlanMode: boolean
   session: Session | null | undefined
   // Git diff
   gitStatus: { base_branch?: string; base_remote?: string } | null | undefined
@@ -39,7 +41,6 @@ interface UseChatWindowEventsParams {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   patchPreferences: { mutate: (prefs: any) => void }
   // Context operations
-  handleSaveContext: () => void
   handleLoadContext: () => void
   // Run scripts
   runScripts: string[]
@@ -71,6 +72,7 @@ export function useChatWindowEvents({
   activeWorktreeId,
   activeWorktreePath,
   isModal,
+  allowPlanMode,
   session,
   gitStatus,
   setDiffRequest,
@@ -81,7 +83,6 @@ export function useChatWindowEvents({
   currentQueuedMessages,
   preferences,
   patchPreferences,
-  handleSaveContext,
   handleLoadContext,
   runScripts,
   hasPendingPlanApproval,
@@ -149,10 +150,13 @@ export function useChatWindowEvents({
   // read but not deps: isAtBottom changing shouldn't re-trigger scroll, and scrollToBottom is stable.
   // streamingContent is excluded because it changes every ~50ms during streaming, causing cascading
   // smooth scroll animations. Content block length changes are sufficient to track streaming progress.
+  // While sending, the streaming ResizeObserver owns scrolling (tail or desktop
+  // plan pin). Instant: a smooth scroll to a growing bottom flickers and stops short.
   useEffect(() => {
-    if (isAtBottom) {
-      scrollToBottom()
+    if (isAtBottom && !isSending) {
+      scrollToBottom(true)
     }
+    // react-doctor-disable-next-line react-doctor/exhaustive-deps -- intentional: isAtBottom changes must not re-trigger scroll (see comment above)
   }, [
     session?.messages.length,
     currentStreamingContentBlocks.length,
@@ -187,7 +191,7 @@ export function useChatWindowEvents({
 
   // SHIFT+TAB: Toggle Plan mode (only dispatched while the composer is focused)
   useEffect(() => {
-    if (!activeSessionId) return
+    if (!activeSessionId || !allowPlanMode) return
     const handler = () => {
       const store = useChatStore.getState()
       store.cycleExecutionMode(activeSessionId)
@@ -213,7 +217,7 @@ export function useChatWindowEvents({
     }
     window.addEventListener('cycle-execution-mode', handler)
     return () => window.removeEventListener('cycle-execution-mode', handler)
-  }, [activeSessionId, activeWorktreeId, activeWorktreePath])
+  }, [activeSessionId, activeWorktreeId, activeWorktreePath, allowPlanMode])
 
   // CMD+G: Open git diff (also handles button clicks that dispatch with detail.type)
   useEffect(() => {
@@ -326,24 +330,21 @@ export function useChatWindowEvents({
     return () => window.removeEventListener('cancel-prompt', handler)
   }, [isModal]) // isModal is constant for the lifetime of ChatWindow
 
-  // Context commands (save/load/run-script)
+  // Context commands (load/run-script)
   useEffect(() => {
-    const handleSave = () => handleSaveContext()
     const handleLoad = () => handleLoadContext()
     const handleRun = () => {
       const first = runScripts[0]
       if (!activeWorktreeId || !first) return
       useTerminalStore.getState().startRun(activeWorktreeId, first)
     }
-    window.addEventListener('command:save-context', handleSave)
     window.addEventListener('command:load-context', handleLoad)
     window.addEventListener('command:run-script', handleRun)
     return () => {
-      window.removeEventListener('command:save-context', handleSave)
       window.removeEventListener('command:load-context', handleLoad)
       window.removeEventListener('command:run-script', handleRun)
     }
-  }, [handleSaveContext, handleLoadContext, activeWorktreeId, runScripts])
+  }, [handleLoadContext, activeWorktreeId, runScripts])
 
   // Toggle debug mode
   useEffect(() => {
@@ -408,7 +409,7 @@ export function useChatWindowEvents({
 
       void invoke<{ id: string; path: string; filename: string; size: number }>(
         'save_pasted_text',
-        { content, filename }
+        { content, filename, sessionId }
       )
         .then(result => {
           useChatStore.getState().addPendingTextFile(sessionId, {

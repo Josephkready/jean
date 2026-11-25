@@ -1,8 +1,12 @@
 import { useMemo } from 'react'
 import type {
-  ClaudeModel,
   CliBackend,
+  ClaudeModel,
   CustomCliProfile,
+} from '@/types/preferences'
+import {
+  formatClaudeModelIdLabel,
+  getProviderAliasModelOptions,
 } from '@/types/preferences'
 import {
   CURSOR_MODEL_OPTIONS,
@@ -46,6 +50,8 @@ interface UseToolbarDerivedStateArgs {
   museModelOptions?: { value: string; label: string }[]
   devinModelOptions?: { value: string; label: string }[]
   customCliProfiles: CustomCliProfile[]
+  /** Extra Claude model ids from preferences (models newer than this build) */
+  customClaudeModels?: string[]
   installedBackends?: CliBackend[]
   availableMcpServers?: { name: string; backend?: string; disabled?: boolean }[]
   enabledMcpServers?: string[]
@@ -58,6 +64,7 @@ const EMPTY_MCP_SERVERS: {
   disabled?: boolean
 }[] = []
 const EMPTY_ENABLED_MCP_SERVERS: string[] = []
+const EMPTY_CUSTOM_CLAUDE_MODELS: string[] = []
 const DEFAULT_INSTALLED_BACKENDS: CliBackend[] = [
   'claude',
   'codex',
@@ -198,6 +205,7 @@ export function useToolbarDerivedState({
   piModelOptions,
   commandcodeModelOptions,
   customCliProfiles,
+  customClaudeModels = EMPTY_CUSTOM_CLAUDE_MODELS,
   grokModelOptions,
   kimiModelOptions,
   museModelOptions,
@@ -237,34 +245,21 @@ export function useToolbarDerivedState({
       selectedProvider === '__anthropic__' ||
       (profile && isClaudeAccountProfile(profile))
     ) {
-      return getClaudeCatalogOptions(modelCatalog)
+      const catalogOptions = getClaudeCatalogOptions(modelCatalog)
+      // Custom ids come first so a just-released model is easy to find, and
+      // are skipped when the catalog already knows them.
+      const known = new Set(catalogOptions.map(option => option.value))
+      const customOptions = customClaudeModels
+        .filter(model => !known.has(model))
+        .map(model => ({
+          value: model as ClaudeModel,
+          label: `${model} (custom)`,
+        }))
+      return [...customOptions, ...catalogOptions]
     }
 
-    let opusModel: string | undefined
-    let sonnetModel: string | undefined
-    let haikuModel: string | undefined
-    if (profile?.settings_json) {
-      try {
-        const settings = JSON.parse(profile.settings_json)
-        const env = settings?.env
-        if (env) {
-          opusModel = env.ANTHROPIC_DEFAULT_OPUS_MODEL || env.ANTHROPIC_MODEL
-          sonnetModel =
-            env.ANTHROPIC_DEFAULT_SONNET_MODEL || env.ANTHROPIC_MODEL
-          haikuModel = env.ANTHROPIC_DEFAULT_HAIKU_MODEL || env.ANTHROPIC_MODEL
-        }
-      } catch {
-        // ignore parse errors
-      }
-    }
-
-    const suffix = (model?: string) => (model ? ` (${model})` : '')
-    return [
-      { value: 'opus' as ClaudeModel, label: `Opus${suffix(opusModel)}` },
-      { value: 'sonnet' as ClaudeModel, label: `Sonnet${suffix(sonnetModel)}` },
-      { value: 'haiku' as ClaudeModel, label: `Haiku${suffix(haikuModel)}` },
-    ]
-  }, [selectedProvider, customCliProfiles, modelCatalog])
+    return getProviderAliasModelOptions(profile?.settings_json)
+  }, [selectedProvider, customCliProfiles, modelCatalog, customClaudeModels])
 
   const codexModelOptions = useMemo(
     () =>
@@ -423,9 +418,15 @@ export function useToolbarDerivedState({
     ? fastInfo.baseModel
     : effectiveSelectedModel
 
-  const matchedModelLabel = filteredModelOptions.find(
-    option => option.value === labelLookupKey
-  )?.label
+  // A custom provider lists only the opus/sonnet/haiku aliases, but the
+  // session can hold a full Claude id (the default `claude-opus-5-5`).
+  // Show its short name instead of the raw id.
+  const matchedModelLabel =
+    filteredModelOptions.find(option => option.value === labelLookupKey)
+      ?.label ??
+    (selectedBackend === 'claude'
+      ? formatClaudeModelIdLabel(labelLookupKey)
+      : undefined)
   const grokShortLabel = formatGrokPromptModelLabel(labelLookupKey)
   const selectedModelLabel = !isGrok
     ? (matchedModelLabel ?? labelLookupKey)

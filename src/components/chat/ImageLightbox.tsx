@@ -1,14 +1,13 @@
-import { useState, useCallback } from 'react'
-import { convertFileSrc, convertServerFileSrc } from '@/lib/transport'
+import { convertServerFileSrc } from '@/lib/transport'
 import {
-  Dialog,
   DialogContent,
   DialogDescription,
   DialogTitle,
 } from '@/components/ui/dialog'
 import { MessageThreadContextMenu } from './message-thread-context-menu'
-import { ZoomableImage } from '@/components/ui/zoomable-image'
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden'
+import { ZoomableImage } from '@/components/ui/zoomable-image'
+import { usePreviewStore } from '@/store/preview-store'
 
 interface ImageLightboxProps {
   /** File path to the image */
@@ -19,10 +18,34 @@ interface ImageLightboxProps {
   thumbnailClassName?: string
   /** Optional wrapper className */
   className?: string
-  /** Owning remote server for persisted attachment paths. */
-  serverId?: string
+  /** Server that owns the image file; `undefined` means the active transport. */
+  serverId: string | undefined
   /** Children to render as the clickable thumbnail (if not using default img) */
   children?: React.ReactNode
+}
+
+function ImageLightboxContent({ src, alt }: { src: string; alt: string }) {
+  return (
+    <DialogContent
+      className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-fit sm:max-h-[85vh] sm:!top-[7.5vh] sm:!bottom-auto sm:!rounded-lg sm:p-4 bg-background/95"
+      showCloseButton={true}
+    >
+      <VisuallyHidden>
+        <DialogTitle>Image Preview</DialogTitle>
+        <DialogDescription>Preview of image: {alt}</DialogDescription>
+      </VisuallyHidden>
+      <ZoomableImage className="h-full sm:h-auto">
+        <MessageThreadContextMenu>
+          <img
+            src={src}
+            alt={alt}
+            draggable={false}
+            className="max-w-full max-h-[calc(85vh-4rem)] object-contain rounded-md"
+          />
+        </MessageThreadContextMenu>
+      </ZoomableImage>
+    </DialogContent>
+  )
 }
 
 /**
@@ -36,55 +59,27 @@ export function ImageLightbox({
   serverId,
   children,
 }: ImageLightboxProps) {
-  const [isOpen, setIsOpen] = useState(false)
-
-  const handleOpen = useCallback(() => {
-    setIsOpen(true)
-  }, [])
-
-  const assetSrc = serverId
-    ? convertServerFileSrc(serverId, src)
-    : convertFileSrc(src)
+  const assetSrc = convertServerFileSrc(serverId, src)
 
   return (
-    <>
-      <button
-        type="button"
-        onClick={handleOpen}
-        className={`cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 rounded-md ${className ?? ''}`}
-      >
-        {children ?? (
-          <img
-            src={assetSrc}
-            alt={alt}
-            className={thumbnailClassName}
-            loading="lazy"
-            decoding="async"
-          />
-        )}
-      </button>
-
-      <Dialog open={isOpen} onOpenChange={setIsOpen}>
-        <DialogContent
-          className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none p-0 sm:!w-[calc(100vw-4rem)] sm:!max-w-[calc(100vw-4rem)] sm:!h-auto sm:max-h-[85vh] sm:!rounded-lg sm:p-4 bg-background/95"
-          showCloseButton={true}
-        >
-          <VisuallyHidden>
-            <DialogTitle>Image Preview</DialogTitle>
-            <DialogDescription>Preview of image: {alt}</DialogDescription>
-          </VisuallyHidden>
-          <MessageThreadContextMenu>
-            <ZoomableImage className="h-[calc(100dvh-4rem)] w-full sm:h-[calc(85vh-4rem)]">
-              <img
-                src={assetSrc}
-                alt={alt}
-                draggable={false}
-                className="max-w-full max-h-full object-contain rounded-md mx-auto"
-              />
-            </ZoomableImage>
-          </MessageThreadContextMenu>
-        </DialogContent>
-      </Dialog>
-    </>
+    <button
+      type="button"
+      onClick={() =>
+        usePreviewStore
+          .getState()
+          .openPreview(<ImageLightboxContent src={assetSrc} alt={alt} />)
+      }
+      className={`cursor-pointer focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 rounded-md ${className ?? ''}`}
+    >
+      {children ?? (
+        <img
+          src={assetSrc}
+          alt={alt}
+          className={thumbnailClassName}
+          loading="lazy"
+          decoding="async"
+        />
+      )}
+    </button>
   )
 }

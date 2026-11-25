@@ -4,6 +4,7 @@ import { WorkingWaveform } from '@/components/ui/status-indicator'
 import { toast } from 'sonner'
 import { Markdown } from '@/components/ui/markdown'
 import type {
+  ChatMessage,
   ToolCall,
   ContentBlock,
   Question,
@@ -35,17 +36,16 @@ import {
 } from './tool-call-utils'
 import { ToolCallsDisplay } from './ToolCallsDisplay'
 import { PlanDisplay } from './PlanFileDisplay'
-import { EditedFilesDisplay } from './EditedFilesDisplay'
-import { parseServerResourceKey } from '@/lib/server-resource'
 import { ThinkingBlock } from './ThinkingBlock'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { logger } from '@/lib/logger'
 import { MessageThreadContextMenu } from './message-thread-context-menu'
 
 function WorkingVisualRow() {
   return (
-    <div className="rounded-md border border-border/50 bg-muted/30 min-w-0">
+    <div className="min-w-0">
       <div className={TOOL_CALL_ROW_CLASS}>
         <Activity className="h-3.5 w-3.5 shrink-0 opacity-70" />
         <span className="font-medium shrink-0 flex-none whitespace-nowrap">
@@ -87,10 +87,8 @@ interface StreamingMessageProps {
   ) => QuestionAnswer[] | undefined
   /** Check if questions are being skipped for this session */
   areQuestionsSkipped: (sessionId: string) => boolean
-  /** Callback to copy a steered user prompt */
-  onCopySteeredText?: (text: string) => void
-  /** Hide the edited-files summary when a compact parent renders it outside. */
-  hideEditedFiles?: boolean
+  /** Prompt that started this turn; steered prompts show its settings */
+  turnPrompt?: ChatMessage
 }
 
 /**
@@ -109,10 +107,9 @@ export const StreamingMessage = memo(function StreamingMessage({
   isQuestionAnswered,
   getSubmittedAnswers,
   areQuestionsSkipped,
-  onCopySteeredText,
-  hideEditedFiles = false,
+  turnPrompt,
 }: StreamingMessageProps) {
-  const ownerServerId = parseServerResourceKey(sessionId)?.serverId
+  const serverId = parseServerResourceKey(sessionId)?.serverId
   const displayBlocks = useMemo(
     () => restoreOmittedStreamingPrefix(streamingContent, contentBlocks),
     [streamingContent, contentBlocks]
@@ -310,8 +307,9 @@ export const StreamingMessage = memo(function StreamingMessage({
                                     return (
                                       <SteeredPromptGroup
                                         texts={item.texts}
+                                        settings={turnPrompt}
                                         worktreePath={worktreePath}
-                                        onCopyText={onCopySteeredText}
+                                        serverId={serverId}
                                       />
                                     )
                                   case 'task':
@@ -423,6 +421,7 @@ export const StreamingMessage = memo(function StreamingMessage({
                                         ) : planFilePath ? (
                                           <PlanDisplay
                                             filePath={planFilePath}
+                                            sessionId={sessionId}
                                             defaultCollapsed={false}
                                           />
                                         ) : null}
@@ -494,15 +493,6 @@ export const StreamingMessage = memo(function StreamingMessage({
                 resolvedPlan.content
               ) && <Markdown streaming>{streamingContent}</Markdown>}
           </>
-        )}
-
-        {/* Show edited files during streaming */}
-        {!hideEditedFiles && (
-          <EditedFilesDisplay
-            toolCalls={toolCalls}
-            worktreePath={worktreePath}
-            serverId={ownerServerId === 'local' ? undefined : ownerServerId}
-          />
         )}
       </div>
     </MessageThreadContextMenu>

@@ -17,6 +17,7 @@ import {
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { COMPOSER_TAB_CLASS } from './composer-surface'
 
 /** Column names of a markdown table: pinned card title when it has no heading. */
 export function pinnedTableTitle(markdown: string): string {
@@ -73,7 +74,7 @@ export function PinnedTablesButton({
             type="button"
             onClick={() => setOpen(true)}
             aria-label={`Pinned tables (${count})`}
-            className="flex h-6 items-center gap-1 rounded-t-md border border-b-0 border-border bg-card px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className={COMPOSER_TAB_CLASS}
           >
             <Thumbtack className="h-3.5 w-3.5" />
             <span>{count}</span>
@@ -82,7 +83,7 @@ export function PinnedTablesButton({
         <TooltipContent>Pinned tables</TooltipContent>
       </Tooltip>
       <Dialog open={isOpen} onOpenChange={setOpen}>
-        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none !px-2 sm:!px-6 sm:!top-[calc(50%+1rem)] sm:!h-[calc(100dvh-2rem)] sm:!border-x-0 sm:!border-b-0 flex flex-col">
+        <DialogContent className="!w-screen !h-dvh !max-w-screen !max-h-none !rounded-none !px-2 sm:!px-6 sm:!top-8 sm:!h-[calc(100dvh-2rem)] sm:!border-x-0 sm:!border-b-0 flex flex-col">
           <DialogHeader className="text-left pl-2 pr-10 sm:pl-0">
             <DialogTitle className="flex items-center gap-2">
               <Thumbtack className="h-4 w-4" />

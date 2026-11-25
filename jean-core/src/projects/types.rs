@@ -33,6 +33,10 @@ pub struct ProjectServer {
     /// Private key for `ssh -i` (None = ssh config / agent defaults)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_file: Option<String>,
+    /// Forward the local SSH agent (`ssh -A`), so commands on the host can
+    /// use local keys (for example `git pull` over SSH)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forward_agent: bool,
     /// Legacy: set on old copies of Jean remote connections, which the app now
     /// deletes (a jean-server shows its own local entry instead)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,8 +70,9 @@ impl ProjectServer {
             Some(port) if port != 22 => format!(" -p {port}"),
             _ => String::new(),
         };
+        let forward_agent = if self.forward_agent { " -A" } else { "" };
         format!(
-            "ssh -o BatchMode=yes{identity}{port} {}",
+            "ssh -o BatchMode=yes{forward_agent}{identity}{port} {}",
             self.destination()
         )
     }
@@ -458,7 +463,8 @@ pub struct Worktree {
     /// Legacy single-label field. Deserialized for migration; never serialized.
     #[serde(default, skip_serializing)]
     pub label: Option<LabelData>,
-    /// Unix timestamp when worktree was archived (None = not archived)
+    /// Set by older Jean versions that could archive worktrees. Such worktrees are
+    /// hidden and purged by `cleanup_deleted_items`; nothing sets this any more.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
     /// Unix timestamp when worktree was last opened/viewed by the user
@@ -551,6 +557,38 @@ impl ProjectsData {
         self.worktrees
             .iter()
             .find(|w| w.project_id == project_id && w.session_type == SessionType::Base)
+    }
+
+    /// Give every project with an existing checkout exactly one active base
+    /// session: unarchive a legacy archived base, and add a record when the
+    /// project has none. Returns `(project_id, worktree_id)` of added records.
+    pub fn ensure_base_sessions(
+        &mut self,
+        path_exists: impl Fn(&str) -> bool,
+        mut new_id: impl FnMut() -> String,
+        created_at: u64,
+    ) -> Vec<(String, String)> {
+        for worktree in &mut self.worktrees {
+            if worktree.session_type == SessionType::Base {
+                worktree.archived_at = None;
+            }
+        }
+        let missing: Vec<Project> = self
+            .projects
+            .iter()
+            .filter(|p| !p.is_folder && path_exists(&p.path))
+            .filter(|p| self.find_base_session(&p.id).is_none())
+            .cloned()
+            .collect();
+        missing
+            .iter()
+            .map(|project| {
+                let base = Worktree::new_base(project, new_id(), created_at);
+                let added = (project.id.clone(), base.id.clone());
+                self.add_worktree(base);
+                added
+            })
+            .collect()
     }
 
     // =========================================================================
@@ -763,26 +801,6 @@ pub struct WorktreeDeleteErrorEvent {
     pub error: String,
 }
 
-// =============================================================================
-// Worktree Archive Events (for archive/unarchive operations)
-// =============================================================================
-
-/// Event emitted when worktree is archived
-#[derive(Clone, Serialize)]
-pub struct WorktreeArchivedEvent {
-    /// The worktree ID that was archived
-    pub id: String,
-    /// The project ID
-    pub project_id: String,
-}
-
-/// Event emitted when worktree is unarchived (restored)
-#[derive(Clone, Serialize)]
-pub struct WorktreeUnarchivedEvent {
-    /// The restored worktree
-    pub worktree: Worktree,
-}
-
 /// Event emitted when worktree is permanently deleted
 #[derive(Clone, Serialize)]
 pub struct WorktreePermanentlyDeletedEvent {
@@ -803,10 +821,6 @@ pub struct WorktreePathExistsEvent {
     pub path: String,
     /// Suggested alternative name (with incremented suffix)
     pub suggested_name: String,
-    /// If the path matches an archived worktree, its ID (for restore option)
-    pub archived_worktree_id: Option<String>,
-    /// Name of the archived worktree (for display)
-    pub archived_worktree_name: Option<String>,
     /// Issue context to use when creating a new worktree with the suggested name
     pub issue_context: Option<super::github_issues::IssueContext>,
     /// PR context to use when creating a new worktree with the suggested name
@@ -843,6 +857,54 @@ pub struct WorktreeBranchExistsEvent {
 }
 
 impl Worktree {
+    /// Base session record for a project: it uses the project's own checkout,
+    /// so no git worktree exists for it. Always first in the list.
+    pub fn new_base(project: &Project, id: String, created_at: u64) -> Self {
+        Worktree {
+            id,
+            project_id: project.id.clone(),
+            name: project.default_branch.clone(),
+            path: project.path.clone(), // Uses project's base directory directly
+            branch: project.default_branch.clone(),
+            base_branch: None,
+            base_remote: None,
+            created_at,
+            setup_output: None,
+            setup_script: None,
+            setup_success: None,
+            session_type: SessionType::Base,
+            pr_number: None,
+            pr_url: None,
+            issue_number: None,
+            linear_issue_identifier: None,
+            security_alert_number: None,
+            security_alert_url: None,
+            advisory_ghsa_id: None,
+            advisory_url: None,
+            cached_pr_status: None,
+            cached_check_status: None,
+            cached_behind_count: None,
+            cached_ahead_count: None,
+            cached_status_at: None,
+            cached_uncommitted_added: None,
+            cached_uncommitted_removed: None,
+            cached_branch_diff_added: None,
+            cached_branch_diff_removed: None,
+            cached_base_branch_ahead_count: None,
+            cached_base_branch_behind_count: None,
+            cached_worktree_ahead_count: None,
+            cached_unpushed_count: None,
+            pr_push_remote: None,
+            pr_push_branch: None,
+            order: 0, // Base sessions are always first
+            origin: None,
+            archived_at: None,
+            labels: Vec::new(),
+            label: None,
+            last_opened_at: None,
+        }
+    }
+
     /// Normalize legacy single-label worktrees into the multi-label field.
     pub fn normalize_labels(&mut self) {
         if self.labels.is_empty() {
@@ -868,8 +930,6 @@ mod tests {
             project_id: "project".to_string(),
             path: "/tmp/jean/main".to_string(),
             suggested_name: "main-2".to_string(),
-            archived_worktree_id: None,
-            archived_worktree_name: None,
             issue_context: None,
             pr_context: Some(PullRequestContext {
                 number: 396,
@@ -1038,8 +1098,6 @@ mod label_tests {
             project_id: "project".to_string(),
             path: "/tmp/existing".to_string(),
             suggested_name: "issue-1-abcd".to_string(),
-            archived_worktree_id: None,
-            archived_worktree_name: None,
             issue_context: None,
             pr_context: None,
             security_context: None,
