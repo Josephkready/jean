@@ -818,8 +818,9 @@ configurable). There is no restore UI. The persisted `archived_at` field on a
 session keeps its old name and now means "deleted at". `cleanup_deleted_items`
 in `jean-core/src/projects/commands.rs` purges expired sessions. The backend
 runs it at startup and every 24 hours from `initialize_runtime` in
-`jean-core/src/lib.rs`. Worktrees archived by an older Jean release are purged
-30 days after their archive time. Closing a worktree deletes the git worktree
+`jean-core/src/lib.rs`. Worktrees archived by an older Jean release are kept
+on disk but stay hidden (fork behavior). Sessions of a base session that an
+older release closed are restored as live sessions. Closing a worktree deletes the git worktree
 and its branch immediately.
 
 ## Performance Patterns

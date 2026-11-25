@@ -1313,6 +1313,12 @@ pub fn restore_base_sessions(
     // Update the worktree_id to the new one
     index.worktree_id = new_worktree_id.to_string();
 
+    // Closing the base archived its sessions. `archived_at` now means "deleted
+    // at", so a kept value would hide and then purge them (PR #69).
+    for entry in &mut index.sessions {
+        entry.archived_at = None;
+    }
+
     // Save to the new location
     save_index_internal(app, &index)?;
 
@@ -1323,6 +1329,7 @@ pub fn restore_base_sessions(
         if let Some(mut metadata) = load_metadata_internal(app, &entry.id)? {
             let prior = metadata.run_state_stamp();
             metadata.worktree_id = new_worktree_id.to_string();
+            metadata.archived_at = None;
             save_metadata_internal(app, &metadata, Some(prior))?;
         }
     }
